@@ -48,5 +48,15 @@ yarn-error.log*
 .coverage
 htmlcov/
 
+# TypeScript
+*.tsbuildinfo
 
+# Vercel
+.vercel/
+
+# Turbo
+.turbo/
+
+# Test coverage
+coverage/
 
