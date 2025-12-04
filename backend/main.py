@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import openai
@@ -8,6 +9,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import json
 from pathlib import Path
+import io
 
 # Load .env from backend directory (where this script is located)
 # Get the directory where this script is located
@@ -90,20 +92,34 @@ class MessageRequest(BaseModel):
     message: str
     urgency: str = "normal"
 
+class TTSRequest(BaseModel):
+    text: str
+    voice: Optional[str] = "nova"  # nova, alloy, echo, fable, onyx, shimmer
+
 def get_system_prompt():
     return f"""You are an AI voice receptionist for {BUSINESS_INFO['name']}. 
+
+IMPORTANT: You're speaking out loud, not writing. Be POSITIVE, UPBEAT, and ENTHUSIASTIC!
+- Speak like a warm, friendly human who LOVES helping people - not a robot!
+- Show genuine excitement and enthusiasm in your responses!
+- Use contractions (I'm, you're, that's, we'll, I'd love to)
+- Add natural warmth with phrases like: "absolutely!", "wonderful!", "I'd be happy to!", "that's great!"
+- Keep sentences short, natural, and energetic
+- Vary your sentence structure
+- Sound genuinely happy and eager to assist
+
 Your role is to:
-1. Greet callers warmly and professionally
-2. Answer questions about the business (hours: {BUSINESS_INFO['hours']}, phone: {BUSINESS_INFO['phone']})
-3. Schedule appointments when requested
-4. Take messages for staff members
-5. Route calls to appropriate departments: {', '.join(BUSINESS_INFO['departments'])}
-6. Be helpful, concise, and professional
+1. Greet callers with warmth and genuine enthusiasm!
+2. Answer questions about the business (hours: {BUSINESS_INFO['hours']}, phone: {BUSINESS_INFO['phone']}) with positivity
+3. Schedule appointments with excitement and care
+4. Take messages for staff members warmly
+5. Route calls to appropriate departments: {', '.join(BUSINESS_INFO['departments'])} with helpfulness
+6. Be upbeat, personable, and make callers feel valued!
 
-When scheduling an appointment, collect: name, email, phone, preferred date/time, and reason.
-When taking a message, collect: caller name, phone number, message content, and urgency level.
+When scheduling an appointment, collect: name, email, phone, preferred date/time, and reason - do this warmly and enthusiastically.
+When taking a message, collect: caller name, phone number, message content, and urgency level - show you care.
 
-Keep responses natural and conversational, suitable for voice interaction. Be brief but friendly."""
+Speak naturally as if you're having a real conversation with someone you're genuinely excited to help! Be brief, warm, enthusiastic, and human. Make every caller feel welcome and valued!"""
 
 @app.get("/")
 async def root():
@@ -202,6 +218,38 @@ async def get_stats():
         "total_messages": len(messages),
         "pending_appointments": len([a for a in appointments if a["status"] == "pending"])
     }
+
+@app.post("/api/text-to-speech")
+async def text_to_speech(request: TTSRequest):
+    """
+    Convert text to speech using OpenAI's TTS API.
+    Returns audio file as streaming response.
+    Available voices: alloy, echo, fable, onyx, nova, shimmer
+    """
+    try:
+        # Generate speech using OpenAI TTS HD model for maximum quality
+        response = client.audio.speech.create(
+            model="tts-1-hd",  # HD model for most natural, human-like quality
+            voice=request.voice,
+            input=request.text,
+            speed=1.15  # Faster for energetic, efficient conversation (range: 0.25 to 4.0)
+        )
+        
+        # Convert response to bytes
+        audio_bytes = io.BytesIO(response.content)
+        audio_bytes.seek(0)
+        
+        # Return as streaming audio
+        return StreamingResponse(
+            audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3"
+            }
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

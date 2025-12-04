@@ -20,7 +20,12 @@ export default function VoiceReceptionist() {
   const [sessionId] = useState(() => `session-${Date.now()}`)
   
   const recognitionRef = useRef<SpeechRecognition | null>(null)
-  const synthesisRef = useRef<SpeechSynthesis | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const isSpeakingRef = useRef<boolean>(false)
+  const shouldRestartListeningRef = useRef<boolean>(false)
+  const isRecognitionActiveRef = useRef<boolean>(false)
+  const [selectedVoice, setSelectedVoice] = useState<string>('nova') // OpenAI voice: alloy, echo, fable, onyx, nova, shimmer
+
 
   useEffect(() => {
     // Initialize Web Speech API
@@ -40,27 +45,54 @@ export default function VoiceReceptionist() {
         recognitionRef.current.onerror = (event: any) => {
           console.error('Speech recognition error:', event.error)
           setIsListening(false)
+          isRecognitionActiveRef.current = false
+        }
+
+        recognitionRef.current.onstart = () => {
+          isRecognitionActiveRef.current = true
         }
 
         recognitionRef.current.onend = () => {
-          if (isCallActive && isListening) {
-            recognitionRef.current?.start()
-          }
+          isRecognitionActiveRef.current = false
+          // Only restart if call is active, not listening (waiting for speech), and not currently speaking
+          // Don't restart here - let speakText handle it after speech completes
         }
       }
 
-      synthesisRef.current = window.speechSynthesis
+      // Initialize audio element for TTS playback
+      audioRef.current = new Audio()
+      audioRef.current.onended = () => {
+        isSpeakingRef.current = false
+        // Wait a moment after speech completes, then restart listening
+        setTimeout(() => {
+          if (shouldRestartListeningRef.current && !isRecognitionActiveRef.current) {
+            shouldRestartListeningRef.current = false
+            setIsListening(true)
+            try {
+              recognitionRef.current?.start()
+            } catch (error) {
+              console.log('Recognition start skipped (already active)')
+            }
+          }
+        }, 300)
+      }
+      
+      audioRef.current.onerror = (e) => {
+        console.error('Audio playback error:', e)
+        isSpeakingRef.current = false
+      }
     }
 
     return () => {
       if (recognitionRef.current) {
         recognitionRef.current.stop()
       }
-      if (synthesisRef.current) {
-        synthesisRef.current.cancel()
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.src = ''
       }
     }
-  }, [isCallActive, isListening])
+  }, [isCallActive])
 
   const handleUserMessage = async (text: string) => {
     if (!text.trim()) return
@@ -74,6 +106,11 @@ export default function VoiceReceptionist() {
     setMessages(prev => [...prev, userMessage])
     setIsProcessing(true)
     setIsListening(false)
+    if (recognitionRef.current && isRecognitionActiveRef.current) {
+      recognitionRef.current.stop()
+      isRecognitionActiveRef.current = false
+    }
+    shouldRestartListeningRef.current = true
 
     try {
       const conversationHistory = messages.map(m => ({
@@ -94,7 +131,9 @@ export default function VoiceReceptionist() {
       }
 
       setMessages(prev => [...prev, aiMessage])
-      speakText(response.data.response)
+      
+      // Speak the response and wait for it to complete before restarting listening
+      await speakText(response.data.response)
 
       // Handle actions
       if (response.data.action === 'schedule_appointment') {
@@ -105,59 +144,108 @@ export default function VoiceReceptionist() {
       console.error('Error:', error)
       const errorMessage: Message = {
         role: 'assistant',
-        content: "I'm sorry, I encountered an error. Please try again.",
+        content: "Oh no, I'm so sorry about that! I had a little technical hiccup. No worries though - let's try that again! I'm here to help!",
         timestamp: new Date()
       }
       setMessages(prev => [...prev, errorMessage])
-      speakText(errorMessage.content)
+      await speakText(errorMessage.content)
     } finally {
       setIsProcessing(false)
-      if (isCallActive) {
-        setTimeout(() => setIsListening(true), 500)
+    }
+  }
+
+  const speakText = async (text: string): Promise<void> => {
+    try {
+      if (!audioRef.current) {
+        console.error('Audio element not initialized')
+        return
       }
+
+      // Stop any ongoing speech
+      if (isSpeakingRef.current) {
+        audioRef.current.pause()
+        audioRef.current.src = ''
+      }
+
+      isSpeakingRef.current = true
+
+      // Call backend TTS endpoint
+      const response = await axios.post(
+        `${API_URL}/api/text-to-speech`,
+        {
+          text: text,
+          voice: selectedVoice
+        },
+        {
+          responseType: 'blob'
+        }
+      )
+
+      // Create audio URL from blob
+      const audioBlob = new Blob([response.data], { type: 'audio/mpeg' })
+      const audioUrl = URL.createObjectURL(audioBlob)
+
+      // Play audio
+      audioRef.current.src = audioUrl
+      await audioRef.current.play()
+
+      // Note: Audio onended handler will handle restarting listening
+    } catch (error) {
+      console.error('TTS error:', error)
+      isSpeakingRef.current = false
+      
+      // Restart listening even if TTS fails
+      setTimeout(() => {
+        if (shouldRestartListeningRef.current && !isRecognitionActiveRef.current) {
+          shouldRestartListeningRef.current = false
+          setIsListening(true)
+          try {
+            recognitionRef.current?.start()
+          } catch (e) {
+            console.log('Recognition start skipped')
+          }
+        }
+      }, 300)
     }
   }
 
-  const speakText = (text: string) => {
-    if (synthesisRef.current) {
-      synthesisRef.current.cancel()
-      const utterance = new SpeechSynthesisUtterance(text)
-      utterance.rate = 0.9
-      utterance.pitch = 1.0
-      utterance.volume = 1.0
-      synthesisRef.current.speak(utterance)
-    }
-  }
-
-  const startCall = () => {
+  const startCall = async () => {
     setIsCallActive(true)
     setMessages([])
+    shouldRestartListeningRef.current = true
     
-    // Initial greeting
+    // Initial greeting - upbeat, warm, and enthusiastic
     const greeting: Message = {
       role: 'assistant',
-      content: "Hello! Thank you for calling. This is your AI receptionist. How may I assist you today?",
+      content: "Hi there! Thanks so much for calling! I'm really excited to help you today! What can I do for you?",
       timestamp: new Date()
     }
     setMessages([greeting])
-    speakText(greeting.content)
-
-    // Start listening after greeting
-    setTimeout(() => {
-      setIsListening(true)
-      recognitionRef.current?.start()
-    }, 2000)
+    
+    // Speak greeting and wait for it to complete before starting to listen
+    await speakText(greeting.content)
   }
 
   const endCall = () => {
     setIsCallActive(false)
     setIsListening(false)
-    recognitionRef.current?.stop()
-    synthesisRef.current?.cancel()
+    shouldRestartListeningRef.current = false
+    
+    if (recognitionRef.current && isRecognitionActiveRef.current) {
+      recognitionRef.current.stop()
+      isRecognitionActiveRef.current = false
+    }
+    
+    // Stop any ongoing speech
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.src = ''
+    }
+    isSpeakingRef.current = false
     
     const closing: Message = {
       role: 'assistant',
-      content: "Thank you for calling. Have a great day!",
+      content: "Thanks so much for calling! It was wonderful talking with you! Have an absolutely amazing day!",
       timestamp: new Date()
     }
     setMessages(prev => [...prev, closing])
@@ -165,11 +253,20 @@ export default function VoiceReceptionist() {
 
   const toggleListening = () => {
     if (isListening) {
-      recognitionRef.current?.stop()
+      if (recognitionRef.current && isRecognitionActiveRef.current) {
+        recognitionRef.current.stop()
+        isRecognitionActiveRef.current = false
+      }
       setIsListening(false)
     } else {
-      recognitionRef.current?.start()
-      setIsListening(true)
+      if (recognitionRef.current && !isRecognitionActiveRef.current) {
+        try {
+          recognitionRef.current.start()
+          setIsListening(true)
+        } catch (error) {
+          console.log('Recognition start skipped (already active)')
+        }
+      }
     }
   }
 
@@ -283,6 +380,32 @@ export default function VoiceReceptionist() {
           )}
         </div>
 
+        {/* Voice Selection */}
+        {!isCallActive && (
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-4">
+            <h3 className="font-semibold text-purple-900 mb-3">Voice Settings:</h3>
+            <div className="flex flex-wrap gap-2">
+              {['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'].map((voice) => (
+                <button
+                  key={voice}
+                  onClick={() => setSelectedVoice(voice)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    selectedVoice === voice
+                      ? 'bg-purple-600 text-white shadow-md'
+                      : 'bg-white text-purple-700 hover:bg-purple-100 border border-purple-300'
+                  }`}
+                >
+                  {voice.charAt(0).toUpperCase() + voice.slice(1)}
+                  {voice === 'nova' && ' ⭐'}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-purple-700 mt-2">
+              ⭐ Nova is recommended for natural, warm conversations
+            </p>
+          </div>
+        )}
+
         {/* Instructions */}
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <h3 className="font-semibold text-blue-900 mb-2">How it works:</h3>
@@ -291,6 +414,7 @@ export default function VoiceReceptionist() {
             <li>Speak naturally - the AI will understand and respond</li>
             <li>The receptionist can schedule appointments, take messages, and answer questions</li>
             <li>Use "Mute" to temporarily stop listening</li>
+            <li>Powered by OpenAI for ultra-realistic voice quality</li>
           </ul>
         </div>
       </div>
