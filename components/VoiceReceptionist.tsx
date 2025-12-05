@@ -24,6 +24,8 @@ export default function VoiceReceptionist() {
   const isSpeakingRef = useRef<boolean>(false)
   const shouldRestartListeningRef = useRef<boolean>(false)
   const isRecognitionActiveRef = useRef<boolean>(false)
+  const currentAudioUrlRef = useRef<string | null>(null)
+  const listeningStartedResolveRef = useRef<(() => void) | null>(null)
   const [selectedVoice, setSelectedVoice] = useState<string>('nova') // OpenAI voice: alloy, echo, fable, onyx, nova, shimmer
 
 
@@ -50,6 +52,11 @@ export default function VoiceReceptionist() {
 
         recognitionRef.current.onstart = () => {
           isRecognitionActiveRef.current = true
+          // Bug 2 fix: Resolve promise if waiting for listening to start
+          if (listeningStartedResolveRef.current) {
+            listeningStartedResolveRef.current()
+            listeningStartedResolveRef.current = null
+          }
         }
 
         recognitionRef.current.onend = () => {
@@ -90,6 +97,11 @@ export default function VoiceReceptionist() {
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current.src = ''
+      }
+      // Bug 1 fix: Revoke object URL on cleanup
+      if (currentAudioUrlRef.current) {
+        URL.revokeObjectURL(currentAudioUrlRef.current)
+        currentAudioUrlRef.current = null
       }
     }
   }, [isCallActive])
@@ -167,6 +179,12 @@ export default function VoiceReceptionist() {
         audioRef.current.src = ''
       }
 
+      // Bug 1 fix: Revoke previous object URL before creating new one
+      if (currentAudioUrlRef.current) {
+        URL.revokeObjectURL(currentAudioUrlRef.current)
+        currentAudioUrlRef.current = null
+      }
+
       isSpeakingRef.current = true
 
       // Call backend TTS endpoint
@@ -184,15 +202,34 @@ export default function VoiceReceptionist() {
       // Create audio URL from blob
       const audioBlob = new Blob([response.data], { type: 'audio/mpeg' })
       const audioUrl = URL.createObjectURL(audioBlob)
+      currentAudioUrlRef.current = audioUrl // Bug 1 fix: Store URL for later revocation
 
       // Play audio
       audioRef.current.src = audioUrl
       await audioRef.current.play()
 
-      // Note: Audio onended handler will handle restarting listening
+      // Bug 2 fix: Wait for listening to actually start before resolving
+      if (shouldRestartListeningRef.current && !isRecognitionActiveRef.current) {
+        return new Promise<void>((resolve) => {
+          listeningStartedResolveRef.current = resolve
+          // Set a timeout in case recognition never starts
+          setTimeout(() => {
+            if (listeningStartedResolveRef.current) {
+              listeningStartedResolveRef.current = null
+              resolve()
+            }
+          }, 1000) // 1 second timeout
+        })
+      }
     } catch (error) {
       console.error('TTS error:', error)
       isSpeakingRef.current = false
+      
+      // Bug 1 fix: Revoke URL on error
+      if (currentAudioUrlRef.current) {
+        URL.revokeObjectURL(currentAudioUrlRef.current)
+        currentAudioUrlRef.current = null
+      }
       
       // Restart listening even if TTS fails
       setTimeout(() => {
@@ -240,6 +277,11 @@ export default function VoiceReceptionist() {
     if (audioRef.current) {
       audioRef.current.pause()
       audioRef.current.src = ''
+    }
+    // Bug 1 fix: Revoke object URL when ending call
+    if (currentAudioUrlRef.current) {
+      URL.revokeObjectURL(currentAudioUrlRef.current)
+      currentAudioUrlRef.current = null
     }
     isSpeakingRef.current = false
     
@@ -396,12 +438,12 @@ export default function VoiceReceptionist() {
                   }`}
                 >
                   {voice.charAt(0).toUpperCase() + voice.slice(1)}
-                  {voice === 'nova' && ' ‚≠ê'}
+                  {voice === 'nova' && ' G°…'}
                 </button>
               ))}
             </div>
             <p className="text-xs text-purple-700 mt-2">
-              ‚≠ê Nova is recommended for natural, warm conversations
+              G°… Nova is recommended for natural, warm conversations
             </p>
           </div>
         )}
