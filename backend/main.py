@@ -123,29 +123,8 @@ class TTSRequest(BaseModel):
     voice: Optional[str] = "nova"  # nova, alloy, echo, fable, onyx, shimmer
 
 def get_system_prompt():
-    return f"""You are an AI voice receptionist for {BUSINESS_INFO['name']}. 
-
-IMPORTANT: You're speaking out loud, not writing. Be POSITIVE, UPBEAT, and ENTHUSIASTIC!
-- Speak like a warm, friendly human who LOVES helping people - not a robot!
-- Show genuine excitement and enthusiasm in your responses!
-- Use contractions (I'm, you're, that's, we'll, I'd love to)
-- Add natural warmth with phrases like: "absolutely!", "wonderful!", "I'd be happy to!", "that's great!"
-- Keep sentences short, natural, and energetic
-- Vary your sentence structure
-- Sound genuinely happy and eager to assist
-
-Your role is to:
-1. Greet callers with warmth and genuine enthusiasm!
-2. Answer questions about the business (hours: {BUSINESS_INFO['hours']}, phone: {BUSINESS_INFO['phone']}) with positivity
-3. Schedule appointments with excitement and care
-4. Take messages for staff members warmly
-5. Route calls to appropriate departments: {', '.join(BUSINESS_INFO['departments'])} with helpfulness
-6. Be upbeat, personable, and make callers feel valued!
-
-When scheduling an appointment, collect: name, email, phone, preferred date/time, and reason - do this warmly and enthusiastically.
-When taking a message, collect: caller name, phone number, message content, and urgency level - show you care.
-
-Speak naturally as if you're having a real conversation with someone you're genuinely excited to help! Be brief, warm, enthusiastic, and human. Make every caller feel welcome and valued!"""
+    # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
+    return f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! Help with: questions (hours: {BUSINESS_INFO['hours']}), appointments, messages, routing to {', '.join(BUSINESS_INFO['departments'])}."""
 
 @app.get("/")
 async def root():
@@ -255,10 +234,10 @@ async def text_to_speech(request: TTSRequest):
     try:
         # Generate speech using OpenAI TTS HD model for maximum quality
         response = client.audio.speech.create(
-            model="tts-1-hd",  # HD model for most natural, human-like quality
+            model="tts-1-hd",  # HD model for smooth, natural, human-like quality
             voice=request.voice,
             input=request.text,
-            speed=1.05  # Slightly faster than normal for energetic but natural pace (range: 0.25 to 4.0)
+            speed=0.92  # Slightly slower for smooth, natural flow
         )
         
         # Convert response to bytes
@@ -393,12 +372,13 @@ async def process_speech(request: Request):
         ]
         messages.extend(call_data["conversation_history"])
         
-        # Use gpt-3.5-turbo for faster responses (still high quality, just faster)
+        # Use gpt-3.5-turbo with aggressive optimizations for ultra-fast responses
         ai_response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # Faster than gpt-4 for phone calls
+            model="gpt-3.5-turbo",  # Fastest quality model
             messages=messages,
-            temperature=0.7,
-            max_tokens=150  # Shorter responses = faster generation
+            temperature=0.8,  # Slightly higher for more natural responses
+            max_tokens=80,  # Very brief for phone - faster generation
+            stream=False
         )
         
         ai_text = ai_response.choices[0].message.content
@@ -508,13 +488,13 @@ async def get_tts_audio_for_phone(text: str, voice: str = "nova"):
     This endpoint is called by Twilio to play OpenAI TTS audio.
     """
     try:
-        # Use tts-1 (faster) instead of tts-1-hd for phone calls to reduce latency
-        # Still sounds great, just slightly faster generation
+        # Use tts-1 for faster generation while maintaining quality
+        # tts-1 is faster than tts-1-hd but still sounds natural and smooth
         response = client.audio.speech.create(
-            model="tts-1",  # Faster than tts-1-hd, still high quality
+            model="tts-1",  # Faster generation, still high quality
             voice=voice,
             input=text,
-            speed=1.05
+            speed=0.92  # Natural pace for smooth flow
         )
         
         # Convert response to bytes
