@@ -5,7 +5,9 @@ An intelligent AI-powered voice receptionist system for businesses that can hand
 ## Features
 
 - 🎤 **Voice Interaction**: Real-time speech-to-text and text-to-speech
+- 📞 **Phone Integration**: Answer real phone calls via Twilio
 - 🤖 **AI-Powered**: Uses OpenAI GPT for natural conversations
+- 🎙️ **Premium Voices**: Ultra-natural AI voices using OpenAI TTS-1-HD
 - 📅 **Appointment Scheduling**: Manage and schedule appointments
 - 💬 **Message Taking**: Record and store messages
 - 🔄 **Call Routing**: Intelligently route calls to appropriate departments
@@ -17,7 +19,9 @@ An intelligent AI-powered voice receptionist system for businesses that can hand
 - **Frontend**: Next.js 14, React, TypeScript, Tailwind CSS
 - **Backend**: Python FastAPI
 - **AI**: OpenAI GPT-4
-- **Voice**: Web Speech API (browser-based)
+- **Voice**: OpenAI TTS-1-HD (premium AI voices)
+- **Phone**: Twilio (for phone call integration)
+- **Browser Voice**: Web Speech API (for web interface)
 
 ## Setup
 
@@ -26,6 +30,7 @@ An intelligent AI-powered voice receptionist system for businesses that can hand
 - Node.js 18+ and npm
 - Python 3.9+
 - OpenAI API key
+- (Optional) Twilio account for phone integration
 
 ### Installation
 
@@ -67,6 +72,37 @@ An intelligent AI-powered voice receptionist system for businesses that can hand
    ```
    
    **Keep this terminal open!**
+
+5. **Start the frontend:**
+   
+   Open a **NEW** terminal and run:
+
+## Phone Integration
+
+To enable phone call functionality, see [PHONE-SETUP.md](./PHONE-SETUP.md) for detailed instructions on setting up Twilio integration.
+
+**Quick Start:**
+1. Sign up for a Twilio account
+2. Purchase a phone number
+3. Add Twilio credentials to `backend/.env`
+4. Configure webhooks in Twilio Console
+5. Call your number to test!
+
+## Usage
+
+### Web Interface
+
+1. Open http://localhost:3000
+2. Click "Start Call"
+3. Speak naturally - the AI will respond with premium voice quality
+
+### Phone Calls
+
+1. Set up Twilio (see PHONE-SETUP.md)
+2. Call your Twilio phone number
+3. The AI receptionist will answer and assist you
+
+## Development
 
 5. **Start the frontend:**
    

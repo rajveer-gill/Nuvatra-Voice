@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Optional, List
 import openai
@@ -10,6 +10,15 @@ from datetime import datetime
 import json
 from pathlib import Path
 import io
+from urllib.parse import quote
+# Twilio imports (optional - only needed for phone integration)
+try:
+    from twilio.twiml.voice_response import VoiceResponse
+    from twilio.rest import Client as TwilioClient
+    TWILIO_AVAILABLE = True
+except ImportError:
+    TWILIO_AVAILABLE = False
+    print("WARNING: Twilio not installed - phone features will be disabled. Install with: pip install twilio")
 
 # Load .env from backend directory (where this script is located)
 # Get the directory where this script is located
@@ -38,7 +47,7 @@ if not api_key:
         f"Make sure your .env file is in the backend directory with OPENAI_API_KEY=your_key"
     )
 else:
-    print(f"✓ API Key loaded successfully (length: {len(api_key)})")
+    print(f"API Key loaded successfully (length: {len(api_key)})")
 
 app = FastAPI(title="Nuvatra Voice API")
 
@@ -53,6 +62,23 @@ app.add_middleware(
 
 # Initialize OpenAI
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Initialize Twilio (optional - only if credentials are provided)
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+
+twilio_client = None
+if TWILIO_AVAILABLE and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+    try:
+        twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        print(f"Twilio initialized successfully")
+    except Exception as e:
+        print(f"WARNING: Twilio initialization failed: {e}")
+elif not TWILIO_AVAILABLE:
+    print("WARNING: Twilio not installed - phone features disabled. Install with: pip install twilio")
+elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+    print("WARNING: Twilio credentials not found - phone features will be disabled")
 
 # In-memory storage (replace with database in production)
 appointments = []
@@ -140,9 +166,9 @@ async def handle_conversation(request: ConversationRequest):
         # Add current message
         messages.append({"role": "user", "content": request.message})
         
-        # Call OpenAI
+        # Call OpenAI - use gpt-3.5-turbo for faster responses
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-3.5-turbo",  # Faster response time while maintaining quality
             messages=messages,
             temperature=0.7,
             max_tokens=200
@@ -232,7 +258,7 @@ async def text_to_speech(request: TTSRequest):
             model="tts-1-hd",  # HD model for most natural, human-like quality
             voice=request.voice,
             input=request.text,
-            speed=1.15  # Faster for energetic, efficient conversation (range: 0.25 to 4.0)
+            speed=1.05  # Slightly faster than normal for energetic but natural pace (range: 0.25 to 4.0)
         )
         
         # Convert response to bytes
@@ -250,6 +276,306 @@ async def text_to_speech(request: TTSRequest):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Phone call storage (in production, use a database)
+active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid}}
+
+@app.post("/api/phone/incoming")
+async def handle_incoming_call(request: Request):
+    if not TWILIO_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Twilio not installed. Install with: pip install twilio")
+    """
+    Twilio webhook for incoming phone calls.
+    This endpoint is called when someone calls your Twilio phone number.
+    """
+    try:
+        # Log the incoming request for debugging
+        print(f"Incoming call webhook received from: {request.client.host if request.client else 'unknown'}")
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        from_number = form_data.get("From")
+        to_number = form_data.get("To")
+        
+        print(f"📞 Incoming call: {from_number} -> {to_number} (CallSid: {call_sid})")
+        
+        # Create a new session for this call
+        session_id = f"phone-{call_sid}"
+        active_calls[call_sid] = {
+            "session_id": session_id,
+            "from_number": from_number,
+            "to_number": to_number,
+            "conversation_history": [],
+            "started_at": datetime.now().isoformat()
+        }
+        
+        # Create TwiML response
+        response = VoiceResponse()
+        
+        # Get base URL - use the ngrok URL from environment or construct from request
+        # For ngrok, we need to use the public URL, not localhost
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            # Fallback: try to get from request, but replace localhost with ngrok domain if present
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/incoming", "")
+            else:
+                # Default to ngrok URL format (user should set NGROK_URL env var)
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        
+        # Generate greeting with OpenAI TTS
+        greeting_text = "Hi there! Thanks so much for calling! I'm really excited to help you today! What can I do for you?"
+        
+        # Use OpenAI TTS for premium voice quality
+        # Generate audio URL that Twilio can play
+        greeting_encoded = quote(greeting_text)
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={greeting_encoded}&voice=nova"
+        response.play(tts_audio_url)
+        
+        # Gather voice input from caller
+        gather = response.gather(
+            input='speech',
+            action=f"{base_url}/api/phone/process-speech",
+            method='POST',
+            speech_timeout='auto',
+            language='en-US',
+            hints='appointment, schedule, message, hours, contact, help'
+        )
+        
+        # If no input, redirect to process speech anyway
+        response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+        
+        return Response(content=str(response), media_type="application/xml")
+    
+    except Exception as e:
+        print(f"Error handling incoming call: {e}")
+        response = VoiceResponse()
+        # Use OpenAI TTS for error message
+        error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
+        base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
+        error_encoded = quote(error_text)
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=nova"
+        response.play(tts_audio_url)
+        return Response(content=str(response), media_type="application/xml")
+
+@app.post("/api/phone/process-speech")
+async def process_speech(request: Request):
+    if not TWILIO_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Twilio not installed. Install with: pip install twilio")
+    """
+    Process speech input from phone call and generate AI response.
+    """
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        speech_result = form_data.get("SpeechResult", "")
+        confidence = form_data.get("Confidence", "0")
+        
+        print(f"🎤 Speech received: {speech_result} (confidence: {confidence})")
+        
+        if not call_sid or call_sid not in active_calls:
+            response = VoiceResponse()
+            response.say("I'm sorry, I lost track of our conversation. Please call back.", voice='alice')
+            return Response(content=str(response), media_type="application/xml")
+        
+        call_data = active_calls[call_sid]
+        
+        # Add user message to conversation
+        user_message = {
+            "role": "user",
+            "content": speech_result
+        }
+        call_data["conversation_history"].append(user_message)
+        
+        # Get AI response - use faster model for phone calls
+        messages = [
+            {"role": "system", "content": get_system_prompt()}
+        ]
+        messages.extend(call_data["conversation_history"])
+        
+        # Use gpt-3.5-turbo for faster responses (still high quality, just faster)
+        ai_response = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Faster than gpt-4 for phone calls
+            messages=messages,
+            temperature=0.7,
+            max_tokens=150  # Shorter responses = faster generation
+        )
+        
+        ai_text = ai_response.choices[0].message.content
+        
+        # Add AI response to conversation
+        ai_message = {
+            "role": "assistant",
+            "content": ai_text
+        }
+        call_data["conversation_history"].append(ai_message)
+        
+        # Create TwiML response
+        response = VoiceResponse()
+        
+        # Use OpenAI TTS for premium voice quality
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/process-speech", "")
+            else:
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        
+        # Generate audio URL for AI response using OpenAI TTS
+        ai_text_encoded = quote(ai_text)
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=nova"
+        response.play(tts_audio_url)
+        
+        # Get base URL (same logic as incoming endpoint)
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/process-speech", "")
+            else:
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        gather = response.gather(
+            input='speech',
+            action=f"{base_url}/api/phone/process-speech",
+            method='POST',
+            speech_timeout='auto',
+            language='en-US'
+        )
+        
+        # If no input, say goodbye
+        response.say("Thanks for calling! Have a wonderful day!", voice='alice')
+        response.hangup()
+        
+        return Response(content=str(response), media_type="application/xml")
+    
+    except Exception as e:
+        print(f"Error processing speech: {e}")
+        response = VoiceResponse()
+        # Use OpenAI TTS for error message too
+        error_text = "I'm sorry, I didn't catch that. Could you repeat?"
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/process-speech", "")
+            else:
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        error_encoded = quote(error_text)
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=nova"
+        response.play(tts_audio_url)
+        response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+        return Response(content=str(response), media_type="application/xml")
+
+@app.post("/api/phone/status")
+async def handle_call_status(request: Request):
+    """
+    Twilio webhook for call status updates (call ended, etc.)
+    """
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        call_status = form_data.get("CallStatus")
+        
+        print(f"📞 Call status update: {call_sid} -> {call_status}")
+        
+        # Clean up when call ends
+        if call_status in ["completed", "failed", "busy", "no-answer", "canceled"]:
+            if call_sid in active_calls:
+                del active_calls[call_sid]
+                print(f"Cleaned up call session: {call_sid}")
+        
+        return Response(content="OK", media_type="text/plain")
+    
+    except Exception as e:
+        print(f"Error handling call status: {e}")
+        return Response(content="OK", media_type="text/plain")
+
+@app.post("/api/phone/stream")
+async def handle_media_stream(request: Request):
+    """
+    WebSocket endpoint for Twilio Media Streams.
+    This handles real-time bidirectional audio streaming.
+    """
+    # This is a simplified version - full implementation requires WebSocket handling
+    # For production, you'd use a WebSocket library like 'websockets' or 'fastapi-websocket'
+    return {"message": "Media stream endpoint - requires WebSocket implementation"}
+
+@app.get("/api/phone/tts-audio")
+async def get_tts_audio_for_phone(text: str, voice: str = "nova"):
+    """
+    Generate TTS audio for phone calls.
+    This endpoint is called by Twilio to play OpenAI TTS audio.
+    """
+    try:
+        # Use tts-1 (faster) instead of tts-1-hd for phone calls to reduce latency
+        # Still sounds great, just slightly faster generation
+        response = client.audio.speech.create(
+            model="tts-1",  # Faster than tts-1-hd, still high quality
+            voice=voice,
+            input=text,
+            speed=1.05
+        )
+        
+        # Convert response to bytes
+        audio_bytes = io.BytesIO(response.content)
+        audio_bytes.seek(0)
+        
+        # Return as streaming audio
+        return StreamingResponse(
+            audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3",
+                "Cache-Control": "no-cache"
+            }
+        )
+    
+    except Exception as e:
+        print(f"TTS audio generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phone/transcribe")
+async def transcribe_phone_audio(audio_data: str = Form(...)):
+    """
+    Transcribe audio from phone call using OpenAI Whisper.
+    This endpoint receives base64-encoded audio from Twilio.
+    """
+    try:
+        # Decode base64 audio
+        audio_bytes = base64.b64decode(audio_data)
+        
+        # Save to temporary file
+        temp_file = io.BytesIO(audio_bytes)
+        temp_file.name = "audio.webm"
+        
+        # Transcribe using OpenAI Whisper
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=temp_file,
+            language="en"
+        )
+        
+        return {"transcript": transcript.text}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phone/calls")
+async def get_active_calls():
+    """Get list of active phone calls"""
+    return {
+        "active_calls": len(active_calls),
+        "calls": [
+            {
+                "call_sid": sid,
+                "from": call_data["from_number"],
+                "to": call_data["to_number"],
+                "started_at": call_data["started_at"]
+            }
+            for sid, call_data in active_calls.items()
+        ]
+    }
 
 if __name__ == "__main__":
     import uvicorn

@@ -48,14 +48,15 @@ export default function VoiceReceptionist() {
           isRecognitionActiveRef.current = false
         }
 
-        recognitionRef.current.onstart = () => {
+        // Use addEventListener for onstart (more compatible)
+        recognitionRef.current.addEventListener('start', () => {
           isRecognitionActiveRef.current = true
-        }
+        })
 
         recognitionRef.current.onend = () => {
           isRecognitionActiveRef.current = false
-          // Only restart if call is active, not listening (waiting for speech), and not currently speaking
-          // Don't restart here - let speakText handle it after speech completes
+          // Don't auto-restart here - let the audio onended handler manage it
+          // This prevents double-starting issues
         }
       }
 
@@ -63,23 +64,36 @@ export default function VoiceReceptionist() {
       audioRef.current = new Audio()
       audioRef.current.onended = () => {
         isSpeakingRef.current = false
+        // Clean up the object URL to prevent memory leaks
+        if (audioRef.current?.src) {
+          URL.revokeObjectURL(audioRef.current.src)
+        }
         // Wait a moment after speech completes, then restart listening
         setTimeout(() => {
-          if (shouldRestartListeningRef.current && !isRecognitionActiveRef.current) {
+          if (shouldRestartListeningRef.current && isCallActive && !isRecognitionActiveRef.current) {
             shouldRestartListeningRef.current = false
             setIsListening(true)
             try {
-              recognitionRef.current?.start()
-            } catch (error) {
-              console.log('Recognition start skipped (already active)')
+              if (recognitionRef.current && !isRecognitionActiveRef.current) {
+                recognitionRef.current.start()
+              }
+            } catch (error: any) {
+              // Recognition might already be starting, ignore the error
+              if (error.name !== 'InvalidStateError') {
+                console.log('Recognition start error:', error.message)
+              }
             }
           }
-        }, 300)
+        }, 500)
       }
       
       audioRef.current.onerror = (e) => {
         console.error('Audio playback error:', e)
         isSpeakingRef.current = false
+        // Clean up on error
+        if (audioRef.current?.src) {
+          URL.revokeObjectURL(audioRef.current.src)
+        }
       }
     }
 
@@ -161,14 +175,17 @@ export default function VoiceReceptionist() {
         return
       }
 
-      // Stop any ongoing speech
-      if (isSpeakingRef.current) {
+      // Stop any ongoing speech and clean up
+      if (isSpeakingRef.current && audioRef.current.src) {
         audioRef.current.pause()
+        URL.revokeObjectURL(audioRef.current.src)
         audioRef.current.src = ''
       }
 
       isSpeakingRef.current = true
 
+      console.log('Calling TTS endpoint with voice:', selectedVoice)
+      
       // Call backend TTS endpoint
       const response = await axios.post(
         `${API_URL}/api/text-to-speech`,
@@ -177,35 +194,62 @@ export default function VoiceReceptionist() {
           voice: selectedVoice
         },
         {
-          responseType: 'blob'
+          responseType: 'blob',
+          timeout: 30000 // 30 second timeout
         }
       )
+
+      if (!response.data || response.data.size === 0) {
+        throw new Error('Empty audio response from server')
+      }
 
       // Create audio URL from blob
       const audioBlob = new Blob([response.data], { type: 'audio/mpeg' })
       const audioUrl = URL.createObjectURL(audioBlob)
 
-      // Play audio
+      // Set up audio before playing
       audioRef.current.src = audioUrl
+      audioRef.current.load() // Ensure audio is loaded
+      
+      // Play audio and wait for it to start
       await audioRef.current.play()
+      console.log('Premium AI voice playing successfully')
 
       // Note: Audio onended handler will handle restarting listening
-    } catch (error) {
+    } catch (error: any) {
       console.error('TTS error:', error)
       isSpeakingRef.current = false
       
+      // Clean up on error
+      if (audioRef.current?.src) {
+        URL.revokeObjectURL(audioRef.current.src)
+        audioRef.current.src = ''
+      }
+      
+      // Show user-friendly error message
+      const errorMsg: Message = {
+        role: 'assistant',
+        content: "I'm having trouble with my voice right now. Could you try again in a moment?",
+        timestamp: new Date()
+      }
+      setMessages(prev => [...prev, errorMsg])
+      
       // Restart listening even if TTS fails
       setTimeout(() => {
-        if (shouldRestartListeningRef.current && !isRecognitionActiveRef.current) {
+        if (shouldRestartListeningRef.current && isCallActive && !isRecognitionActiveRef.current) {
           shouldRestartListeningRef.current = false
           setIsListening(true)
           try {
-            recognitionRef.current?.start()
-          } catch (e) {
-            console.log('Recognition start skipped')
+            if (recognitionRef.current && !isRecognitionActiveRef.current) {
+              recognitionRef.current.start()
+            }
+          } catch (e: any) {
+            if (e.name !== 'InvalidStateError') {
+              console.log('Recognition start error:', e.message)
+            }
           }
         }
-      }, 300)
+      }, 500)
     }
   }
 
