@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: nuvatra-voice-backend
+    env: python
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: NGROK_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+        optional: true
+
