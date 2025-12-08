@@ -226,10 +226,85 @@ class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
 
-def get_system_prompt():
+def detect_language(text: str) -> str:
+    """
+    Detect the language of the input text using simple heuristics and OpenAI.
+    Returns language name in English (e.g., 'Spanish', 'Punjabi', 'English').
+    """
+    if not text or len(text.strip()) < 3:
+        return "English"
+    
+    text_lower = text.lower().strip()
+    
+    # Quick heuristic check for common languages
+    # Spanish indicators
+    spanish_words = ['hola', 'gracias', 'por favor', 'cómo', 'qué', 'dónde', 'cuándo', 'español']
+    if any(word in text_lower for word in spanish_words):
+        return "Spanish"
+    
+    # Punjabi/Gurmukhi indicators (common words/patterns)
+    punjabi_indicators = ['ਸਤ', 'ਨਮਸਤੇ', 'ਕੀ', 'ਹੈ', 'ਤੁਸੀਂ', 'ਮੈਂ', 'ਪੰਜਾਬੀ', 'ਸੀ', 'ਹੋ', 'ਨੂੰ']
+    # Also check for common Punjabi transliterations
+    punjabi_translit = ['ki', 'hai', 'tusi', 'main', 'nu', 'da', 'di', 'de', 'te', 'naal']
+    if any(indicator in text for indicator in punjabi_indicators) or \
+       (any(word in text_lower for word in punjabi_translit) and len(text_lower.split()) > 2):
+        return "Punjabi"
+    
+    # Hindi indicators
+    hindi_indicators = ['नमस्ते', 'क्या', 'है', 'आप', 'मैं', 'हिंदी']
+    hindi_translit = ['namaste', 'kya', 'hai', 'aap', 'main', 'hindi']
+    if any(indicator in text for indicator in hindi_indicators) or \
+       (any(word in text_lower for word in hindi_translit) and len(text_lower.split()) > 2):
+        return "Hindi"
+    
+    # French indicators
+    french_words = ['bonjour', 'merci', 's\'il vous plaît', 'comment', 'français']
+    if any(word in text_lower for word in french_words):
+        return "French"
+    
+    # German indicators
+    german_words = ['hallo', 'danke', 'bitte', 'wie', 'deutsch']
+    if any(word in text_lower for word in german_words):
+        return "German"
+    
+    # Chinese indicators
+    chinese_chars = ['你', '好', '谢谢', '请', '是', '的']
+    if any(char in text for char in chinese_chars):
+        return "Chinese"
+    
+    # Use OpenAI to detect language if heuristics don't match
+    try:
+        # Check if client is available
+        if 'client' not in globals() or client is None:
+            return "English"
+        
+        detection_prompt = f"Detect the language of this text and respond with ONLY the language name in English (e.g., 'Spanish', 'Punjabi', 'English', 'French', 'German', 'Chinese', 'Hindi', etc.). Text: {text[:100]}"
+        detection_response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": detection_prompt}],
+            max_tokens=10,
+            temperature=0
+        )
+        detected_lang = detection_response.choices[0].message.content.strip()
+        # Clean up response (remove quotes, extra words)
+        detected_lang = detected_lang.replace('"', '').replace("'", "").strip()
+        if detected_lang and len(detected_lang) < 20:  # Sanity check
+            return detected_lang
+    except Exception as e:
+        print(f"Language detection error: {e}")
+    
+    # Default to English if detection fails
+    return "English"
+
+def get_system_prompt(detected_language: str = "English"):
     # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
-    # AI can speak and understand any language - respond in the same language the caller uses
-    return f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! Help with: questions (hours: {BUSINESS_INFO['hours']}), appointments, messages, routing to {', '.join(BUSINESS_INFO['departments'])}. IMPORTANT: Speak in the same language the caller uses - if they speak Spanish, respond in Spanish; if they speak French, respond in French, etc. Always match the caller's language."""
+    # CRITICAL: Respond ONLY in the detected language
+    base_prompt = f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! Help with: questions (hours: {BUSINESS_INFO['hours']}), appointments, messages, routing to {', '.join(BUSINESS_INFO['departments'])}."""
+    
+    if detected_language != "English":
+        return f"""{base_prompt} CRITICAL INSTRUCTION: The caller is speaking in {detected_language}. You MUST respond ONLY in {detected_language}. Do NOT respond in English. Every word of your response must be in {detected_language}."""
+    else:
+        return base_prompt
 
 @app.get("/")
 async def root():
@@ -389,6 +464,7 @@ async def handle_incoming_call(request: Request):
             "from_number": from_number,
             "to_number": to_number,
             "conversation_history": [],
+            "detected_language": None,  # Will be detected from first speech input
             "started_at": datetime.now().isoformat()
         }
         
@@ -463,6 +539,14 @@ async def process_speech(request: Request):
         
         call_data = active_calls[call_sid]
         
+        # Detect language from speech input (if not already detected)
+        if "detected_language" not in call_data or not call_data["detected_language"]:
+            detected_lang = detect_language(speech_result)
+            call_data["detected_language"] = detected_lang
+            print(f"🌍 Detected language: {detected_lang} from text: {speech_result[:50]}")
+        else:
+            detected_lang = call_data["detected_language"]
+        
         # Add user message to conversation
         user_message = {
             "role": "user",
@@ -471,8 +555,9 @@ async def process_speech(request: Request):
         call_data["conversation_history"].append(user_message)
         
         # Get AI response - use faster model for phone calls
+        # Use detected language in system prompt to ensure AI responds in that language
         messages = [
-            {"role": "system", "content": get_system_prompt()}
+            {"role": "system", "content": get_system_prompt(detected_lang)}
         ]
         messages.extend(call_data["conversation_history"])
         
