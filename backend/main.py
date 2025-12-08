@@ -1,9 +1,10 @@
 # ============================================
-# VERSION MARKER: 2025-12-08-07:00 - DEBUGGING VERSION
+# VERSION MARKER: 2025-12-08-07:05 - FORCE REBUILD VERSION
 # If you see this, Railway is running NEW code
 # ============================================
 print("=" * 60)
-print("DEBUG: NEW CODE LOADED - Version 2025-12-08-07:00")
+print("DEBUG: NEW CODE LOADED - Version 2025-12-08-07:05")
+print("DEBUG: This version should fix the proxies issue!")
 print("=" * 60)
 import sys
 sys.stdout.flush()
