@@ -1,3 +1,4 @@
+# Force Railway to rebuild - updated 2025-12-08
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 openai==1.54.5
