@@ -407,7 +407,7 @@ async def handle_incoming_call(request: Request):
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         
         # Generate greeting with OpenAI TTS - use HD model for ultra-smooth initial greeting
-        greeting_text = "Hi there! Thanks so much for calling! I'm really excited to help you today! What can I do for you?"
+        greeting_text = "Hello! Thank you for calling. This is your personal AI receptionist. I'm here to help you today. Please note that it may take a couple seconds for me to process what you say, so please bear with me but I will try my best to give you the best experience! How can I assist you?"
         
         # Use HD TTS endpoint for the greeting to ensure it's ultra-smooth (no choppiness)
         # Generate audio URL that Twilio can play
