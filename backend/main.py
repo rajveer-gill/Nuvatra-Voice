@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 import openai
 import os
+import sys
 from dotenv import load_dotenv
 from datetime import datetime
 import json
@@ -71,16 +72,79 @@ app.add_middleware(
 )
 
 # Initialize OpenAI
-# Debug: Check installed versions
+# Debug: Check installed versions BEFORE creating client
+print("=" * 50)
+print("DEBUG: Starting OpenAI client initialization...")
+print("=" * 50)
+
+# Check which requirements.txt files exist
+import pathlib
+root_req = pathlib.Path("/app/requirements.txt")
+backend_req = pathlib.Path("/app/backend/requirements.txt")
+current_req = _backend_dir / "requirements.txt"
+print(f"DEBUG: Checking requirements.txt files:")
+print(f"  /app/requirements.txt exists: {root_req.exists()}")
+print(f"  /app/backend/requirements.txt exists: {backend_req.exists()}")
+print(f"  {current_req} exists: {current_req.exists()}")
+if root_req.exists():
+    print(f"  /app/requirements.txt content (first 5 lines):")
+    with open(root_req, 'r') as f:
+        for i, line in enumerate(f):
+            if i < 5:
+                print(f"    {line.strip()}")
+if backend_req.exists():
+    print(f"  /app/backend/requirements.txt content (first 5 lines):")
+    with open(backend_req, 'r') as f:
+        for i, line in enumerate(f):
+            if i < 5:
+                print(f"    {line.strip()}")
+print("=" * 50)
+
 try:
     import httpx
     import openai
+    import sys
+    print(f"DEBUG: Python version: {sys.version}")
     print(f"DEBUG: httpx version: {httpx.__version__}")
     print(f"DEBUG: openai version: {openai.__version__}")
+    print(f"DEBUG: httpx location: {httpx.__file__}")
+    print(f"DEBUG: openai location: {openai.__file__}")
+    
+    # Check httpx.Client signature
+    import inspect
+    try:
+        sig = inspect.signature(httpx.Client.__init__)
+        print(f"DEBUG: httpx.Client.__init__ signature: {sig}")
+        print(f"DEBUG: httpx.Client.__init__ parameters: {list(sig.parameters.keys())}")
+    except Exception as e:
+        print(f"DEBUG: Error inspecting httpx.Client: {e}")
+    
+    # Check if 'proxies' is in the signature
+    if hasattr(httpx.Client.__init__, '__code__'):
+        params = inspect.signature(httpx.Client.__init__).parameters
+        has_proxies = 'proxies' in params
+        print(f"DEBUG: httpx.Client.__init__ has 'proxies' parameter: {has_proxies}")
+    
 except Exception as e:
     print(f"DEBUG: Error checking versions: {e}")
+    import traceback
+    traceback.print_exc()
 
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+print("DEBUG: About to create OpenAI client...")
+sys.stdout.flush()
+
+# Try to create client with detailed error handling
+try:
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    print("DEBUG: OpenAI client created successfully!")
+except Exception as e:
+    print(f"DEBUG: ERROR creating OpenAI client: {e}")
+    print(f"DEBUG: Error type: {type(e)}")
+    import traceback
+    print("DEBUG: Full traceback:")
+    traceback.print_exc()
+    sys.stdout.flush()
+    raise  # Re-raise to see the error in logs
 
 # Initialize Twilio (optional - only if credentials are provided)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
