@@ -71,6 +71,15 @@ app.add_middleware(
 )
 
 # Initialize OpenAI
+# Debug: Check installed versions
+try:
+    import httpx
+    import openai
+    print(f"DEBUG: httpx version: {httpx.__version__}")
+    print(f"DEBUG: openai version: {openai.__version__}")
+except Exception as e:
+    print(f"DEBUG: Error checking versions: {e}")
+
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Initialize Twilio (optional - only if credentials are provided)
