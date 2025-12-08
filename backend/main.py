@@ -226,6 +226,55 @@ class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
 
+def get_twilio_language_code(language_name: str) -> str:
+    """
+    Map language name to Twilio language code for speech recognition.
+    Returns Twilio language code (e.g., 'es-ES', 'en-US', 'hi-IN').
+    Defaults to 'en-US' if language not supported.
+    """
+    language_map = {
+        'English': 'en-US',
+        'Spanish': 'es-ES',
+        'French': 'fr-FR',
+        'German': 'de-DE',
+        'Italian': 'it-IT',
+        'Portuguese': 'pt-PT',
+        'Chinese': 'zh-CN',
+        'Japanese': 'ja-JP',
+        'Korean': 'ko-KR',
+        'Hindi': 'hi-IN',
+        'Punjabi': 'pa-IN',  # Punjabi (Gurmukhi)
+        'Arabic': 'ar-SA',
+        'Russian': 'ru-RU',
+        'Dutch': 'nl-NL',
+        'Polish': 'pl-PL',
+        'Turkish': 'tr-TR',
+        'Swedish': 'sv-SE',
+        'Norwegian': 'nb-NO',
+        'Danish': 'da-DK',
+        'Finnish': 'fi-FI',
+        'Greek': 'el-GR',
+        'Czech': 'cs-CZ',
+        'Romanian': 'ro-RO',
+        'Hungarian': 'hu-HU',
+        'Thai': 'th-TH',
+        'Vietnamese': 'vi-VN',
+        'Indonesian': 'id-ID',
+        'Malay': 'ms-MY',
+    }
+    
+    # Try exact match first
+    if language_name in language_map:
+        return language_map[language_name]
+    
+    # Try case-insensitive match
+    for key, code in language_map.items():
+        if key.lower() == language_name.lower():
+            return code
+    
+    # Default to English if not found
+    return 'en-US'
+
 def detect_language(text: str) -> str:
     """
     Detect the language of the input text using OpenAI's intelligence.
@@ -475,12 +524,13 @@ async def handle_incoming_call(request: Request):
         tts_audio_url = f"{base_url}/api/phone/tts-audio-hd?text={greeting_encoded}&voice=fable"
         response.play(tts_audio_url)
         
-        # Gather voice input from caller - auto-detect language for multi-language support
+        # Gather voice input from caller - start with English, will adapt based on detected language
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
             method='POST',
             speech_timeout='auto',
+            language='en-US',  # Start with English, will be updated dynamically after first detection
             hints='appointment, schedule, message, hours, contact, help'
         )
         
@@ -592,12 +642,17 @@ async def process_speech(request: Request):
         tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
         response.play(tts_audio_url)
         
-        # Use the same base_url for gather action - auto-detect language for multi-language support
+        # Use the same base_url for gather action - set language dynamically based on detected language
+        # This helps Twilio transcribe speech more accurately in the caller's language
+        twilio_lang_code = get_twilio_language_code(detected_lang)
+        print(f"🌍 Setting Twilio language to: {twilio_lang_code} (for {detected_lang})")
+        
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
             method='POST',
-            speech_timeout='auto'
+            speech_timeout='auto',
+            language=twilio_lang_code  # Set language dynamically for better transcription
         )
         
         # If no input, say goodbye
