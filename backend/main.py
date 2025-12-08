@@ -228,7 +228,8 @@ class TTSRequest(BaseModel):
 
 def get_system_prompt():
     # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
-    return f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! Help with: questions (hours: {BUSINESS_INFO['hours']}), appointments, messages, routing to {', '.join(BUSINESS_INFO['departments'])}."""
+    # AI can speak and understand any language - respond in the same language the caller uses
+    return f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! Help with: questions (hours: {BUSINESS_INFO['hours']}), appointments, messages, routing to {', '.join(BUSINESS_INFO['departments'])}. IMPORTANT: Speak in the same language the caller uses - if they speak Spanish, respond in Spanish; if they speak French, respond in French, etc. Always match the caller's language."""
 
 @app.get("/")
 async def root():
@@ -415,13 +416,12 @@ async def handle_incoming_call(request: Request):
         tts_audio_url = f"{base_url}/api/phone/tts-audio-hd?text={greeting_encoded}&voice=fable"
         response.play(tts_audio_url)
         
-        # Gather voice input from caller
+        # Gather voice input from caller - auto-detect language for multi-language support
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
             method='POST',
             speech_timeout='auto',
-            language='en-US',
             hints='appointment, schedule, message, hours, contact, help'
         )
         
@@ -511,13 +511,12 @@ async def process_speech(request: Request):
         tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
         response.play(tts_audio_url)
         
-        # Use the same base_url for gather action
+        # Use the same base_url for gather action - auto-detect language for multi-language support
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
             method='POST',
-            speech_timeout='auto',
-            language='en-US'
+            speech_timeout='auto'
         )
         
         # If no input, say goodbye
@@ -658,11 +657,11 @@ async def transcribe_phone_audio(audio_data: str = Form(...)):
         temp_file = io.BytesIO(audio_bytes)
         temp_file.name = "audio.webm"
         
-        # Transcribe using OpenAI Whisper
+        # Transcribe using OpenAI Whisper - auto-detect language for multi-language support
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
-            file=temp_file,
-            language="en"
+            file=temp_file
+            # language parameter omitted to allow auto-detection of any language
         )
         
         return {"transcript": transcript.text}
