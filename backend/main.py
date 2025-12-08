@@ -1,3 +1,13 @@
+# ============================================
+# VERSION MARKER: 2025-12-08-07:00 - DEBUGGING VERSION
+# If you see this, Railway is running NEW code
+# ============================================
+print("=" * 60)
+print("DEBUG: NEW CODE LOADED - Version 2025-12-08-07:00")
+print("=" * 60)
+import sys
+sys.stdout.flush()
+
 from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
@@ -5,7 +15,6 @@ from pydantic import BaseModel
 from typing import Optional, List
 import openai
 import os
-import sys
 from dotenv import load_dotenv
 from datetime import datetime
 import json
@@ -104,11 +113,22 @@ try:
     import httpx
     import openai
     import sys
+    import subprocess
     print(f"DEBUG: Python version: {sys.version}")
     print(f"DEBUG: httpx version: {httpx.__version__}")
     print(f"DEBUG: openai version: {openai.__version__}")
     print(f"DEBUG: httpx location: {httpx.__file__}")
     print(f"DEBUG: openai location: {openai.__file__}")
+    
+    # Check what pip actually installed
+    try:
+        result = subprocess.run(['pip', 'list'], capture_output=True, text=True, timeout=5)
+        print("DEBUG: Installed packages (pip list):")
+        for line in result.stdout.split('\n')[:20]:  # First 20 lines
+            if 'openai' in line.lower() or 'httpx' in line.lower():
+                print(f"  {line}")
+    except Exception as e:
+        print(f"DEBUG: Could not run pip list: {e}")
     
     # Check httpx.Client signature
     import inspect
