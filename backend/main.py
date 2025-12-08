@@ -1,10 +1,10 @@
 # ============================================
-# VERSION MARKER: 2025-12-08-07:05 - FORCE REBUILD VERSION
+# VERSION MARKER: 2025-12-08-07:10 - PINNED VERSIONS
 # If you see this, Railway is running NEW code
 # ============================================
 print("=" * 60)
-print("DEBUG: NEW CODE LOADED - Version 2025-12-08-07:05")
-print("DEBUG: This version should fix the proxies issue!")
+print("DEBUG: NEW CODE LOADED - Version 2025-12-08-07:10")
+print("DEBUG: Using openai==1.40.0 and httpx==0.27.0")
 print("=" * 60)
 import sys
 sys.stdout.flush()
