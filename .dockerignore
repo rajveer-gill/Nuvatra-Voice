@@ -1,0 +1,13 @@
+node_modules
+.next
+.env
+.env.local
+__pycache__
+*.pyc
+.git
+.gitignore
+README.md
+DEPLOYMENT.md
+PHONE-SETUP.md
+TWILIO-WEBHOOK-SETUP.md
+

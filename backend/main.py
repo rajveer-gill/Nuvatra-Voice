@@ -52,9 +52,19 @@ else:
 app = FastAPI(title="Nuvatra Voice API")
 
 # CORS middleware
+# CORS configuration - allow localhost for development and production frontend
+allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+# Add production frontend URL if set
+frontend_url = os.getenv("FRONTEND_URL")
+if frontend_url:
+    allowed_origins.append(frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -120,7 +130,7 @@ class MessageRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    voice: Optional[str] = "nova"  # nova, alloy, echo, fable, onyx, shimmer
+    voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
 
 def get_system_prompt():
     # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
@@ -302,13 +312,13 @@ async def handle_incoming_call(request: Request):
                 # Default to ngrok URL format (user should set NGROK_URL env var)
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         
-        # Generate greeting with OpenAI TTS
+        # Generate greeting with OpenAI TTS - use HD model for ultra-smooth initial greeting
         greeting_text = "Hi there! Thanks so much for calling! I'm really excited to help you today! What can I do for you?"
         
-        # Use OpenAI TTS for premium voice quality
+        # Use HD TTS endpoint for the greeting to ensure it's ultra-smooth (no choppiness)
         # Generate audio URL that Twilio can play
         greeting_encoded = quote(greeting_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={greeting_encoded}&voice=nova"
+        tts_audio_url = f"{base_url}/api/phone/tts-audio-hd?text={greeting_encoded}&voice=fable"
         response.play(tts_audio_url)
         
         # Gather voice input from caller
@@ -333,7 +343,7 @@ async def handle_incoming_call(request: Request):
         error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
         base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
         error_encoded = quote(error_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=nova"
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
         response.play(tts_audio_url)
         return Response(content=str(response), media_type="application/xml")
 
@@ -404,17 +414,10 @@ async def process_speech(request: Request):
         
         # Generate audio URL for AI response using OpenAI TTS
         ai_text_encoded = quote(ai_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=nova"
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
         response.play(tts_audio_url)
         
-        # Get base URL (same logic as incoming endpoint)
-        base_url = os.getenv("NGROK_URL")
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/process-speech", "")
-            else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        # Use the same base_url for gather action
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
@@ -442,7 +445,7 @@ async def process_speech(request: Request):
             else:
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         error_encoded = quote(error_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=nova"
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
         response.play(tts_audio_url)
         response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
         return Response(content=str(response), media_type="application/xml")
@@ -481,8 +484,40 @@ async def handle_media_stream(request: Request):
     # For production, you'd use a WebSocket library like 'websockets' or 'fastapi-websocket'
     return {"message": "Media stream endpoint - requires WebSocket implementation"}
 
+@app.get("/api/phone/tts-audio-hd")
+async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
+    """
+    Generate HD TTS audio for Twilio phone calls (ultra-smooth, no choppiness).
+    Used specifically for the initial greeting to ensure perfect quality.
+    """
+    try:
+        # Use tts-1-hd for ultra-smooth, natural speech (no choppiness)
+        response = client.audio.speech.create(
+            model="tts-1-hd",  # HD model for ultra-smooth, natural speech
+            voice=voice,
+            input=text,
+            speed=0.90  # Slightly slower for ultra-smooth flow
+        )
+        
+        # Convert response to bytes
+        audio_bytes = io.BytesIO(response.content)
+        audio_bytes.seek(0)
+        
+        # Return as streaming audio
+        return StreamingResponse(
+            audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3",
+                "Cache-Control": "no-cache"
+            }
+        )
+    except Exception as e:
+        print(f"Error generating HD TTS audio: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate HD TTS audio: {str(e)}")
+
 @app.get("/api/phone/tts-audio")
-async def get_tts_audio_for_phone(text: str, voice: str = "nova"):
+async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     """
     Generate TTS audio for phone calls.
     This endpoint is called by Twilio to play OpenAI TTS audio.

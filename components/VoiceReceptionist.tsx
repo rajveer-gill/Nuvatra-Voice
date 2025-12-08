@@ -24,7 +24,7 @@ export default function VoiceReceptionist() {
   const isSpeakingRef = useRef<boolean>(false)
   const shouldRestartListeningRef = useRef<boolean>(false)
   const isRecognitionActiveRef = useRef<boolean>(false)
-  const [selectedVoice, setSelectedVoice] = useState<string>('nova') // OpenAI voice: alloy, echo, fable, onyx, nova, shimmer
+  const [selectedVoice, setSelectedVoice] = useState<string>('fable') // OpenAI voice: alloy, echo, fable, onyx, nova, shimmer
 
 
   useEffect(() => {
@@ -440,12 +440,12 @@ export default function VoiceReceptionist() {
                   }`}
                 >
                   {voice.charAt(0).toUpperCase() + voice.slice(1)}
-                  {voice === 'nova' && ' ⭐'}
+                  {voice === 'fable' && ' ⭐'}
                 </button>
               ))}
             </div>
             <p className="text-xs text-purple-700 mt-2">
-              ⭐ Nova is recommended for natural, warm conversations
+              ⭐ Fable is recommended for natural, warm conversations
             </p>
           </div>
         )}
