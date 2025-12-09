@@ -218,6 +218,30 @@ greeting_audio_url = None
 try:
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     print("DEBUG: OpenAI client created successfully!")
+
+def generate_greeting_audio_sync():
+    """Synchronously generate greeting audio on startup"""
+    global greeting_audio_cache
+    try:
+        print("🎙️ Generating greeting audio with OpenAI TTS (fable voice)...")
+        greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
+        greeting_audio = client.audio.speech.create(
+            model="tts-1-hd",  # HD model for best quality
+            voice="fable",  # Same voice as rest of conversation
+            input=greeting_text,
+            speed=1.1
+        )
+        greeting_audio_cache = greeting_audio.content
+        print(f"✅ Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to generate greeting audio on startup: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# Generate greeting audio immediately after client creation
+generate_greeting_audio_sync()
 except Exception as e:
     print(f"DEBUG: ERROR creating OpenAI client: {e}")
     print(f"DEBUG: Error type: {type(e)}")
