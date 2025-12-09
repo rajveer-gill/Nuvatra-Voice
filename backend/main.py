@@ -575,6 +575,8 @@ active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid}}
 async def get_greeting_audio():
     """Serve pre-generated greeting audio for instant playback"""
     global greeting_audio_cache
+    print(f"🎵 Greeting audio endpoint called. Cache status: {'✅ Cached' if greeting_audio_cache else '❌ Empty'}")
+    
     if greeting_audio_cache is None:
         # Fallback: generate on the fly if cache is empty
         try:
@@ -586,15 +588,21 @@ async def get_greeting_audio():
                 speed=1.1
             )
             greeting_audio_cache = greeting_audio.content
+            print(f"✅ Greeting audio generated on-the-fly ({len(greeting_audio_cache)} bytes)")
         except Exception as e:
+            print(f"❌ Failed to generate greeting audio: {e}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Failed to generate greeting: {e}")
     
+    print(f"🎵 Serving greeting audio ({len(greeting_audio_cache)} bytes)")
     return Response(
         content=greeting_audio_cache,
         media_type="audio/mpeg",
         headers={
             "Content-Disposition": "inline; filename=greeting.mp3",
-            "Cache-Control": "public, max-age=3600"  # Cache for 1 hour
+            "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+            "Content-Length": str(len(greeting_audio_cache))
         }
     )
 
