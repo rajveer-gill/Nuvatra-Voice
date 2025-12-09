@@ -210,14 +210,14 @@ except Exception as e:
 print("DEBUG: About to create OpenAI client...")
 sys.stdout.flush()
 
+# Cache for pre-generated greeting audio
+greeting_audio_cache = None
+greeting_audio_url = None
+
 # Try to create client with detailed error handling
 try:
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     print("DEBUG: OpenAI client created successfully!")
-
-# Cache for pre-generated greeting audio
-greeting_audio_cache = None
-greeting_audio_url = None
 except Exception as e:
     print(f"DEBUG: ERROR creating OpenAI client: {e}")
     print(f"DEBUG: Error type: {type(e)}")
