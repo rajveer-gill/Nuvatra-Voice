@@ -10,6 +10,8 @@ import sys
 sys.stdout.flush()
 
 from fastapi import FastAPI, HTTPException, Request, Form
+from contextlib import asynccontextmanager
+import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -61,7 +63,47 @@ if not api_key:
 else:
     print(f"API Key loaded successfully (length: {len(api_key)})")
 
-app = FastAPI(title="Nuvatra Voice API")
+
+async def pre_warm_openai():
+    """Pre-warm OpenAI client to reduce cold-start latency"""
+    try:
+        print("🔥 Pre-warming OpenAI client...")
+        # Send a dummy request to warm up the connection
+        _ = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=5,
+            temperature=0
+        )
+        print("✅ OpenAI client pre-warmed successfully")
+    except Exception as e:
+        print(f"⚠️ Pre-warm warning (non-critical): {e}")
+
+async def keep_client_warm():
+    """Background task to keep OpenAI client warm"""
+    while True:
+        await asyncio.sleep(120)  # Every 2 minutes
+        try:
+            pre_warm_openai()
+        except Exception as e:
+            print(f"⚠️ Keep-warm error (non-critical): {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Pre-warm the client
+    await pre_warm_openai()
+    # Start background task to keep it warm
+    warm_task = asyncio.create_task(keep_client_warm())
+    yield
+    # Shutdown: Cancel background task
+    warm_task.cancel()
+    try:
+        await warm_task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(title="Nuvatra Voice API", lifespan=lifespan)
 
 # CORS middleware
 # CORS configuration - allow localhost for development and production frontend
@@ -530,14 +572,10 @@ async def handle_incoming_call(request: Request):
                 # Default to ngrok URL format (user should set NGROK_URL env var)
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         
-        # Generate greeting with OpenAI TTS - use HD model for ultra-smooth initial greeting
-        greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
-        
-        # Use HD TTS endpoint for the greeting to ensure it's ultra-smooth (no choppiness)
-        # Generate audio URL that Twilio can play
-        greeting_encoded = quote(greeting_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio-hd?text={greeting_encoded}&voice=fable"
-        response.play(tts_audio_url)
+        # Use Twilio's native Say for INSTANT playback (no TTS generation delay)
+        # This eliminates the initial pause while AI generates response
+        response.say("Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?", 
+                     voice='alice', language='en-US')
         
         # Gather voice input from caller - start with English, will adapt based on detected language
         # Note: For non-Latin scripts (Japanese, Punjabi, etc.), we'll use Record + Whisper in process-speech
