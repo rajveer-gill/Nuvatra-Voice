@@ -464,7 +464,7 @@ async def text_to_speech(request: TTSRequest):
             model="tts-1-hd",  # HD model for smooth, natural, human-like quality
             voice=request.voice,
             input=request.text,
-            speed=0.92  # Slightly slower for smooth, natural flow
+            speed=1.1  # Slightly faster for better flow
         )
         
         # Convert response to bytes
@@ -531,7 +531,7 @@ async def handle_incoming_call(request: Request):
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         
         # Generate greeting with OpenAI TTS - use HD model for ultra-smooth initial greeting
-        greeting_text = "Hello! Thank you for calling. This is your personal AI receptionist. I'm here to help you today. Please note that it may take a couple seconds for me to process what you say, so please bear with me but I will try my best to give you the best experience! How can I assist you?"
+        greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
         
         # Use HD TTS endpoint for the greeting to ensure it's ultra-smooth (no choppiness)
         # Generate audio URL that Twilio can play
@@ -809,7 +809,7 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
             model="tts-1-hd",  # HD model for ultra-smooth, natural speech
             voice=voice,
             input=text,
-            speed=0.90  # Slightly slower for ultra-smooth flow
+            speed=1.1  # Slightly faster for better flow
         )
         
         # Convert response to bytes
@@ -842,7 +842,7 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             model="tts-1",  # Faster generation, still high quality
             voice=voice,
             input=text,
-            speed=0.92  # Natural pace for smooth flow
+            speed=1.1  # Slightly faster for better flow
         )
         
         # Convert response to bytes
