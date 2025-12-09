@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 import io
 from urllib.parse import quote
+import base64
 # Twilio imports (optional - only needed for phone integration)
 try:
     from twilio.twiml.voice_response import VoiceResponse
@@ -225,6 +226,20 @@ class MessageRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
+
+def uses_non_latin_script(language_name: str) -> bool:
+    """
+    Check if a language uses a non-Latin script (where Twilio transcription struggles).
+    Returns True for languages like Japanese, Punjabi, Chinese, Arabic, Hindi, etc.
+    """
+    non_latin_languages = {
+        'Japanese', 'Punjabi', 'Chinese', 'Hindi', 'Arabic', 'Russian', 
+        'Korean', 'Thai', 'Vietnamese', 'Bengali', 'Tamil', 'Telugu',
+        'Gujarati', 'Kannada', 'Malayalam', 'Marathi', 'Urdu', 'Hebrew',
+        'Greek', 'Georgian', 'Armenian', 'Khmer', 'Lao', 'Myanmar',
+        'Tibetan', 'Mongolian', 'Nepali', 'Sinhala'
+    }
+    return language_name in non_latin_languages
 
 def get_twilio_language_code(language_name: str) -> str:
     """
@@ -525,6 +540,7 @@ async def handle_incoming_call(request: Request):
         response.play(tts_audio_url)
         
         # Gather voice input from caller - start with English, will adapt based on detected language
+        # Note: For non-Latin scripts (Japanese, Punjabi, etc.), we'll use Record + Whisper in process-speech
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
@@ -562,6 +578,7 @@ async def process_speech(request: Request):
         call_sid = form_data.get("CallSid")
         speech_result = form_data.get("SpeechResult", "")
         confidence = form_data.get("Confidence", "0")
+        recording_url = form_data.get("RecordingUrl", "")  # Get recording URL if available
         
         print(f"🎤 Speech received: {speech_result} (confidence: {confidence})")
         
@@ -572,11 +589,25 @@ async def process_speech(request: Request):
         
         call_data = active_calls[call_sid]
         
+        # Detect language from speech input
+        current_detected_lang = detect_language(speech_result)
+        
+        # For languages with non-Latin scripts, Twilio transcription is often poor
+        # We'll improve this by using the detected language to set Twilio's language code
+        # and note that for future, we could use Record + Whisper for better accuracy
+        if uses_non_latin_script(current_detected_lang):
+            print(f"⚠️ Non-Latin script detected ({current_detected_lang}). Twilio transcription may be inaccurate.")
+            print(f"💡 Consider using Record + Whisper for better accuracy with {current_detected_lang}")
+        
+        # Check confidence - if very low, the transcription might be poor
+        confidence_float = float(confidence) if confidence else 0.0
+        if confidence_float < 0.3:
+            print(f"⚠️ Low confidence ({confidence}) - transcription may be inaccurate")
+        
         # Always detect language from current speech input to support dynamic language switching
         # This allows the AI to adapt whenever the caller switches languages, no matter how many times
         # (e.g., if someone hands the phone to another person who speaks a different language,
         # or if the same person switches between languages)
-        current_detected_lang = detect_language(speech_result)
         previous_lang = call_data.get("detected_language")
         
         # Always use the currently detected language (not stored one) to ensure real-time switching
@@ -642,18 +673,33 @@ async def process_speech(request: Request):
         tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
         response.play(tts_audio_url)
         
-        # Use the same base_url for gather action - set language dynamically based on detected language
-        # This helps Twilio transcribe speech more accurately in the caller's language
+        # Use the same base_url for next input - set language dynamically based on detected language
+        # For non-Latin scripts, we'll use Record + Whisper for better accuracy
         twilio_lang_code = get_twilio_language_code(detected_lang)
         print(f"🌍 Setting Twilio language to: {twilio_lang_code} (for {detected_lang})")
         
-        gather = response.gather(
-            input='speech',
-            action=f"{base_url}/api/phone/process-speech",
-            method='POST',
-            speech_timeout='auto',
-            language=twilio_lang_code  # Set language dynamically for better transcription
-        )
+        # For non-Latin scripts, use Record + Whisper instead of Gather for better transcription
+        if uses_non_latin_script(detected_lang):
+            print(f"🎙️ Using Record + Whisper for {detected_lang} (non-Latin script)")
+            # Use Record verb to get audio, then transcribe with Whisper
+            record = response.record(
+                action=f"{base_url}/api/phone/process-recording",
+                method='POST',
+                max_length=10,  # 10 seconds max
+                finish_on_key='#',
+                recording_status_callback=f"{base_url}/api/phone/recording-status"
+            )
+            # Add a prompt to let user know to speak
+            response.say("Please speak now, then press pound when done.", language='en-US')
+        else:
+            # For Latin scripts, use Gather (faster and works well)
+            gather = response.gather(
+                input='speech',
+                action=f"{base_url}/api/phone/process-speech",
+                method='POST',
+                speech_timeout='auto',
+                language=twilio_lang_code  # Set language dynamically for better transcription
+            )
         
         # If no input, say goodbye
         response.say("Thanks for calling! Have a wonderful day!", voice='alice')
@@ -778,6 +824,173 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     except Exception as e:
         print(f"TTS audio generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phone/process-recording")
+async def process_recording(request: Request):
+    """
+    Process audio recording from Twilio for languages with non-Latin scripts.
+    Transcribes using Whisper for better accuracy.
+    """
+    if not TWILIO_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Twilio not installed")
+    
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        recording_url = form_data.get("RecordingUrl", "")
+        
+        print(f"🎙️ Recording received: {recording_url} for call {call_sid}")
+        
+        if not call_sid or call_sid not in active_calls:
+            response = VoiceResponse()
+            response.say("I'm sorry, I lost track of our conversation. Please call back.", voice='alice')
+            return Response(content=str(response), media_type="application/xml")
+        
+        if not recording_url:
+            print("⚠️ No recording URL provided")
+            response = VoiceResponse()
+            response.say("I didn't receive the recording. Please try again.", voice='alice')
+            response.redirect(f"{os.getenv('NGROK_URL')}/api/phone/process-speech", method='POST')
+            return Response(content=str(response), media_type="application/xml")
+        
+        call_data = active_calls[call_sid]
+        
+        # Download the recording from Twilio using httpx
+        # httpx is already available in the environment
+        try:
+            import httpx
+        except ImportError:
+            # Fallback if httpx not available (shouldn't happen)
+            raise HTTPException(status_code=500, detail="httpx library not available")
+        
+        recording_response = httpx.get(
+            recording_url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            timeout=30.0
+        )
+        if recording_response.status_code != 200:
+            print(f"❌ Failed to download recording: {recording_response.status_code}")
+            response = VoiceResponse()
+            response.say("I had trouble processing the recording. Please try again.", voice='alice')
+            response.redirect(f"{os.getenv('NGROK_URL')}/api/phone/process-speech", method='POST')
+            return Response(content=str(response), media_type="application/xml")
+        
+        # Transcribe with Whisper
+        audio_data = recording_response.content
+        temp_file = io.BytesIO(audio_data)
+        temp_file.name = "recording.wav"
+        
+        print(f"🔊 Transcribing with Whisper...")
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=temp_file
+            # language parameter omitted to allow auto-detection
+        )
+        
+        speech_result = transcript.text
+        print(f"✅ Whisper transcription: {speech_result}")
+        
+        # Now process the transcription the same way as regular speech
+        # Reuse the process_speech logic
+        current_detected_lang = detect_language(speech_result)
+        previous_lang = call_data.get("detected_language")
+        
+        if previous_lang != current_detected_lang:
+            if previous_lang:
+                print(f"🌍 Language switched: {previous_lang} -> {current_detected_lang}")
+            else:
+                print(f"🌍 Detected language: {current_detected_lang}")
+            call_data["detected_language"] = current_detected_lang
+        
+        detected_lang = current_detected_lang
+        
+        # Add user message to conversation
+        user_message = {
+            "role": "user",
+            "content": speech_result
+        }
+        call_data["conversation_history"].append(user_message)
+        
+        # Get AI response
+        messages = [
+            {"role": "system", "content": get_system_prompt(detected_lang)}
+        ]
+        messages.extend(call_data["conversation_history"])
+        
+        ai_response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            temperature=0.8,
+            max_tokens=80,
+            stream=False
+        )
+        
+        ai_text = ai_response.choices[0].message.content
+        
+        # Add AI response to conversation
+        ai_message = {
+            "role": "assistant",
+            "content": ai_text
+        }
+        call_data["conversation_history"].append(ai_message)
+        
+        # Create TwiML response
+        response = VoiceResponse()
+        
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/process-recording", "")
+            else:
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        
+        # Generate audio URL for AI response
+        ai_text_encoded = quote(ai_text)
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
+        response.play(tts_audio_url)
+        
+        # Set up next input based on language
+        twilio_lang_code = get_twilio_language_code(detected_lang)
+        
+        if uses_non_latin_script(detected_lang):
+            # Continue using Record + Whisper for non-Latin scripts
+            record = response.record(
+                action=f"{base_url}/api/phone/process-recording",
+                method='POST',
+                max_length=10,
+                finish_on_key='#'
+            )
+            response.say("Please speak now, then press pound when done.", language='en-US')
+        else:
+            # Switch back to Gather for Latin scripts
+            gather = response.gather(
+                input='speech',
+                action=f"{base_url}/api/phone/process-speech",
+                method='POST',
+                speech_timeout='auto',
+                language=twilio_lang_code
+            )
+        
+        return Response(content=str(response), media_type="application/xml")
+    
+    except Exception as e:
+        print(f"Error processing recording: {e}")
+        import traceback
+        traceback.print_exc()
+        response = VoiceResponse()
+        response.say("I'm sorry, I had trouble processing that. Please try again.", voice='alice')
+        base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
+        response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+        return Response(content=str(response), media_type="application/xml")
+
+@app.post("/api/phone/recording-status")
+async def recording_status(request: Request):
+    """Handle recording status updates from Twilio"""
+    # This endpoint can be used for logging or additional processing
+    form_data = await request.form()
+    print(f"📹 Recording status: {form_data.get('RecordingStatus')}")
+    return Response(content="OK", media_type="text/plain")
 
 @app.post("/api/phone/transcribe")
 async def transcribe_phone_audio(audio_data: str = Form(...)):
