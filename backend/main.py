@@ -592,18 +592,56 @@ async def process_speech(request: Request):
         # Detect language from speech input
         current_detected_lang = detect_language(speech_result)
         
-        # For languages with non-Latin scripts, Twilio transcription is often poor
-        # We'll improve this by using the detected language to set Twilio's language code
-        # and note that for future, we could use Record + Whisper for better accuracy
+# Check confidence and detect if this is first input
+        confidence_float = float(confidence) if confidence else 0.0
+        previous_lang = call_data.get("detected_language")
+        is_first_input = previous_lang is None
+        
+        # For non-Latin scripts, Twilio transcription is often poor
+        # If we detect non-Latin script AND (it's the first input OR confidence is low),
+        # immediately ask user to repeat using Record + Whisper for better accuracy
+        if uses_non_latin_script(current_detected_lang) and (is_first_input or confidence_float < 0.5):
+            print(f"🎙️ Non-Latin script detected ({current_detected_lang}) with poor transcription quality.")
+            print(f"🔄 Switching to Record + Whisper for better accuracy...")
+            
+            # Store the detected language
+            call_data["detected_language"] = current_detected_lang
+            
+            # Create response asking user to repeat using Record mode
+            response = VoiceResponse()
+            base_url = os.getenv("NGROK_URL")
+            if not base_url:
+                request_url = str(request.url)
+                if "ngrok" in request_url:
+                    base_url = request_url.replace("/api/phone/process-speech", "")
+                else:
+                    base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+            
+            # Ask user to repeat using Record + Whisper
+            prompt_text = f"I detected you're speaking in {current_detected_lang}. For better accuracy, please speak again and press pound when done."
+            prompt_encoded = quote(prompt_text)
+            tts_url = f"{base_url}/api/phone/tts-audio?text={prompt_encoded}&voice=fable"
+            response.play(tts_url)
+            
+            # Set up Record for Whisper transcription
+            record = response.record(
+                action=f"{base_url}/api/phone/process-recording",
+                method='POST',
+                max_length=15,
+                finish_on_key='#',
+                recording_status_callback=f"{base_url}/api/phone/recording-status"
+            )
+            
+            return Response(content=str(response), media_type="application/xml")
+        
+        # For languages with non-Latin scripts but good confidence on subsequent inputs
         if uses_non_latin_script(current_detected_lang):
-            print(f"⚠️ Non-Latin script detected ({current_detected_lang}). Twilio transcription may be inaccurate.")
-            print(f"💡 Consider using Record + Whisper for better accuracy with {current_detected_lang}")
+            print(f"⚠️ Non-Latin script detected ({current_detected_lang}). Using transcription but will switch to Record + Whisper next.")
         
         # Check confidence - if very low, the transcription might be poor
-        confidence_float = float(confidence) if confidence else 0.0
         if confidence_float < 0.3:
             print(f"⚠️ Low confidence ({confidence}) - transcription may be inaccurate")
-        
+
         # Always detect language from current speech input to support dynamic language switching
         # This allows the AI to adapt whenever the caller switches languages, no matter how many times
         # (e.g., if someone hands the phone to another person who speaks a different language,
