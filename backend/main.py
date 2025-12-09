@@ -651,10 +651,11 @@ async def handle_incoming_call(request: Request):
                 # Default to ngrok URL format (user should set NGROK_URL env var)
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         
-        # Use Twilio's native Say for INSTANT playback (no TTS generation delay)
-        # This eliminates the initial pause while AI generates response
         # Use pre-generated OpenAI TTS audio for instant, natural-sounding greeting
-        greeting_audio_url = f"{base_url}/api/phone/greeting-audio"
+        # Generate greeting audio URL (will use cached version if available)
+        greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
+        greeting_encoded = quote(greeting_text)
+        greeting_audio_url = f"{base_url}/api/phone/tts-audio-hd?text={greeting_encoded}&voice=fable"
         response.play(greeting_audio_url)
         
         # Gather voice input from caller - start with English, will adapt based on detected language
