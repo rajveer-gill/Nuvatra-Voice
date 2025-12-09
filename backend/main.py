@@ -65,7 +65,8 @@ else:
 
 
 async def pre_warm_openai():
-    """Pre-warm OpenAI client to reduce cold-start latency"""
+    """Pre-warm OpenAI client and generate greeting audio"""
+    global greeting_audio_cache, greeting_audio_url
     try:
         print("🔥 Pre-warming OpenAI client...")
         # Send a dummy request to warm up the connection
@@ -76,6 +77,18 @@ async def pre_warm_openai():
             temperature=0
         )
         print("✅ OpenAI client pre-warmed successfully")
+        
+        # Generate greeting audio with OpenAI TTS (fable voice)
+        print("🎙️ Generating greeting audio with OpenAI TTS...")
+        greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
+        greeting_audio = client.audio.speech.create(
+            model="tts-1-hd",  # HD model for best quality
+            voice="fable",  # Same voice as rest of conversation
+            input=greeting_text,
+            speed=1.1
+        )
+        greeting_audio_cache = greeting_audio.content
+        print(f"✅ Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
     except Exception as e:
         print(f"⚠️ Pre-warm warning (non-critical): {e}")
 
@@ -201,6 +214,10 @@ sys.stdout.flush()
 try:
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     print("DEBUG: OpenAI client created successfully!")
+
+# Cache for pre-generated greeting audio
+greeting_audio_cache = None
+greeting_audio_url = None
 except Exception as e:
     print(f"DEBUG: ERROR creating OpenAI client: {e}")
     print(f"DEBUG: Error type: {type(e)}")
@@ -528,6 +545,36 @@ async def text_to_speech(request: TTSRequest):
 # Phone call storage (in production, use a database)
 active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid}}
 
+
+
+@app.get("/api/phone/greeting-audio")
+async def get_greeting_audio():
+    """Serve pre-generated greeting audio for instant playback"""
+    global greeting_audio_cache
+    if greeting_audio_cache is None:
+        # Fallback: generate on the fly if cache is empty
+        try:
+            greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
+            greeting_audio = client.audio.speech.create(
+                model="tts-1-hd",
+                voice="fable",
+                input=greeting_text,
+                speed=1.1
+            )
+            greeting_audio_cache = greeting_audio.content
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to generate greeting: {e}")
+    
+    return Response(
+        content=greeting_audio_cache,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": "inline; filename=greeting.mp3",
+            "Cache-Control": "public, max-age=3600"  # Cache for 1 hour
+        }
+    )
+
+
 @app.post("/api/phone/incoming")
 async def handle_incoming_call(request: Request):
     if not TWILIO_AVAILABLE:
@@ -574,8 +621,9 @@ async def handle_incoming_call(request: Request):
         
         # Use Twilio's native Say for INSTANT playback (no TTS generation delay)
         # This eliminates the initial pause while AI generates response
-        response.say("Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?", 
-                     voice='alice', language='en-US')
+        # Use pre-generated OpenAI TTS audio for instant, natural-sounding greeting
+        greeting_audio_url = f"{base_url}/api/phone/greeting-audio"
+        response.play(greeting_audio_url)
         
         # Gather voice input from caller - start with English, will adapt based on detected language
         # Note: For non-Latin scripts (Japanese, Punjabi, etc.), we'll use Record + Whisper in process-speech
