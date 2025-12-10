@@ -275,12 +275,33 @@ messages = []
 conversation_history = {}
 
 # Business configuration
+# DEMO MODE: Restaurant example for sales demos
+# For production clients, this will be customized per business
 BUSINESS_INFO = {
-    "name": "Your Business",
-    "hours": "Monday-Friday: 9 AM - 5 PM",
+    "name": "Nuvatra Demo Restaurant",
+    "hours": "Monday-Thursday: 11 AM - 9 PM, Friday-Saturday: 11 AM - 10 PM, Sunday: 12 PM - 8 PM",
     "phone": "(555) 123-4567",
-    "email": "info@yourbusiness.com",
-    "departments": ["Sales", "Support", "Billing", "General"]
+    "email": "info@nuvatrademo.com",
+    "address": "123 Main Street, City, State 12345",
+    "departments": ["Reservations", "Takeout", "Catering", "General"],
+    "menu_link": "https://example.com/menu",  # Demo menu link
+    "services": [
+        "Dine-in",
+        "Takeout",
+        "Delivery",
+        "Catering",
+        "Private Events"
+    ],
+    "specials": [
+        "Happy Hour: 4 PM - 6 PM daily - 20% off appetizers",
+        "Weekend Brunch: Saturday & Sunday 11 AM - 2 PM",
+        "Family Night: Tuesday - Kids eat free with adult entree"
+    ],
+    "reservation_rules": [
+        "Reservations recommended for parties of 6 or more",
+        "Call ahead for same-day reservations",
+        "Large parties (10+) require 48-hour notice"
+    ]
 }
 
 class ConversationRequest(BaseModel):
@@ -430,7 +451,21 @@ Respond with just the language name, nothing else."""
 def get_system_prompt(detected_language: str = "English"):
     # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
     # CRITICAL: Respond ONLY in the detected language (language can change mid-conversation)
-    base_prompt = f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! Help with: questions (hours: {BUSINESS_INFO['hours']}), appointments, messages, routing to {', '.join(BUSINESS_INFO['departments'])}."""
+    # Include demo-specific info: menu, services, specials, reservations
+    services_list = ', '.join(BUSINESS_INFO.get('services', []))
+    specials_list = ' | '.join(BUSINESS_INFO.get('specials', []))
+    reservation_info = ' | '.join(BUSINESS_INFO.get('reservation_rules', []))
+    
+    base_prompt = f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! 
+
+You can help with:
+- Hours: {BUSINESS_INFO['hours']}
+- Location: {BUSINESS_INFO.get('address', 'N/A')}
+- Services: {services_list}
+- Specials: {specials_list}
+- Reservations: {reservation_info}
+- Menu: Available at {BUSINESS_INFO.get('menu_link', 'our website')}
+- Routing to: {', '.join(BUSINESS_INFO['departments'])}"""
     
     if detected_language != "English":
         return f"""{base_prompt} CRITICAL INSTRUCTION: The caller is currently speaking in {detected_language}. You MUST respond ONLY in {detected_language}. Do NOT respond in English or any other language. Every word of your response must be in {detected_language}. If the caller switches languages, adapt immediately and respond in their new language."""
