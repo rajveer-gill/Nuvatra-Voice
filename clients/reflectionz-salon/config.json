@@ -1,0 +1,26 @@
+{
+  "business_name": "Reflectionz Salon",
+  "hours": "TBD - Please provide hours of operation",
+  "phone": "TBD - Please provide business phone number",
+  "email": "TBD - Please provide business email",
+  "address": "TBD - Please provide business address",
+  "departments": [
+    "Appointments",
+    "Services",
+    "General"
+  ],
+  "services": [
+    "TBD - Please provide services list or menu link"
+  ],
+  "specials": [
+    "TBD - Please provide any current specials or promotions"
+  ],
+  "reservation_rules": [
+    "TBD - Please provide reservation or booking rules"
+  ],
+  "menu_link": "TBD - Please provide menu link or services list",
+  "additional_info": "TBD - Any other important info for FAQs"
+}
+
+
+
