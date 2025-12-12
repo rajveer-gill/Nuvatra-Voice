@@ -280,7 +280,8 @@ conversation_history = {}
 BUSINESS_INFO = {
     "name": "Nuvatra Demo Restaurant",
     "hours": "Monday-Thursday: 11 AM - 9 PM, Friday-Saturday: 11 AM - 10 PM, Sunday: 12 PM - 8 PM",
-    "phone": "(555) 123-4567",
+    "phone": "(925) 997-8995",  # This is the forwarding number (store's actual phone)
+    "forwarding_phone": os.getenv("BUSINESS_FORWARDING_PHONE", "+19259978995"),  # Format: +1XXXXXXXXXX
     "email": "info@nuvatrademo.com",
     "address": "123 Main Street, City, State 12345",
     "departments": ["Reservations", "Takeout", "Catering", "General"],
@@ -394,6 +395,93 @@ def get_twilio_language_code(language_name: str) -> str:
     
     # Default to English if not found
     return 'en-US'
+
+def should_forward_to_human(user_input: str, ai_response: str) -> bool:
+    """
+    Detect if the user wants to talk to a real person or if we should forward the call.
+    Checks both user input and AI response for forwarding signals.
+    """
+    if not user_input:
+        return False
+    
+    user_lower = user_input.lower()
+    ai_lower = ai_response.lower() if ai_response else ""
+    
+    # Keywords that indicate user wants to talk to a person
+    forward_keywords = [
+        "talk to a person",
+        "speak to someone",
+        "talk to someone",
+        "real person",
+        "human",
+        "agent",
+        "representative",
+        "transfer me",
+        "connect me",
+        "forward me",
+        "can i speak to",
+        "i want to speak to",
+        "let me talk to",
+        "put me through",
+        "i need to talk to",
+        "operator",
+        "manager",
+        "supervisor"
+    ]
+    
+    # Check user input
+    for keyword in forward_keywords:
+        if keyword in user_lower:
+            print(f"🔄 Forwarding requested: User said '{keyword}'")
+            return True
+    
+    # Check AI response for forwarding signals (AI might detect intent)
+    if "transfer" in ai_lower and ("you" in ai_lower or "connect" in ai_lower):
+        print(f"🔄 Forwarding requested: AI detected transfer intent")
+        return True
+    
+    return False
+
+def forward_call_to_business(forwarding_phone: str, base_url: str, detected_lang: str = "English") -> VoiceResponse:
+    """
+    Forward the call to the business's actual phone number using Twilio Dial.
+    """
+    response = VoiceResponse()
+    
+    # Get language-appropriate message
+    if detected_lang == "Spanish":
+        message = "Conectándote con alguien ahora. Por favor espera."
+    elif detected_lang == "French":
+        message = "Je vous connecte maintenant. Veuillez patienter."
+    else:
+        message = "Connecting you with someone now. Please hold."
+    
+    # Say message before forwarding
+    message_encoded = quote(message)
+    tts_url = f"{base_url}/api/phone/tts-audio?text={message_encoded}&voice=fable"
+    response.play(tts_url)
+    
+    # Dial the business phone number
+    # Format: +1XXXXXXXXXX (E.164 format)
+    # Remove any non-digit characters except +
+    clean_phone = ''.join(c for c in forwarding_phone if c.isdigit() or c == '+')
+    if not clean_phone.startswith('+'):
+        # If no +, assume US number and add +1
+        if len(clean_phone) == 10:
+            clean_phone = f"+1{clean_phone}"
+        elif len(clean_phone) == 11 and clean_phone.startswith('1'):
+            clean_phone = f"+{clean_phone}"
+        else:
+            clean_phone = f"+1{clean_phone}"
+    
+    print(f"📞 Forwarding call to business: {clean_phone}")
+    response.dial(clean_phone, timeout=30, record=False)
+    
+    # If dial fails (no answer, busy, etc.), say goodbye
+    response.say("I'm sorry, no one is available right now. Please try again later or leave a message.", voice='alice')
+    response.hangup()
+    
+    return response
 
 def detect_language(text: str) -> str:
     """
@@ -846,11 +934,30 @@ async def process_speech(request: Request):
         }
         call_data["conversation_history"].append(ai_message)
         
+        # Get base URL for TTS and forwarding
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/process-speech", "")
+            else:
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        
+        # Check if user wants to talk to a real person - forward if needed
+        if should_forward_to_human(speech_result, ai_text):
+            print(f"🔄 Forwarding call to business phone: {BUSINESS_INFO.get('forwarding_phone')}")
+            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            if forwarding_phone:
+                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+                return Response(content=str(response), media_type="application/xml")
+            else:
+                print("⚠️ No forwarding phone configured - cannot forward call")
+                # Continue with normal response
+        
         # Create TwiML response
         response = VoiceResponse()
         
         # Use OpenAI TTS for premium voice quality
-        base_url = os.getenv("NGROK_URL")
         if not base_url:
             request_url = str(request.url)
             if "ngrok" in request_url:
@@ -898,10 +1005,12 @@ async def process_speech(request: Request):
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
-        print(f"Error processing speech: {e}")
+        print(f"❌ Error processing speech: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # On error, offer to forward to a real person
         response = VoiceResponse()
-        # Use OpenAI TTS for error message too
-        error_text = "I'm sorry, I didn't catch that. Could you repeat?"
         base_url = os.getenv("NGROK_URL")
         if not base_url:
             request_url = str(request.url)
@@ -909,11 +1018,25 @@ async def process_speech(request: Request):
                 base_url = request_url.replace("/api/phone/process-speech", "")
             else:
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
-        error_encoded = quote(error_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
-        response.play(tts_audio_url)
-        response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
-        return Response(content=str(response), media_type="application/xml")
+        
+        # Check if we have a forwarding number - if so, forward on error
+        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        if forwarding_phone:
+            print(f"🔄 Error occurred - forwarding to business phone: {forwarding_phone}")
+            error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
+            error_encoded = quote(error_text)
+            tts_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            response.play(tts_url)
+            response = forward_call_to_business(forwarding_phone, base_url, "English")
+            return Response(content=str(response), media_type="application/xml")
+        else:
+            # No forwarding number - just ask to repeat
+            error_text = "I'm sorry, I didn't catch that. Could you repeat?"
+            error_encoded = quote(error_text)
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            response.play(tts_audio_url)
+            response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+            return Response(content=str(response), media_type="application/xml")
 
 @app.post("/api/phone/status")
 async def handle_call_status(request: Request):
