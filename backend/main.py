@@ -396,6 +396,75 @@ def get_twilio_language_code(language_name: str) -> str:
     # Default to English if not found
     return 'en-US'
 
+async def generate_response_async(call_sid: str, call_data: dict, detected_lang: str, base_url: str):
+    """
+    Background task to generate GPT response and TTS audio.
+    Updates response_status when ready.
+    """
+    try:
+        print(f"🤖 Generating response for call {call_sid}...")
+        
+        # Get AI response - use faster model for phone calls
+        messages = [
+            {"role": "system", "content": get_system_prompt(detected_lang)}
+        ]
+        messages.extend(call_data["conversation_history"])
+        
+        # Use gpt-3.5-turbo with aggressive optimizations for ultra-fast responses
+        ai_response = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Fastest quality model
+            messages=messages,
+            temperature=0.8,  # Slightly higher for more natural responses
+            max_tokens=80,  # Very brief for phone - faster generation
+            stream=False
+        )
+        
+        ai_text = ai_response.choices[0].message.content
+        print(f"✅ GPT response generated: {ai_text[:50]}...")
+        
+        # Add AI response to conversation
+        ai_message = {
+            "role": "assistant",
+            "content": ai_text
+        }
+        call_data["conversation_history"].append(ai_message)
+        
+        # Check if user wants to talk to a real person - forward if needed
+        if should_forward_to_human("", ai_text):  # Check AI response for forwarding intent
+            print(f"🔄 Forwarding call to business phone: {BUSINESS_INFO.get('forwarding_phone')}")
+            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            if forwarding_phone:
+                response_status[call_sid] = {
+                    "status": "forward",
+                    "audio_url": None,
+                    "ai_text": ai_text,
+                    "forwarding_phone": forwarding_phone
+                }
+                return
+        
+        # Generate TTS audio URL
+        ai_text_encoded = quote(ai_text)
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
+        
+        # Mark as ready
+        response_status[call_sid] = {
+            "status": "ready",
+            "audio_url": tts_audio_url,
+            "ai_text": ai_text
+        }
+        print(f"✅ Response ready for call {call_sid}")
+        
+    except Exception as e:
+        print(f"❌ Error generating response for call {call_sid}: {e}")
+        import traceback
+        traceback.print_exc()
+        response_status[call_sid] = {
+            "status": "error",
+            "audio_url": None,
+            "ai_text": None,
+            "error": str(e)
+        }
+
 def should_forward_to_human(user_input: str, ai_response: str) -> bool:
     """
     Detect if the user wants to talk to a real person or if we should forward the call.
@@ -693,6 +762,9 @@ async def text_to_speech(request: TTSRequest):
 # Phone call storage (in production, use a database)
 active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid}}
 
+# Response generation status (for 2-step flow to eliminate dead air)
+response_status = {}  # {call_sid: {"status": "pending"|"ready"|"error", "audio_url": str, "ai_text": str}}
+
 
 
 @app.get("/api/phone/greeting-audio")
@@ -832,7 +904,7 @@ async def process_speech(request: Request):
         # Detect language from speech input
         current_detected_lang = detect_language(speech_result)
         
-# Check confidence and detect if this is first input
+        # Check confidence and detect if this is first input
         confidence_float = float(confidence) if confidence else 0.0
         previous_lang = call_data.get("detected_language")
         is_first_input = previous_lang is None
@@ -902,38 +974,6 @@ async def process_speech(request: Request):
         # Always use the freshly detected language (not the stored one) to ensure immediate switching
         detected_lang = current_detected_lang
         
-        # Add user message to conversation
-        user_message = {
-            "role": "user",
-            "content": speech_result
-        }
-        call_data["conversation_history"].append(user_message)
-        
-        # Get AI response - use faster model for phone calls
-        # Use detected language in system prompt to ensure AI responds in that language
-        messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang)}
-        ]
-        messages.extend(call_data["conversation_history"])
-        
-        # Use gpt-3.5-turbo with aggressive optimizations for ultra-fast responses
-        ai_response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # Fastest quality model
-            messages=messages,
-            temperature=0.8,  # Slightly higher for more natural responses
-            max_tokens=80,  # Very brief for phone - faster generation
-            stream=False
-        )
-        
-        ai_text = ai_response.choices[0].message.content
-        
-        # Add AI response to conversation
-        ai_message = {
-            "role": "assistant",
-            "content": ai_text
-        }
-        call_data["conversation_history"].append(ai_message)
-        
         # Get base URL for TTS and forwarding
         base_url = os.getenv("NGROK_URL")
         if not base_url:
@@ -943,32 +983,39 @@ async def process_speech(request: Request):
             else:
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         
-        # Check if user wants to talk to a real person - forward if needed
-        if should_forward_to_human(speech_result, ai_text):
+        # Add user message to conversation
+        user_message = {
+            "role": "user",
+            "content": speech_result
+        }
+        call_data["conversation_history"].append(user_message)
+        
+        # Check if user wants to talk to a real person - check BEFORE generating response
+        # We'll check the speech directly for forwarding keywords
+        if should_forward_to_human(speech_result, ""):  # Pass empty string since we don't have AI response yet
             print(f"🔄 Forwarding call to business phone: {BUSINESS_INFO.get('forwarding_phone')}")
             forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
             if forwarding_phone:
                 response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
                 return Response(content=str(response), media_type="application/xml")
-            else:
-                print("⚠️ No forwarding phone configured - cannot forward call")
-                # Continue with normal response
         
-        # Create TwiML response
+        # Initialize response status as pending
+        response_status[call_sid] = {
+            "status": "pending",
+            "audio_url": None,
+            "ai_text": None
+        }
+        
+        # Start background task to generate GPT response + TTS
+        asyncio.create_task(generate_response_async(call_sid, call_data, detected_lang, base_url))
+        
+        # Immediately return "got it" message and redirect to respond endpoint
+        # This eliminates dead air - caller hears something right away
         response = VoiceResponse()
+        response.say("Got it, one moment.", voice='alice', language='en-US')
+        response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
         
-        # Use OpenAI TTS for premium voice quality
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/process-speech", "")
-            else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
-        
-        # Generate audio URL for AI response using OpenAI TTS
-        ai_text_encoded = quote(ai_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
-        response.play(tts_audio_url)
+        return Response(content=str(response), media_type="application/xml")
         
         # Use the same base_url for next input - set language dynamically based on detected language
         # For non-Latin scripts, we'll use Record + Whisper for better accuracy
@@ -1071,6 +1118,117 @@ async def handle_media_stream(request: Request):
     # This is a simplified version - full implementation requires WebSocket handling
     # For production, you'd use a WebSocket library like 'websockets' or 'fastapi-websocket'
     return {"message": "Media stream endpoint - requires WebSocket implementation"}
+
+@app.post("/api/phone/respond")
+async def respond_with_audio(request: Request):
+    """
+    Polling endpoint that checks if response audio is ready.
+    Returns audio when ready, or filler + redirect if still pending.
+    """
+    if not TWILIO_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Twilio not installed")
+    
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid")
+        
+        if not call_sid or call_sid not in response_status:
+            # Fallback: return error message
+            response = VoiceResponse()
+            response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
+        
+        status_data = response_status[call_sid]
+        status = status_data.get("status", "pending")
+        
+        # Get base URL
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/respond", "")
+            else:
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+        
+        response = VoiceResponse()
+        
+        if status == "ready":
+            # Audio is ready - play it
+            audio_url = status_data.get("audio_url")
+            if audio_url:
+                response.play(audio_url)
+                
+                # After playing, set up next input gathering
+                call_data = active_calls.get(call_sid, {})
+                detected_lang = call_data.get("detected_language", "English")
+                twilio_lang_code = get_twilio_language_code(detected_lang)
+                
+                # For non-Latin scripts, use Record + Whisper
+                if uses_non_latin_script(detected_lang):
+                    record = response.record(
+                        action=f"{base_url}/api/phone/process-recording",
+                        method='POST',
+                        max_length=10,
+                        finish_on_key='#',
+                        recording_status_callback=f"{base_url}/api/phone/recording-status"
+                    )
+                    response.say("Please speak now, then press pound when done.", language='en-US')
+                else:
+                    # For Latin scripts, use Gather
+                    gather = response.gather(
+                        input='speech',
+                        action=f"{base_url}/api/phone/process-speech",
+                        method='POST',
+                        speech_timeout='auto',
+                        language=twilio_lang_code
+                    )
+                
+                # If no input, say goodbye
+                response.say("Thanks for calling! Have a wonderful day!", voice='alice')
+                response.hangup()
+                
+                # Clean up status
+                if call_sid in response_status:
+                    del response_status[call_sid]
+                
+                return Response(content=str(response), media_type="application/xml")
+        
+        elif status == "forward":
+            # Forward to business phone
+            forwarding_phone = status_data.get("forwarding_phone")
+            if forwarding_phone:
+                detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
+                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+                # Clean up status
+                if call_sid in response_status:
+                    del response_status[call_sid]
+                return Response(content=str(response), media_type="application/xml")
+        
+        elif status == "error":
+            # Error occurred - return error message
+            response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+            response.hangup()
+            # Clean up status
+            if call_sid in response_status:
+                del response_status[call_sid]
+            return Response(content=str(response), media_type="application/xml")
+        
+        else:
+            # Still pending - play filler and redirect again
+            response.say("One sec.", voice='alice', language='en-US')
+            response.pause(length=1)
+            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
+            return Response(content=str(response), media_type="application/xml")
+    
+    except Exception as e:
+        print(f"❌ Error in respond endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        response = VoiceResponse()
+        response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
 
 @app.get("/api/phone/tts-audio-hd")
 async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
