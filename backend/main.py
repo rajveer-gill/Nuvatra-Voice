@@ -66,7 +66,7 @@ else:
 
 async def pre_warm_openai():
     """Pre-warm OpenAI client and generate greeting audio"""
-    global greeting_audio_cache, greeting_audio_url
+    global greeting_audio_cache, got_it_audio_cache
     try:
         print("🔥 Pre-warming OpenAI client...")
         # Send a dummy request to warm up the connection
@@ -89,6 +89,18 @@ async def pre_warm_openai():
         )
         greeting_audio_cache = greeting_audio.content
         print(f"✅ Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
+        
+        # Generate "Got it, one moment" audio with OpenAI TTS (fable voice)
+        print("🎙️ Generating 'Got it, one moment' audio with OpenAI TTS...")
+        got_it_text = "Got it, one moment."
+        got_it_audio = client.audio.speech.create(
+            model="tts-1-hd",  # HD model for best quality
+            voice="fable",  # Same voice as rest of conversation
+            input=got_it_text,
+            speed=1.1
+        )
+        got_it_audio_cache = got_it_audio.content
+        print(f"✅ 'Got it' audio generated and cached ({len(got_it_audio_cache)} bytes)")
     except Exception as e:
         print(f"⚠️ Pre-warm warning (non-critical): {e}")
 
@@ -212,6 +224,7 @@ sys.stdout.flush()
 
 # Cache for pre-generated greeting audio
 greeting_audio_cache = None
+got_it_audio_cache = None  # Pre-cached "Got it, one moment" message
 greeting_audio_url = None
 
 def generate_greeting_audio_sync():
@@ -802,6 +815,41 @@ async def get_greeting_audio():
         }
     )
 
+@app.get("/api/phone/got-it-audio")
+async def get_got_it_audio():
+    """Serve pre-generated 'Got it, one moment' audio for instant playback"""
+    global got_it_audio_cache
+    print(f"🎵 'Got it' audio endpoint called. Cache status: {'✅ Cached' if got_it_audio_cache else '❌ Empty'}")
+    
+    if got_it_audio_cache is None:
+        # Fallback: generate on the fly if cache is empty
+        try:
+            got_it_text = "Got it, one moment."
+            got_it_audio = client.audio.speech.create(
+                model="tts-1-hd",
+                voice="fable",
+                input=got_it_text,
+                speed=1.1
+            )
+            got_it_audio_cache = got_it_audio.content
+            print(f"✅ 'Got it' audio generated on-the-fly ({len(got_it_audio_cache)} bytes)")
+        except Exception as e:
+            print(f"❌ Failed to generate 'got it' audio: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Failed to generate 'got it' audio: {e}")
+    
+    print(f"🎵 Serving 'got it' audio ({len(got_it_audio_cache)} bytes)")
+    return Response(
+        content=got_it_audio_cache,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": "inline; filename=got-it.mp3",
+            "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+            "Content-Length": str(len(got_it_audio_cache))
+        }
+    )
+
 
 @app.post("/api/phone/incoming")
 async def handle_incoming_call(request: Request):
@@ -1011,11 +1059,9 @@ async def process_speech(request: Request):
         
         # Immediately return "got it" message and redirect to respond endpoint
         # This eliminates dead air - caller hears something right away
-        # Use OpenAI TTS (Fable voice) for consistency
+        # Use pre-cached audio for instant playback (no TTS generation delay)
         response = VoiceResponse()
-        got_it_text = "Got it, one moment."
-        got_it_encoded = quote(got_it_text)
-        got_it_audio_url = f"{base_url}/api/phone/tts-audio?text={got_it_encoded}&voice=fable"
+        got_it_audio_url = f"{base_url}/api/phone/got-it-audio"
         response.play(got_it_audio_url)
         response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
         
