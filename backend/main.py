@@ -1011,8 +1011,12 @@ async def process_speech(request: Request):
         
         # Immediately return "got it" message and redirect to respond endpoint
         # This eliminates dead air - caller hears something right away
+        # Use OpenAI TTS (Fable voice) for consistency
         response = VoiceResponse()
-        response.say("Got it, one moment.", voice='alice', language='en-US')
+        got_it_text = "Got it, one moment."
+        got_it_encoded = quote(got_it_text)
+        got_it_audio_url = f"{base_url}/api/phone/tts-audio?text={got_it_encoded}&voice=fable"
+        response.play(got_it_audio_url)
         response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
         
         return Response(content=str(response), media_type="application/xml")
@@ -1216,7 +1220,11 @@ async def respond_with_audio(request: Request):
         
         else:
             # Still pending - play filler and redirect again
-            response.say("One sec.", voice='alice', language='en-US')
+            # Use OpenAI TTS (Fable voice) for consistency
+            filler_text = "One sec."
+            filler_encoded = quote(filler_text)
+            filler_audio_url = f"{base_url}/api/phone/tts-audio?text={filler_encoded}&voice=fable"
+            response.play(filler_audio_url)
             response.pause(length=1)
             response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
             return Response(content=str(response), media_type="application/xml")
