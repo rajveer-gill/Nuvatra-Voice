@@ -477,6 +477,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             "ai_text": None,
             "error": str(e)
         }
+        print(f"⚠️ Response generation failed - caller will be forwarded to business phone")
 
 def should_forward_to_human(user_input: str, ai_response: str) -> bool:
     """
@@ -916,15 +917,30 @@ async def handle_incoming_call(request: Request):
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
-        print(f"Error handling incoming call: {e}")
+        print(f"❌ Error handling incoming call: {e}")
+        import traceback
+        traceback.print_exc()
         response = VoiceResponse()
-        # Use OpenAI TTS for error message
-        error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
         base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
-        error_encoded = quote(error_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
-        response.play(tts_audio_url)
-        return Response(content=str(response), media_type="application/xml")
+        
+        # On error, forward to business phone if available
+        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        if forwarding_phone:
+            print(f"🔄 Error on incoming call - forwarding to business phone: {forwarding_phone}")
+            error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
+            error_encoded = quote(error_text)
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            response.play(tts_audio_url)
+            response = forward_call_to_business(forwarding_phone, base_url, "English")
+            return Response(content=str(response), media_type="application/xml")
+        else:
+            # Fallback: just say error message if no forwarding number
+            error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
+            error_encoded = quote(error_text)
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            response.play(tts_audio_url)
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
 
 @app.post("/api/phone/process-speech")
 async def process_speech(request: Request):
@@ -943,9 +959,25 @@ async def process_speech(request: Request):
         print(f"🎤 Speech received: {speech_result} (confidence: {confidence})")
         
         if not call_sid or call_sid not in active_calls:
+            # Lost call session - forward to business phone if available
             response = VoiceResponse()
-            response.say("I'm sorry, I lost track of our conversation. Please call back.", voice='alice')
-            return Response(content=str(response), media_type="application/xml")
+            base_url = os.getenv("NGROK_URL")
+            if not base_url:
+                request_url = str(request.url)
+                if "ngrok" in request_url:
+                    base_url = request_url.replace("/api/phone/process-speech", "")
+                else:
+                    base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+            
+            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            if forwarding_phone:
+                print(f"🔄 Lost call session - forwarding to business phone: {forwarding_phone}")
+                response = forward_call_to_business(forwarding_phone, base_url, "English")
+                return Response(content=str(response), media_type="application/xml")
+            else:
+                # Fallback: say error message
+                response.say("I'm sorry, I lost track of our conversation. Please call back.", voice='alice')
+                return Response(content=str(response), media_type="application/xml")
         
         call_data = active_calls[call_sid]
         
@@ -1183,11 +1215,21 @@ async def respond_with_audio(request: Request):
         call_sid = form_data.get("CallSid")
         
         if not call_sid or call_sid not in response_status:
-            # Fallback: return error message
+            # Lost response status - forward to business phone if available
             response = VoiceResponse()
-            response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
-            response.hangup()
-            return Response(content=str(response), media_type="application/xml")
+            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            if forwarding_phone:
+                print(f"🔄 Lost response status - forwarding to business phone: {forwarding_phone}")
+                # Try to get call data for language
+                call_data = active_calls.get(call_sid, {})
+                detected_lang = call_data.get("detected_language", "English")
+                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+                return Response(content=str(response), media_type="application/xml")
+            else:
+                # Fallback: return error message
+                response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+                response.hangup()
+                return Response(content=str(response), media_type="application/xml")
         
         status_data = response_status[call_sid]
         status = status_data.get("status", "pending")
@@ -1256,13 +1298,24 @@ async def respond_with_audio(request: Request):
                 return Response(content=str(response), media_type="application/xml")
         
         elif status == "error":
-            # Error occurred - return error message
-            response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
-            response.hangup()
-            # Clean up status
-            if call_sid in response_status:
-                del response_status[call_sid]
-            return Response(content=str(response), media_type="application/xml")
+            # Error occurred - forward to business phone if available
+            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            if forwarding_phone:
+                print(f"🔄 Error generating response - forwarding to business phone: {forwarding_phone}")
+                detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
+                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+                # Clean up status
+                if call_sid in response_status:
+                    del response_status[call_sid]
+                return Response(content=str(response), media_type="application/xml")
+            else:
+                # Fallback: return error message if no forwarding number
+                response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+                response.hangup()
+                # Clean up status
+                if call_sid in response_status:
+                    del response_status[call_sid]
+                return Response(content=str(response), media_type="application/xml")
         
         else:
             # Still pending - play filler and redirect again
@@ -1280,9 +1333,24 @@ async def respond_with_audio(request: Request):
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
-        response.hangup()
-        return Response(content=str(response), media_type="application/xml")
+        
+        # On error, forward to business phone if available
+        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        if forwarding_phone:
+            print(f"🔄 Error in respond endpoint - forwarding to business phone: {forwarding_phone}")
+            # Try to get call data for language
+            call_data = active_calls.get(call_sid, {})
+            detected_lang = call_data.get("detected_language", "English")
+            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+            # Clean up status
+            if call_sid in response_status:
+                del response_status[call_sid]
+            return Response(content=str(response), media_type="application/xml")
+        else:
+            # Fallback: return error message if no forwarding number
+            response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
 
 @app.get("/api/phone/tts-audio-hd")
 async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
@@ -1500,14 +1568,26 @@ async def process_recording(request: Request):
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
-        print(f"Error processing recording: {e}")
+        print(f"❌ Error processing recording: {e}")
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        response.say("I'm sorry, I had trouble processing that. Please try again.", voice='alice')
         base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
-        response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
-        return Response(content=str(response), media_type="application/xml")
+        
+        # On error, forward to business phone if available
+        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        if forwarding_phone:
+            print(f"🔄 Error processing recording - forwarding to business phone: {forwarding_phone}")
+            # Try to get call data for language
+            call_data = active_calls.get(call_sid, {})
+            detected_lang = call_data.get("detected_language", "English")
+            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+            return Response(content=str(response), media_type="application/xml")
+        else:
+            # Fallback: ask to try again if no forwarding number
+            response.say("I'm sorry, I had trouble processing that. Please try again.", voice='alice')
+            response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+            return Response(content=str(response), media_type="application/xml")
 
 @app.post("/api/phone/recording-status")
 async def recording_status(request: Request):
