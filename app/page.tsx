@@ -46,7 +46,7 @@ export default function HomePage() {
               {/* RepsRight */}
               <div className="bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl p-8 shadow-lg text-center hover:shadow-xl hover:-translate-y-2 transition text-white">
                 <div className="h-28 flex items-center justify-center mb-6">
-                  <Image src="/assets/repsright-logo.svg" alt="RepsRight" width={120} height={90} />
+                  <Image src="/assets/repsright-logo.png" alt="RepsRight" width={120} height={90} className="object-contain" />
                 </div>
                 <h3 className="text-xl font-semibold mb-3">RepsRight</h3>
                 <p className="text-white/90 mb-4">
@@ -59,8 +59,8 @@ export default function HomePage() {
 
               {/* Nuvatra Voice */}
               <div className="bg-white rounded-2xl p-8 shadow-lg text-center hover:shadow-xl hover:-translate-y-2 transition">
-                <div className="h-28 flex items-center justify-center mb-6">
-                  <Image src="/assets/nuvatra-voice-logo.svg" alt="Nuvatra Voice" width={100} height={100} />
+                <div className="h-28 flex items-center justify-center mb-6 rounded-xl bg-black">
+                  <Image src="/assets/nuvatra-voice-logo.png" alt="Nuvatra Voice" width={100} height={100} className="object-contain" />
                 </div>
                 <h3 className="text-xl font-semibold mb-3">Nuvatra Voice</h3>
                 <p className="text-gray-600 mb-4">
