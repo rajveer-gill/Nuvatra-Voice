@@ -8,3 +8,7 @@
 [build.environment]
   NODE_VERSION = "20"
   NPM_FLAGS = "--legacy-peer-deps"
+  # NEXT_PUBLIC_* and API URL are inlined in the client bundle and appear in example/docs — not secret.
+  SECRETS_SCAN_OMIT_KEYS = "NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL,NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL,NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,NEXT_PUBLIC_API_URL"
+  # Don't flag example env file or docs that document these vars.
+  SECRETS_SCAN_OMIT_PATHS = ".env.local.example,AUTH-SETUP.md,DEPLOYMENT.md,PHONE-SETUP.md,README.md"
