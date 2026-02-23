@@ -29,17 +29,23 @@ An intelligent AI-powered voice receptionist for businesses: handle calls, sched
    ```
 
 2. **Environment**  
-   Create `backend/.env` (and optionally root `.env.local`):
+   Create `backend/.env` and root `.env.local`:
    ```env
+   # backend/.env
    OPENAI_API_KEY=your_openai_api_key
+
+   # .env.local (frontend)
+   NEXT_PUBLIC_API_URL=http://localhost:8000
+   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_xxxxx  # from clerk.com
+   CLERK_SECRET_KEY=sk_test_xxxxx                   # from clerk.com
    ```
-   For the frontend, set `NEXT_PUBLIC_API_URL=http://localhost:8000` in `.env.local` if needed.
+   See **[AUTH-SETUP.md](./AUTH-SETUP.md)** for Clerk setup.
 
 3. **Run both servers (one command)**
    - Windows: `bin\dev.cmd` or `npm run dev`
    - Mac/Linux: `./bin/dev` or `npm run dev`
 
-4. Open **http://localhost:3000** and click **Voice Call** to try the web interface.
+4. Open **http://localhost:3000** – marketing home (public). Log in to access **Dashboard** (Nuvatra Voice).
 
 See **[QUICK-START.md](./QUICK-START.md)** for running backend and frontend in separate terminals and troubleshooting.
 
@@ -52,7 +58,8 @@ See **[QUICK-START.md](./QUICK-START.md)** for running backend and frontend in s
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Deploy backend (Railway, Render) and optional frontend (Vercel) |
 | [CLIENT-SETUP.md](./CLIENT-SETUP.md) | Add a new client: config, onboarding checklist |
 | [TESTING-GUIDE.md](./TESTING-GUIDE.md) | Test web and phone flows |
-| [PROTOTYPE-SETUP.md](./PROTOTYPE-SETUP.md) | **Prototype number 925-481-5386** – Twilio webhooks, env, SMS, what you need to provide |
+| [AUTH-SETUP.md](./AUTH-SETUP.md) | **Clerk** – sign up, get keys, protect dashboard |
+| [PROTOTYPE-SETUP.md](./PROTOTYPE-SETUP.md) | **Prototype number 925-481-5386** – Twilio webhooks, env, SMS |
 | [PLANS-AND-FEATURES.md](./PLANS-AND-FEATURES.md) | **Starter / Growth / Pro** – feature matrix and what’s implemented vs roadmap |
 | [clients/README.md](./clients/README.md) | Client config structure and options |
 

@@ -84,32 +84,49 @@ In Railway, update the `NGROK_URL` variable to your Railway URL (no need for ngr
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-### Step 3: Add Environment Variables
-In Render dashboard → Environment:
+### Step 3: Add PostgreSQL (production)
+1. In Render dashboard, click **New** → **PostgreSQL**
+2. Create a database (e.g. `nuvatra-voice-db`)
+3. After creation, go to the database → **Connect** → copy the **Internal Database URL**
+4. Add it as an environment variable for your web service: `DATABASE_URL` = (paste the URL)
+
+Without `DATABASE_URL`, data is stored in memory/JSON and is lost on restart. With PostgreSQL, appointments, messages, call logs, caller memory, and booked slots persist.
+
+### Step 4: Add Environment Variables
+In Render dashboard → your web service → Environment:
 ```
+DATABASE_URL=postgres://...   (from Step 3)
 OPENAI_API_KEY=your_key
 TWILIO_ACCOUNT_SID=your_sid
 TWILIO_AUTH_TOKEN=your_token
 TWILIO_PHONE_NUMBER=+19254815386
 NGROK_URL=https://your-app.onrender.com
+CLIENT_ID=zenoti-test-store
 ```
 
-### Step 4: Deploy
+### Step 5: Deploy
 1. Click "Create Web Service"
 2. Wait for deployment (5-10 minutes)
 3. Get your URL: `https://your-app.onrender.com`
 
 **Note**: Free tier spins down after 15 min inactivity. Upgrade to paid ($7/month) for 24/7.
 
-## Frontend Deployment (Optional)
+## Frontend Deployment (Production)
 
-For the web interface, deploy to **Vercel** (free, perfect for Next.js):
+The Next.js app (marketing + login + dashboard) should be deployed where it runs in production (e.g. **Vercel** or **Netlify**). Set **Environment Variables** on that host — the app reads them at build/runtime.
 
-1. Go to [vercel.com](https://vercel.com)
-2. Import your GitHub repository
-3. Set environment variable:
-   - `NEXT_PUBLIC_API_URL`: Your backend URL (Railway/Render URL)
-4. Deploy!
+1. Go to [vercel.com](https://vercel.com) (or Netlify), import your GitHub repo, and create a project for the Nuvatra-Voice repo.
+2. In the project’s **Settings → Environment Variables**, add:
+
+| Variable | Value |
+|----------|--------|
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Your Clerk publishable key (pk_test_… or pk_live_…) |
+| `CLERK_SECRET_KEY` | Your Clerk secret key (sk_test_… or sk_live_…) |
+| `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL` | `/dashboard` |
+| `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL` | `/dashboard` |
+| `NEXT_PUBLIC_API_URL` | Your backend URL (e.g. `https://nuvatra-voice.onrender.com`) |
+
+3. Deploy. Sign-in and the protected dashboard will work in production only when these are set.
 
 ## Post-Deployment Checklist
 

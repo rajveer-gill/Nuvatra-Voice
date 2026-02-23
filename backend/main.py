@@ -284,6 +284,35 @@ elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
 PROJECT_ROOT = _backend_dir.parent
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 
+# Database: PostgreSQL when DATABASE_URL is set (production)
+USE_DB = False
+try:
+    from database import (
+        init_db,
+        db_appointments_get_all,
+        db_appointments_insert,
+        db_appointments_update,
+        db_appointments_get_by_id,
+        db_appointments_max_id,
+        db_messages_get_all,
+        db_messages_insert,
+        db_messages_max_id,
+        db_call_log_append,
+        db_call_log_load,
+        db_caller_memory_get,
+        db_caller_memory_upsert,
+        db_booked_slots_load,
+        db_booked_slots_save,
+    )
+    USE_DB = init_db()
+except (ImportError, Exception) as e:
+    if os.getenv("DATABASE_URL"):
+        print(f"[WARN] Database init failed (using in-memory storage): {e}")
+
+# In-memory fallback when no database (dev / testing)
+appointments: List[dict] = []
+messages: List[dict] = []
+
 def load_client_config():
     """Load business config from clients/<CLIENT_ID>/config.json. Returns None if not set or file missing."""
     if not CLIENT_ID:
@@ -440,6 +469,8 @@ def normalize_phone(phone: str) -> str:
 
 def get_caller_memory(phone: str) -> Optional[dict]:
     """Load caller memory for repeat-caller recognition. Returns None or {name, call_count, last_call_iso, last_reason}."""
+    if USE_DB:
+        return db_caller_memory_get(phone)
     data_dir = get_client_data_dir()
     if not data_dir:
         return None
@@ -456,6 +487,9 @@ def get_caller_memory(phone: str) -> Optional[dict]:
 
 def update_caller_memory(phone: str, name: Optional[str] = None, last_reason: Optional[str] = None):
     """Update caller memory after a call (increment count, set last call time and optional reason)."""
+    if USE_DB:
+        db_caller_memory_upsert(phone, name=name, last_reason=last_reason)
+        return
     data_dir = get_client_data_dir()
     if not data_dir:
         return
@@ -529,7 +563,7 @@ def call_log_end(call_sid: str):
     """Write completed call to persistent log and remove from in-memory."""
     if call_sid not in call_log_entries:
         return
-    entry = call_log_entries[call_sid]
+    entry = call_log_entries[call_sid].copy()
     entry["end_iso"] = datetime.now().isoformat()
     start_s = entry.get("start_iso")
     if start_s:
@@ -541,24 +575,27 @@ def call_log_end(call_sid: str):
             pass
     if not entry.get("outcome"):
         entry["outcome"] = "answered_by_ai"
-    data_dir = get_client_data_dir()
-    if data_dir:
-        path = data_dir / "call_log.json"
-        log_list = []
-        if path.exists():
+    if USE_DB:
+        db_call_log_append(entry)
+    else:
+        data_dir = get_client_data_dir()
+        if data_dir:
+            path = data_dir / "call_log.json"
+            log_list = []
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        log_list = json.load(f)
+                except Exception:
+                    pass
+            log_list.append(entry)
+            if len(log_list) > CALL_LOG_MAX_ENTRIES:
+                log_list = log_list[-CALL_LOG_MAX_ENTRIES:]
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    log_list = json.load(f)
-            except Exception:
-                pass
-        log_list.append(entry)
-        if len(log_list) > CALL_LOG_MAX_ENTRIES:
-            log_list = log_list[-CALL_LOG_MAX_ENTRIES:]
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(log_list, f, indent=2)
-        except Exception as e:
-            print(f"Failed to save call log: {e}")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(log_list, f, indent=2)
+            except Exception as e:
+                print(f"Failed to save call log: {e}")
     del call_log_entries[call_sid]
 
 # Booked slots (Zenoti-style: avoid double-book; inject into AI prompt)
@@ -566,6 +603,8 @@ DEFAULT_SLOT_DURATION_MINUTES = 30
 
 def _load_booked_slots() -> List[dict]:
     """Load booked slots from client data dir. Each entry: {date, time, appointment_id, duration_minutes?}."""
+    if USE_DB:
+        return db_booked_slots_load()
     data_dir = get_client_data_dir()
     if not data_dir:
         return []
@@ -579,6 +618,9 @@ def _load_booked_slots() -> List[dict]:
         return []
 
 def _save_booked_slots(slots: List[dict]) -> None:
+    if USE_DB:
+        db_booked_slots_save(slots)
+        return
     data_dir = get_client_data_dir()
     if not data_dir:
         return
@@ -696,9 +738,7 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
         return None
     if not is_slot_available(date, time):
         return None
-    apt_id = len(appointments) + 1
     appointment_data = {
-        "id": apt_id,
         "name": name,
         "email": (booking.get("email") or "").strip(),
         "phone": (booking.get("phone") or "").strip(),
@@ -706,11 +746,19 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
         "time": time,
         "reason": (booking.get("reason") or "").strip() or "—",
         "source": "receptionist",
-        "created_at": datetime.now().isoformat(),
         "status": "pending_review",
     }
-    appointments.append(appointment_data)
+    if USE_DB:
+        row = db_appointments_insert(appointment_data)
+        apt_id = row["id"]
+    else:
+        apt_id = len(appointments) + 1
+        appointment_data["id"] = apt_id
+        appointment_data["created_at"] = datetime.now().isoformat()
+        appointments.append(appointment_data)
     reserve_slot(date, time, apt_id)
+    appointment_data["id"] = apt_id
+    appointment_data.setdefault("created_at", datetime.now().isoformat())
     return appointment_data
 
 def uses_non_latin_script(language_name: str) -> bool:
@@ -1119,14 +1167,12 @@ async def create_appointment(appointment: AppointmentRequest):
         if source not in ("receptionist", "manual"):
             source = "manual"
         status = "pending_review" if source == "receptionist" else "pending"
-        appointment_id = len(appointments) + 1
         date = (appointment.date or "").strip()
         time = (appointment.time or "").strip()
         if date and time:
             if not is_slot_available(date, time):
                 raise HTTPException(status_code=409, detail="That time slot is already booked.")
         appointment_data = {
-            "id": appointment_id,
             "name": appointment.name,
             "email": appointment.email or "",
             "phone": appointment.phone or "",
@@ -1134,12 +1180,20 @@ async def create_appointment(appointment: AppointmentRequest):
             "time": time,
             "reason": appointment.reason or "",
             "source": source,
-            "created_at": datetime.now().isoformat(),
             "status": status,
         }
-        appointments.append(appointment_data)
+        if USE_DB:
+            row = db_appointments_insert(appointment_data)
+            appointment_id = row["id"]
+        else:
+            appointment_id = len(appointments) + 1
+            appointment_data["id"] = appointment_id
+            appointment_data["created_at"] = datetime.now().isoformat()
+            appointments.append(appointment_data)
         if date and time:
             reserve_slot(date, time, appointment_id)
+        appointment_data["id"] = appointment_id
+        appointment_data.setdefault("created_at", datetime.now().isoformat())
         return {"success": True, "appointment": appointment_data}
     except HTTPException:
         raise
@@ -1148,78 +1202,85 @@ async def create_appointment(appointment: AppointmentRequest):
 
 @app.get("/api/appointments")
 async def get_appointments():
-    for a in appointments:
+    lst = db_appointments_get_all() if USE_DB else appointments
+    for a in lst:
         a.setdefault("source", "manual")
         a.setdefault("status", "pending")
-    return {"appointments": appointments}
+    return {"appointments": lst}
 
 @app.patch("/api/appointments/{appointment_id}")
 async def update_appointment(appointment_id: int, update: AppointmentUpdate):
     """Update appointment status or details. Used by the appointments frontend."""
-    for i, apt in enumerate(appointments):
-        if apt["id"] == appointment_id:
-            if update.status is not None:
-                appointments[i]["status"] = update.status
-            if update.date is not None:
-                appointments[i]["date"] = update.date
-            if update.time is not None:
-                appointments[i]["time"] = update.time
-            if update.reason is not None:
-                appointments[i]["reason"] = update.reason
-            if update.name is not None:
-                appointments[i]["name"] = update.name
-            if update.email is not None:
-                appointments[i]["email"] = update.email
-            if update.phone is not None:
-                appointments[i]["phone"] = update.phone
-            return {"success": True, "appointment": appointments[i]}
+    kwargs = {}
+    if update.status is not None: kwargs["status"] = update.status
+    if update.date is not None: kwargs["date"] = update.date
+    if update.time is not None: kwargs["time"] = update.time
+    if update.reason is not None: kwargs["reason"] = update.reason
+    if update.name is not None: kwargs["name"] = update.name
+    if update.email is not None: kwargs["email"] = update.email
+    if update.phone is not None: kwargs["phone"] = update.phone
+    if USE_DB and kwargs:
+        apt = db_appointments_update(appointment_id, **kwargs)
+        if apt:
+            return {"success": True, "appointment": apt}
+    else:
+        for i, apt in enumerate(appointments):
+            if apt["id"] == appointment_id:
+                apt.update(kwargs)
+                return {"success": True, "appointment": apt}
     raise HTTPException(status_code=404, detail="Appointment not found")
 
 @app.post("/api/appointments/{appointment_id}/accept")
 async def accept_appointment(appointment_id: int):
     """Store accepted: mark appointment accepted and send confirmation SMS to customer."""
-    for i, apt in enumerate(appointments):
-        if apt["id"] == appointment_id:
-            appointments[i]["status"] = "accepted"
-            business_name = BUSINESS_INFO.get("name", "us")
-            date = apt.get("date", "")
-            time = apt.get("time", "")
-            msg = f"Your appointment at {business_name} is confirmed for {date} at {time}. Reply if you need to change."
-            send_sms(apt.get("phone") or "", msg)
-            return {"success": True, "appointment": appointments[i]}
-    raise HTTPException(status_code=404, detail="Appointment not found")
+    apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
+    if not apt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if USE_DB:
+        apt = db_appointments_update(appointment_id, status="accepted") or apt
+    else:
+        apt["status"] = "accepted"
+    business_name = BUSINESS_INFO.get("name", "us")
+    date = apt.get("date", "")
+    time = apt.get("time", "")
+    msg = f"Your appointment at {business_name} is confirmed for {date} at {time}. Reply if you need to change."
+    send_sms(apt.get("phone") or "", msg)
+    return {"success": True, "appointment": apt}
 
 @app.post("/api/appointments/{appointment_id}/reject")
 async def reject_appointment(appointment_id: int):
     """Store rejected (time not available): release slot and send SMS asking for alternative times."""
-    for i, apt in enumerate(appointments):
-        if apt["id"] == appointment_id:
-            appointments[i]["status"] = "rejected"
-            release_slot(appointment_id)
-            date = apt.get("date", "")
-            time = apt.get("time", "")
-            msg = f"Sorry, {time} on {date} isn't available. Please reply with 2-3 alternative dates and times that work for you."
-            send_sms(apt.get("phone") or "", msg)
-            return {"success": True, "appointment": appointments[i]}
-    raise HTTPException(status_code=404, detail="Appointment not found")
+    apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
+    if not apt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if USE_DB:
+        apt = db_appointments_update(appointment_id, status="rejected") or apt
+    else:
+        apt["status"] = "rejected"
+    release_slot(appointment_id)
+    date = apt.get("date", "")
+    time = apt.get("time", "")
+    msg = f"Sorry, {time} on {date} isn't available. Please reply with 2-3 alternative dates and times that work for you."
+    send_sms(apt.get("phone") or "", msg)
+    return {"success": True, "appointment": apt}
 
 @app.post("/api/messages")
 async def create_message(message: MessageRequest):
     try:
-        message_data = {
-            "id": len(messages) + 1,
-            **message.dict(),
-            "created_at": datetime.now().isoformat(),
-            "status": "unread"
-        }
-        messages.append(message_data)
+        data = {"caller_name": message.caller_name, "caller_phone": message.caller_phone, "message": message.message, "urgency": message.urgency, "status": "unread"}
+        if USE_DB:
+            message_data = db_messages_insert(data)
+        else:
+            message_data = {"id": len(messages) + 1, **data, "created_at": datetime.now().isoformat()}
+            messages.append(message_data)
         return {"success": True, "message": message_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/messages")
 async def get_messages():
-    return {"messages": messages}
+    lst = db_messages_get_all() if USE_DB else messages
+    return {"messages": lst}
 
 @app.get("/api/business-info")
 async def get_business_info():
@@ -1227,14 +1288,19 @@ async def get_business_info():
 
 @app.get("/api/stats")
 async def get_stats():
+    apts = db_appointments_get_all() if USE_DB else appointments
+    msgs = db_messages_get_all() if USE_DB else messages
+    pending = len([a for a in apts if a.get("status") == "pending"])
     return {
-        "total_appointments": len(appointments),
-        "total_messages": len(messages),
-        "pending_appointments": len([a for a in appointments if a["status"] == "pending"])
+        "total_appointments": len(apts),
+        "total_messages": len(msgs),
+        "pending_appointments": pending
     }
 
 def _load_call_log() -> List[dict]:
-    """Load call log from client data dir. Returns list of call entries (newest first in file may be last)."""
+    """Load call log from client data dir. Returns list of call entries (newest first)."""
+    if USE_DB:
+        return db_call_log_load()
     data_dir = get_client_data_dir()
     if not data_dir:
         return []

@@ -1,9 +1,10 @@
 import type { Metadata } from 'next'
+import { ClerkProvider } from '@clerk/nextjs'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Nuvatra Voice - AI Receptionist',
-  description: 'AI-powered voice receptionist for businesses',
+  title: 'Nuvatra - Innovative AI Solutions',
+  description: 'Nuvatra creates cutting-edge AI products including Grubify, RepsRight, and Nuvatra Voice.',
 }
 
 export default function RootLayout({
@@ -12,9 +13,11 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
+    <ClerkProvider>
+      <html lang="en">
+        <body>{children}</body>
+      </html>
+    </ClerkProvider>
   )
 }
 
