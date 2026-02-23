@@ -1,0 +1,10 @@
+# Netlify build for Next.js frontend only (backend runs on Render).
+# Do not install Python; this site is Node/Next.js only.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+  NPM_FLAGS = "--legacy-peer-deps"
