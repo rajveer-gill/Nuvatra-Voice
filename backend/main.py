@@ -68,41 +68,35 @@ async def pre_warm_openai():
     """Pre-warm OpenAI client and generate greeting audio"""
     global greeting_audio_cache, got_it_audio_cache
     try:
-        print("🔥 Pre-warming OpenAI client...")
-        # Send a dummy request to warm up the connection
+        print("[WARM] Pre-warming OpenAI client...")
         _ = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=5,
             temperature=0
         )
-        print("✅ OpenAI client pre-warmed successfully")
-        
-        # Generate greeting audio with OpenAI TTS (fable voice)
-        print("🎙️ Generating greeting audio with OpenAI TTS...")
-        greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
+        print("[OK] OpenAI client pre-warmed successfully")
+        print("[TTS] Generating greeting audio with OpenAI TTS...")
+        greeting_text = get_greeting_text()
         greeting_audio = client.audio.speech.create(
-            model="tts-1-hd",  # HD model for best quality
-            voice="fable",  # Same voice as rest of conversation
+            model="tts-1-hd",
+            voice="fable",
             input=greeting_text,
             speed=1.1
         )
         greeting_audio_cache = greeting_audio.content
-        print(f"✅ Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
-        
-        # Generate "Got it, one moment" audio with OpenAI TTS (fable voice)
-        print("🎙️ Generating 'Got it, one moment' audio with OpenAI TTS...")
-        got_it_text = "Got it, one moment."
+        print(f"[OK] Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
+        print("[TTS] Generating 'Got it, one moment' audio...")
         got_it_audio = client.audio.speech.create(
-            model="tts-1-hd",  # HD model for best quality
-            voice="fable",  # Same voice as rest of conversation
-            input=got_it_text,
+            model="tts-1-hd",
+            voice="fable",
+            input="Got it, one moment.",
             speed=1.1
         )
         got_it_audio_cache = got_it_audio.content
-        print(f"✅ 'Got it' audio generated and cached ({len(got_it_audio_cache)} bytes)")
+        print(f"[OK] 'Got it' audio generated and cached ({len(got_it_audio_cache)} bytes)")
     except Exception as e:
-        print(f"⚠️ Pre-warm warning (non-critical): {e}")
+        print(f"[WARN] Pre-warm warning (non-critical): {e}")
 
 async def keep_client_warm():
     """Background task to keep OpenAI client warm"""
@@ -111,7 +105,7 @@ async def keep_client_warm():
         try:
             pre_warm_openai()
         except Exception as e:
-            print(f"⚠️ Keep-warm error (non-critical): {e}")
+            print(f"[WARN] Keep-warm error (non-critical): {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -231,8 +225,11 @@ def generate_greeting_audio_sync():
     """Synchronously generate greeting audio on startup"""
     global greeting_audio_cache
     try:
-        print("🎙️ Generating greeting audio with OpenAI TTS (fable voice)...")
-        greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
+        print("[TTS] Generating greeting audio with OpenAI TTS (fable voice)...")
+        try:
+            greeting_text = get_greeting_text()
+        except NameError:
+            greeting_text = "Thank you for calling. How can I help you today?"
         greeting_audio = client.audio.speech.create(
             model="tts-1-hd",  # HD model for best quality
             voice="fable",  # Same voice as rest of conversation
@@ -240,10 +237,10 @@ def generate_greeting_audio_sync():
             speed=1.1
         )
         greeting_audio_cache = greeting_audio.content
-        print(f"✅ Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
+        print(f"[OK] Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
         return True
     except Exception as e:
-        print(f"⚠️ Failed to generate greeting audio on startup: {e}")
+        print(f"[WARN] Failed to generate greeting audio on startup: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -269,6 +266,7 @@ except Exception as e:
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+TWILIO_SMS_FROM = os.getenv("TWILIO_SMS_FROM") or TWILIO_PHONE_NUMBER  # Same or separate number for SMS
 
 twilio_client = None
 if TWILIO_AVAILABLE and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
@@ -282,41 +280,86 @@ elif not TWILIO_AVAILABLE:
 elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
     print("WARNING: Twilio credentials not found - phone features will be disabled")
 
-# In-memory storage (replace with database in production)
-appointments = []
-messages = []
-conversation_history = {}
+# Project root (parent of backend) for client configs
+PROJECT_ROOT = _backend_dir.parent
+CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 
-# Business configuration
-# DEMO MODE: Restaurant example for sales demos
-# For production clients, this will be customized per business
-BUSINESS_INFO = {
-    "name": "Nuvatra Demo Restaurant",
-    "hours": "Monday-Thursday: 11 AM - 9 PM, Friday-Saturday: 11 AM - 10 PM, Sunday: 12 PM - 8 PM",
-    "phone": "(925) 997-8995",  # This is the forwarding number (store's actual phone)
-    "forwarding_phone": os.getenv("BUSINESS_FORWARDING_PHONE", "+19259978995"),  # Format: +1XXXXXXXXXX
-    "email": "info@nuvatrademo.com",
-    "address": "123 Main Street, City, State 12345",
-    "departments": ["Reservations", "Takeout", "Catering", "General"],
-    "menu_link": "https://example.com/menu",  # Demo menu link
-    "services": [
-        "Dine-in",
-        "Takeout",
-        "Delivery",
-        "Catering",
-        "Private Events"
-    ],
-    "specials": [
-        "Happy Hour: 4 PM - 6 PM daily - 20% off appetizers",
-        "Weekend Brunch: Saturday & Sunday 11 AM - 2 PM",
-        "Family Night: Tuesday - Kids eat free with adult entree"
-    ],
-    "reservation_rules": [
-        "Reservations recommended for parties of 6 or more",
-        "Call ahead for same-day reservations",
-        "Large parties (10+) require 48-hour notice"
-    ]
-}
+def load_client_config():
+    """Load business config from clients/<CLIENT_ID>/config.json. Returns None if not set or file missing."""
+    if not CLIENT_ID:
+        return None
+    config_path = PROJECT_ROOT / "clients" / CLIENT_ID / "config.json"
+    if not config_path.exists():
+        print(f"WARNING: Client config not found: {config_path}")
+        return None
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Normalize to BUSINESS_INFO shape
+        forwarding = (data.get("forwarding_phone") or os.getenv("BUSINESS_FORWARDING_PHONE") or "")
+        if not forwarding and data.get("locations"):
+            forwarding = data["locations"][0].get("forwarding_phone", "")
+        info = {
+            "name": data.get("business_name", data.get("name", "Business")),
+            "hours": data.get("hours", ""),
+            "phone": data.get("phone", ""),
+            "forwarding_phone": forwarding,
+            "email": data.get("email", ""),
+            "address": data.get("address", ""),
+            "departments": data.get("departments", ["General"]),
+            "menu_link": data.get("menu_link", ""),
+            "services": data.get("services", []),
+            "specials": data.get("specials", []),
+            "reservation_rules": data.get("reservation_rules", []),
+            "staff": data.get("staff", []),
+            "locations": data.get("locations", []),
+            "greeting": data.get("greeting", "Thank you for calling. How can I help you today?"),
+            "plan": data.get("plan", "starter"),
+        }
+        print(f"Loaded client config: {CLIENT_ID} ({info['name']})")
+        return info
+    except Exception as e:
+        print(f"WARNING: Failed to load client config: {e}")
+        return None
+
+# Business configuration: from client config or demo default
+_client_config = load_client_config()
+if _client_config:
+    BUSINESS_INFO = _client_config
+else:
+    BUSINESS_INFO = {
+        "name": "Nuvatra Demo Restaurant",
+        "hours": "Monday-Thursday: 11 AM - 9 PM, Friday-Saturday: 11 AM - 10 PM, Sunday: 12 PM - 8 PM",
+        "phone": "(925) 481-5386",
+        "forwarding_phone": os.getenv("BUSINESS_FORWARDING_PHONE", "+19259978995"),
+        "email": "info@nuvatrademo.com",
+        "address": "123 Main Street, City, State 12345",
+        "departments": ["Reservations", "Takeout", "Catering", "General"],
+        "menu_link": "https://example.com/menu",
+        "services": ["Dine-in", "Takeout", "Delivery", "Catering", "Private Events"],
+        "specials": [
+            "Happy Hour: 4 PM - 6 PM daily - 20% off appetizers",
+            "Weekend Brunch: Saturday & Sunday 11 AM - 2 PM",
+            "Family Night: Tuesday - Kids eat free with adult entree"
+        ],
+        "reservation_rules": [
+            "Reservations recommended for parties of 6 or more",
+            "Call ahead for same-day reservations",
+            "Large parties (10+) require 48-hour notice"
+        ],
+        "staff": [],
+        "locations": [],
+        "greeting": "Thank you for calling. How can I help you today?",
+        "plan": "starter",
+    }
+
+def get_greeting_text() -> str:
+    """Greeting for phone (uses client config if set)."""
+    raw = BUSINESS_INFO.get("greeting") or "Thank you for calling. How can I help you today?"
+    try:
+        return raw.format(business_name=BUSINESS_INFO.get("name", "us"))
+    except KeyError:
+        return raw
 
 class ConversationRequest(BaseModel):
     message: str
@@ -335,6 +378,16 @@ class AppointmentRequest(BaseModel):
     date: str
     time: str
     reason: str
+    source: Optional[str] = "manual"  # "receptionist" | "manual"
+
+class AppointmentUpdate(BaseModel):
+    status: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    reason: Optional[str] = None
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
 
 class MessageRequest(BaseModel):
     caller_name: str
@@ -345,6 +398,320 @@ class MessageRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
+
+def _phone_to_e164(phone: str) -> Optional[str]:
+    """Convert to E.164 for Twilio SMS (e.g. +15551234567). Returns None if too short."""
+    digits = "".join(c for c in phone if c.isdigit())
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    if len(digits) >= 10:
+        return f"+{digits}"
+    return None
+
+def send_sms(to_phone: str, body: str) -> bool:
+    """Send SMS via Twilio. Returns True on success, False otherwise. Logs errors."""
+    if not TWILIO_AVAILABLE or not twilio_client or not TWILIO_SMS_FROM:
+        print("SMS skipped: Twilio not configured or SMS from number missing")
+        return False
+    e164 = _phone_to_e164(to_phone or "")
+    if not e164:
+        print(f"SMS skipped: invalid or short phone: {to_phone}")
+        return False
+    try:
+        twilio_client.messages.create(from_=TWILIO_SMS_FROM, to=e164, body=body)
+        return True
+    except Exception as e:
+        print(f"SMS send failed: {e}")
+        return False
+
+def get_client_data_dir() -> Optional[Path]:
+    """Return Path to client data directory (for call_log, caller_memory). None if no CLIENT_ID."""
+    if not CLIENT_ID:
+        return None
+    d = PROJECT_ROOT / "clients" / CLIENT_ID
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def normalize_phone(phone: str) -> str:
+    """Normalize to E.164-ish key (digits only, no +)."""
+    return "".join(c for c in phone if c.isdigit())
+
+def get_caller_memory(phone: str) -> Optional[dict]:
+    """Load caller memory for repeat-caller recognition. Returns None or {name, call_count, last_call_iso, last_reason}."""
+    data_dir = get_client_data_dir()
+    if not data_dir:
+        return None
+    path = data_dir / "caller_memory.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        key = normalize_phone(phone)
+        return data.get(key)
+    except Exception:
+        return None
+
+def update_caller_memory(phone: str, name: Optional[str] = None, last_reason: Optional[str] = None):
+    """Update caller memory after a call (increment count, set last call time and optional reason)."""
+    data_dir = get_client_data_dir()
+    if not data_dir:
+        return
+    path = data_dir / "caller_memory.json"
+    data = {}
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    key = normalize_phone(phone)
+    entry = data.setdefault(key, {"name": "", "call_count": 0, "last_call_iso": "", "last_reason": ""})
+    entry["call_count"] = entry.get("call_count", 0) + 1
+    entry["last_call_iso"] = datetime.now().isoformat()
+    if name:
+        entry["name"] = name
+    if last_reason is not None:
+        entry["last_reason"] = last_reason
+    data[key] = entry
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save caller memory: {e}")
+
+def get_staff_phone_by_name(name: str) -> Optional[str]:
+    """Return E.164 phone for staff member by name (case-insensitive match)."""
+    staff = BUSINESS_INFO.get("staff") or []
+    name_clean = name.strip().lower()
+    for s in staff:
+        if s.get("name", "").strip().lower() == name_clean:
+            phone = (s.get("phone") or "").strip()
+            if phone:
+                return phone
+    return None
+
+def parse_transfer_to(ai_text: str) -> Optional[str]:
+    """If AI responded with TRANSFER_TO: Name, return the name; else None."""
+    if not ai_text:
+        return None
+    t = ai_text.strip()
+    prefix = "TRANSFER_TO:"
+    if t.upper().startswith(prefix):
+        return t[len(prefix):].strip()
+    return None
+
+# Call log (Pro analytics): in-memory index by call_sid, persisted to JSON
+call_log_entries = {}  # call_sid -> {from_number, to_number, start_iso, outcome, ...}
+CALL_LOG_MAX_ENTRIES = 5000
+
+def call_log_start(call_sid: str, from_number: str, to_number: str):
+    """Record call start. Outcome set when we forward or in status callback."""
+    call_log_entries[call_sid] = {
+        "call_sid": call_sid,
+        "from_number": from_number,
+        "to_number": to_number,
+        "start_iso": datetime.now().isoformat(),
+        "outcome": None,
+        "end_iso": None,
+        "duration_sec": None,
+        "category": None,
+    }
+
+def call_log_set_outcome(call_sid: str, outcome: str):
+    """Set outcome: 'forwarded', 'answered_by_ai', 'missed', 'error', 'no-answer'."""
+    if call_sid in call_log_entries:
+        call_log_entries[call_sid]["outcome"] = outcome
+
+def call_log_end(call_sid: str):
+    """Write completed call to persistent log and remove from in-memory."""
+    if call_sid not in call_log_entries:
+        return
+    entry = call_log_entries[call_sid]
+    entry["end_iso"] = datetime.now().isoformat()
+    start_s = entry.get("start_iso")
+    if start_s:
+        try:
+            start_dt = datetime.fromisoformat(start_s.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(entry["end_iso"].replace("Z", "+00:00"))
+            entry["duration_sec"] = int((end_dt - start_dt).total_seconds())
+        except Exception:
+            pass
+    if not entry.get("outcome"):
+        entry["outcome"] = "answered_by_ai"
+    data_dir = get_client_data_dir()
+    if data_dir:
+        path = data_dir / "call_log.json"
+        log_list = []
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    log_list = json.load(f)
+            except Exception:
+                pass
+        log_list.append(entry)
+        if len(log_list) > CALL_LOG_MAX_ENTRIES:
+            log_list = log_list[-CALL_LOG_MAX_ENTRIES:]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(log_list, f, indent=2)
+        except Exception as e:
+            print(f"Failed to save call log: {e}")
+    del call_log_entries[call_sid]
+
+# Booked slots (Zenoti-style: avoid double-book; inject into AI prompt)
+DEFAULT_SLOT_DURATION_MINUTES = 30
+
+def _load_booked_slots() -> List[dict]:
+    """Load booked slots from client data dir. Each entry: {date, time, appointment_id, duration_minutes?}."""
+    data_dir = get_client_data_dir()
+    if not data_dir:
+        return []
+    path = data_dir / "booked_slots.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_booked_slots(slots: List[dict]) -> None:
+    data_dir = get_client_data_dir()
+    if not data_dir:
+        return
+    path = data_dir / "booked_slots.json"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(slots, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save booked_slots: {e}")
+
+def get_booked_slots(date: str) -> List[dict]:
+    """Return slots already booked for the given date (YYYY-MM-DD)."""
+    slots = _load_booked_slots()
+    return [s for s in slots if s.get("date") == date]
+
+def _slot_overlaps(
+    start_a: str, duration_a: int,
+    start_b: str, duration_b: int
+) -> bool:
+    """True if two time windows overlap. start_* is HH:MM."""
+    def to_minutes(t: str) -> int:
+        parts = t.strip().split(":")
+        h = int(parts[0]) if parts else 0
+        m = int(parts[1]) if len(parts) > 1 else 0
+        return h * 60 + m
+    a_start = to_minutes(start_a)
+    a_end = a_start + duration_a
+    b_start = to_minutes(start_b)
+    b_end = b_start + duration_b
+    return a_start < b_end and b_start < a_end
+
+def is_slot_available(
+    date: str, time: str, duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES
+) -> bool:
+    """True if no overlapping booking for this date+time."""
+    slots = get_booked_slots(date)
+    for s in slots:
+        d = s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES
+        if _slot_overlaps(time, duration_minutes, s.get("time", ""), d):
+            return False
+    return True
+
+def reserve_slot(
+    date: str, time: str, appointment_id: int,
+    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES
+) -> None:
+    """Record a slot as booked when creating an appointment."""
+    slots = _load_booked_slots()
+    slots.append({
+        "date": date,
+        "time": time,
+        "appointment_id": appointment_id,
+        "duration_minutes": duration_minutes,
+    })
+    _save_booked_slots(slots)
+
+def release_slot(appointment_id: int) -> None:
+    """Remove slot when appointment is rejected or cancelled."""
+    slots = _load_booked_slots()
+    slots = [s for s in slots if s.get("appointment_id") != appointment_id]
+    _save_booked_slots(slots)
+
+def get_booked_slots_prompt_text(days_ahead: int = 7) -> str:
+    """Build a short line for the system prompt: already booked slots for today + days_ahead."""
+    from datetime import timedelta
+    today = datetime.now().date()
+    parts = []
+    for d in range(days_ahead):
+        day = today + timedelta(days=d)
+        date_str = day.isoformat()
+        slots = get_booked_slots(date_str)
+        if slots:
+            times = [s.get("time", "") for s in slots if s.get("time")]
+            if times:
+                parts.append(f"{date_str} at {', '.join(times)}")
+    if not parts:
+        return ""
+    return "Booked slots (do not double-book): " + "; ".join(parts) + ". If the caller requests any of these times, say that slot is taken and suggest another time or another stylist."
+
+def _suggests_booking(text: str) -> bool:
+    """True if the message suggests the caller wants to book/appointment/reservation."""
+    if not text or len(text.strip()) < 2:
+        return False
+    t = text.lower()
+    return any(k in t for k in ("book", "appointment", "reservation", "reserve", "schedule", "available", "slot", "time for"))
+
+def parse_booking(ai_text: str) -> Optional[dict]:
+    """If AI responded with BOOKING: name|phone|email|date|time|reason, return dict; else None."""
+    if not ai_text or "BOOKING:" not in ai_text:
+        return None
+    line = ai_text.strip()
+    for part in line.split("\n"):
+        part = part.strip()
+        if part.upper().startswith("BOOKING:"):
+            rest = part[len("BOOKING:"):].strip()
+            vals = [v.strip() for v in rest.split("|")]
+            if len(vals) >= 5:
+                return {
+                    "name": vals[0] if len(vals) > 0 else "",
+                    "phone": vals[1] if len(vals) > 1 else "",
+                    "email": vals[2] if len(vals) > 2 else "",
+                    "date": vals[3] if len(vals) > 3 else "",
+                    "time": vals[4] if len(vals) > 4 else "",
+                    "reason": vals[5] if len(vals) > 5 else "",
+                }
+            break
+    return None
+
+def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
+    """Create appointment from parsed BOOKING; check slot; return appointment_data or None (slot taken)."""
+    date = (booking.get("date") or "").strip()
+    time = (booking.get("time") or "").strip()
+    name = (booking.get("name") or "").strip()
+    if not name or not date or not time:
+        return None
+    if not is_slot_available(date, time):
+        return None
+    apt_id = len(appointments) + 1
+    appointment_data = {
+        "id": apt_id,
+        "name": name,
+        "email": (booking.get("email") or "").strip(),
+        "phone": (booking.get("phone") or "").strip(),
+        "date": date,
+        "time": time,
+        "reason": (booking.get("reason") or "").strip() or "—",
+        "source": "receptionist",
+        "created_at": datetime.now().isoformat(),
+        "status": "pending_review",
+    }
+    appointments.append(appointment_data)
+    reserve_slot(date, time, apt_id)
+    return appointment_data
 
 def uses_non_latin_script(language_name: str) -> bool:
     """
@@ -417,36 +784,64 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
     try:
         print(f"🤖 Generating response for call {call_sid}...")
         
-        # Get AI response - use faster model for phone calls
+        # Booking context: include booked slots when conversation suggests booking
+        include_slots = any(
+            _suggests_booking(m.get("content") or "")
+            for m in call_data["conversation_history"]
+            if m.get("role") == "user"
+        )
         messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang)}
+            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=include_slots)}
         ]
         messages.extend(call_data["conversation_history"])
         
-        # Use gpt-3.5-turbo with aggressive optimizations for ultra-fast responses
         ai_response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # Fastest quality model
+            model="gpt-3.5-turbo",
             messages=messages,
-            temperature=0.8,  # Slightly higher for more natural responses
-            max_tokens=80,  # Very brief for phone - faster generation
+            temperature=0.8,
+            max_tokens=80,
             stream=False
         )
         
         ai_text = ai_response.choices[0].message.content
         print(f"✅ GPT response generated: {ai_text[:50]}...")
         
+        # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
+        booking = parse_booking(ai_text)
+        if booking:
+            apt = _create_appointment_from_booking(booking)
+            if apt:
+                ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
+            else:
+                ai_text = "That time slot just got booked. Would you like to try another time or another stylist?"
+        
         # Add AI response to conversation
-        ai_message = {
-            "role": "assistant",
-            "content": ai_text
-        }
+        ai_message = {"role": "assistant", "content": ai_text}
         call_data["conversation_history"].append(ai_message)
+        
+        # Pro: Staff transfer - AI may respond with TRANSFER_TO: Name
+        transfer_name = parse_transfer_to(ai_text)
+        if transfer_name:
+            staff_phone = get_staff_phone_by_name(transfer_name)
+            if staff_phone:
+                print(f"🔄 Transferring to staff: {transfer_name} -> {staff_phone}")
+                call_data["outcome"] = "forwarded"
+                call_log_set_outcome(call_sid, "forwarded")
+                response_status[call_sid] = {
+                    "status": "forward",
+                    "audio_url": None,
+                    "ai_text": ai_text,
+                    "forwarding_phone": staff_phone
+                }
+                return
         
         # Check if user wants to talk to a real person - forward if needed
         if should_forward_to_human("", ai_text):  # Check AI response for forwarding intent
             print(f"🔄 Forwarding call to business phone: {BUSINESS_INFO.get('forwarding_phone')}")
             forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
             if forwarding_phone:
+                call_data["outcome"] = "forwarded"
+                call_log_set_outcome(call_sid, "forwarded")
                 response_status[call_sid] = {
                     "status": "forward",
                     "audio_url": None,
@@ -619,13 +1014,29 @@ Respond with just the language name, nothing else."""
     # Default to English if detection fails
     return "English"
 
-def get_system_prompt(detected_language: str = "English"):
+def get_system_prompt(detected_language: str = "English", caller_memory: Optional[dict] = None, include_booked_slots: bool = False):
     # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
     # CRITICAL: Respond ONLY in the detected language (language can change mid-conversation)
-    # Include demo-specific info: menu, services, specials, reservations
     services_list = ', '.join(BUSINESS_INFO.get('services', []))
     specials_list = ' | '.join(BUSINESS_INFO.get('specials', []))
     reservation_info = ' | '.join(BUSINESS_INFO.get('reservation_rules', []))
+    staff = BUSINESS_INFO.get("staff") or []
+    staff_block = ""
+    if staff:
+        staff_names = [s.get("name", "") for s in staff if s.get("name")]
+        staff_block = f"\n- Staff you can transfer to: {', '.join(staff_names)}. When the caller asks to speak to one of these people by name, reply with EXACTLY: TRANSFER_TO: [Name] (use the exact name from the list). Otherwise do not use TRANSFER_TO."
+    memory_block = ""
+    if caller_memory and isinstance(caller_memory, dict):
+        name = caller_memory.get("name") or "there"
+        count = caller_memory.get("call_count", 0)
+        last = caller_memory.get("last_reason") or "general inquiry"
+        memory_block = f"\n- This is a REPEAT CALLER. Greet them warmly; you may say welcome back. Name if we have it: {name}. They have called {count} time(s) before; last time: {last}."
+    slots_block = ""
+    if include_booked_slots:
+        slots_text = get_booked_slots_prompt_text()
+        if slots_text:
+            slots_block = f"\n- {slots_text}"
+        slots_block += "\n- When the caller has confirmed a booking (you have their name, phone, date, time, and service/reason) and the slot is available, reply with EXACTLY one line: BOOKING: name|phone|email|date|time|reason (use | as separator; date YYYY-MM-DD, time HH:MM; omit optional email if unknown). Do not output BOOKING until the caller has confirmed. If a requested time is taken, suggest another time or another stylist."
     
     base_prompt = f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! 
 
@@ -636,7 +1047,7 @@ You can help with:
 - Specials: {specials_list}
 - Reservations: {reservation_info}
 - Menu: Available at {BUSINESS_INFO.get('menu_link', 'our website')}
-- Routing to: {', '.join(BUSINESS_INFO['departments'])}"""
+- Routing to: {', '.join(BUSINESS_INFO.get('departments', []))}{staff_block}{memory_block}{slots_block}"""
     
     if detected_language != "English":
         return f"""{base_prompt} CRITICAL INSTRUCTION: The caller is currently speaking in {detected_language}. You MUST respond ONLY in {detected_language}. Do NOT respond in English or any other language. Every word of your response must be in {detected_language}. If the caller switches languages, adapt immediately and respond in their new language."""
@@ -650,35 +1061,43 @@ async def root():
 @app.post("/api/conversation", response_model=ConversationResponse)
 async def handle_conversation(request: ConversationRequest):
     try:
-        # Build conversation messages
-        messages = [
-            {"role": "system", "content": get_system_prompt()}
-        ]
-        
-        # Add conversation history
+        # Booking context: include booked slots in prompt when user is discussing booking
+        include_slots = _suggests_booking(request.message)
+        if request.conversation_history:
+            for m in request.conversation_history:
+                if m.get("role") == "user" and _suggests_booking(m.get("content") or ""):
+                    include_slots = True
+                    break
+        system_content = get_system_prompt(include_booked_slots=include_slots)
+        messages = [{"role": "system", "content": system_content}]
         if request.conversation_history:
             messages.extend(request.conversation_history)
-        
-        # Add current message
         messages.append({"role": "user", "content": request.message})
         
-        # Call OpenAI - use gpt-3.5-turbo for faster responses
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # Faster response time while maintaining quality
+            model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.7,
             max_tokens=200
         )
         
         ai_response = response.choices[0].message.content
-        
-        # Detect actions in the response
         action = None
         data = None
         
-        # Simple action detection (can be enhanced with function calling)
+        # BOOKING: create appointment from AI output if present
+        booking = parse_booking(ai_response)
+        if booking:
+            apt = _create_appointment_from_booking(booking)
+            if apt:
+                ai_response = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
+                action = "schedule_appointment"
+                data = {"appointment_id": apt["id"]}
+            else:
+                ai_response = "That time slot just got booked. Would you like to try another time or another stylist?"
+        
         if "schedule" in request.message.lower() or "appointment" in request.message.lower():
-            action = "schedule_appointment"
+            action = action or "schedule_appointment"
         elif "message" in request.message.lower() or "leave a message" in request.message.lower():
             action = "take_message"
         elif "transfer" in request.message.lower() or "department" in request.message.lower():
@@ -696,20 +1115,93 @@ async def handle_conversation(request: ConversationRequest):
 @app.post("/api/appointments")
 async def create_appointment(appointment: AppointmentRequest):
     try:
+        source = (appointment.source or "manual").strip().lower()
+        if source not in ("receptionist", "manual"):
+            source = "manual"
+        status = "pending_review" if source == "receptionist" else "pending"
+        appointment_id = len(appointments) + 1
+        date = (appointment.date or "").strip()
+        time = (appointment.time or "").strip()
+        if date and time:
+            if not is_slot_available(date, time):
+                raise HTTPException(status_code=409, detail="That time slot is already booked.")
         appointment_data = {
-            "id": len(appointments) + 1,
-            **appointment.dict(),
+            "id": appointment_id,
+            "name": appointment.name,
+            "email": appointment.email or "",
+            "phone": appointment.phone or "",
+            "date": date,
+            "time": time,
+            "reason": appointment.reason or "",
+            "source": source,
             "created_at": datetime.now().isoformat(),
-            "status": "pending"
+            "status": status,
         }
         appointments.append(appointment_data)
+        if date and time:
+            reserve_slot(date, time, appointment_id)
         return {"success": True, "appointment": appointment_data}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/appointments")
 async def get_appointments():
+    for a in appointments:
+        a.setdefault("source", "manual")
+        a.setdefault("status", "pending")
     return {"appointments": appointments}
+
+@app.patch("/api/appointments/{appointment_id}")
+async def update_appointment(appointment_id: int, update: AppointmentUpdate):
+    """Update appointment status or details. Used by the appointments frontend."""
+    for i, apt in enumerate(appointments):
+        if apt["id"] == appointment_id:
+            if update.status is not None:
+                appointments[i]["status"] = update.status
+            if update.date is not None:
+                appointments[i]["date"] = update.date
+            if update.time is not None:
+                appointments[i]["time"] = update.time
+            if update.reason is not None:
+                appointments[i]["reason"] = update.reason
+            if update.name is not None:
+                appointments[i]["name"] = update.name
+            if update.email is not None:
+                appointments[i]["email"] = update.email
+            if update.phone is not None:
+                appointments[i]["phone"] = update.phone
+            return {"success": True, "appointment": appointments[i]}
+    raise HTTPException(status_code=404, detail="Appointment not found")
+
+@app.post("/api/appointments/{appointment_id}/accept")
+async def accept_appointment(appointment_id: int):
+    """Store accepted: mark appointment accepted and send confirmation SMS to customer."""
+    for i, apt in enumerate(appointments):
+        if apt["id"] == appointment_id:
+            appointments[i]["status"] = "accepted"
+            business_name = BUSINESS_INFO.get("name", "us")
+            date = apt.get("date", "")
+            time = apt.get("time", "")
+            msg = f"Your appointment at {business_name} is confirmed for {date} at {time}. Reply if you need to change."
+            send_sms(apt.get("phone") or "", msg)
+            return {"success": True, "appointment": appointments[i]}
+    raise HTTPException(status_code=404, detail="Appointment not found")
+
+@app.post("/api/appointments/{appointment_id}/reject")
+async def reject_appointment(appointment_id: int):
+    """Store rejected (time not available): release slot and send SMS asking for alternative times."""
+    for i, apt in enumerate(appointments):
+        if apt["id"] == appointment_id:
+            appointments[i]["status"] = "rejected"
+            release_slot(appointment_id)
+            date = apt.get("date", "")
+            time = apt.get("time", "")
+            msg = f"Sorry, {time} on {date} isn't available. Please reply with 2-3 alternative dates and times that work for you."
+            send_sms(apt.get("phone") or "", msg)
+            return {"success": True, "appointment": appointments[i]}
+    raise HTTPException(status_code=404, detail="Appointment not found")
 
 @app.post("/api/messages")
 async def create_message(message: MessageRequest):
@@ -740,6 +1232,64 @@ async def get_stats():
         "total_messages": len(messages),
         "pending_appointments": len([a for a in appointments if a["status"] == "pending"])
     }
+
+def _load_call_log() -> List[dict]:
+    """Load call log from client data dir. Returns list of call entries (newest first in file may be last)."""
+    data_dir = get_client_data_dir()
+    if not data_dir:
+        return []
+    path = data_dir / "call_log.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+@app.get("/api/analytics/summary")
+async def get_analytics_summary():
+    """Pro: Peak call times, outcomes, total calls. Requires CLIENT_ID."""
+    log = _load_call_log()
+    if not log:
+        return {
+            "total_calls": 0,
+            "by_outcome": {},
+            "by_hour": {str(h): 0 for h in range(24)},
+            "by_day_of_week": {str(d): 0 for d in range(7)},
+            "client_id": CLIENT_ID or None,
+        }
+    by_outcome = {}
+    by_hour = {str(h): 0 for h in range(24)}
+    by_day = {str(d): 0 for d in range(7)}
+    for entry in log:
+        o = entry.get("outcome") or "unknown"
+        by_outcome[o] = by_outcome.get(o, 0) + 1
+        start_iso = entry.get("start_iso")
+        if start_iso:
+            try:
+                dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                by_hour[str(dt.hour)] = by_hour.get(str(dt.hour), 0) + 1
+                by_day[str(dt.weekday())] = by_day.get(str(dt.weekday()), 0) + 1
+            except Exception:
+                pass
+    return {
+        "total_calls": len(log),
+        "by_outcome": by_outcome,
+        "by_hour": by_hour,
+        "by_day_of_week": by_day,
+        "client_id": CLIENT_ID or None,
+    }
+
+@app.get("/api/analytics/calls")
+async def get_analytics_calls(limit: int = 50, outcome: Optional[str] = None):
+    """Pro: Recent calls for dashboard. Optional filter by outcome."""
+    log = _load_call_log()
+    # Log is stored oldest first; we want newest first
+    log = list(reversed(log))
+    if outcome:
+        log = [e for e in log if (e.get("outcome") or "") == outcome]
+    return {"calls": log[:limit], "client_id": CLIENT_ID or None}
 
 @app.post("/api/text-to-speech")
 async def text_to_speech(request: TTSRequest):
@@ -790,7 +1340,7 @@ async def get_greeting_audio():
     if greeting_audio_cache is None:
         # Fallback: generate on the fly if cache is empty
         try:
-            greeting_text = "Hello! This is your AI receptionist. It may take a couple seconds to process what you say. How can I help you?"
+            greeting_text = get_greeting_text()
             greeting_audio = client.audio.speech.create(
                 model="tts-1-hd",
                 voice="fable",
@@ -870,6 +1420,10 @@ async def handle_incoming_call(request: Request):
         
         print(f"📞 Incoming call: {from_number} -> {to_number} (CallSid: {call_sid})")
         
+        # Pro: call log start + customer memory for repeat callers
+        call_log_start(call_sid, from_number, to_number)
+        caller_memory = get_caller_memory(from_number)
+        
         # Create a new session for this call
         session_id = f"phone-{call_sid}"
         active_calls[call_sid] = {
@@ -878,7 +1432,8 @@ async def handle_incoming_call(request: Request):
             "to_number": to_number,
             "conversation_history": [],
             "detected_language": None,  # Will be detected from first speech input
-            "started_at": datetime.now().isoformat()
+            "started_at": datetime.now().isoformat(),
+            "caller_memory": caller_memory,
         }
         
         # Create TwiML response
@@ -1076,6 +1631,8 @@ async def process_speech(request: Request):
             print(f"🔄 Forwarding call to business phone: {BUSINESS_INFO.get('forwarding_phone')}")
             forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
             if forwarding_phone:
+                call_data["outcome"] = "forwarded"
+                call_log_set_outcome(call_sid, "forwarded")
                 response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
                 return Response(content=str(response), media_type="application/xml")
         
@@ -1179,11 +1736,23 @@ async def handle_call_status(request: Request):
         
         print(f"📞 Call status update: {call_sid} -> {call_status}")
         
-        # Clean up when call ends
+        # Clean up when call ends + Pro: persist call log and customer memory
         if call_status in ["completed", "failed", "busy", "no-answer", "canceled"]:
             if call_sid in active_calls:
+                call_data = active_calls[call_sid]
+                outcome = call_data.get("outcome")
+                if outcome:
+                    call_log_set_outcome(call_sid, outcome)
+                from_number = call_data.get("from_number")
+                if from_number:
+                    update_caller_memory(from_number)
+                call_log_end(call_sid)
                 del active_calls[call_sid]
                 print(f"Cleaned up call session: {call_sid}")
+            elif call_sid in call_log_entries:
+                # Call was logged but not in active_calls (e.g. quick hangup)
+                call_log_set_outcome(call_sid, "missed" if call_status == "completed" else call_status)
+                call_log_end(call_sid)
         
         return Response(content="OK", media_type="text/plain")
     

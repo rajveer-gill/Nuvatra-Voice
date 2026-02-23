@@ -6,18 +6,21 @@ This directory contains configuration files for each client's AI receptionist.
 
 ```
 clients/
+├── template/                # Generic template — copy for ANY new business
+│   ├── config.json          # Pro plan config (placeholders)
+│   └── README.md
+├── zenoti-test-store/       # Prototype/test client (925-481-5386)
 ├── reflectionz-salon/
-│   ├── config.json          # Client business configuration
-│   ├── README.md            # Client-specific setup info
-│   └── onboarding-checklist.md  # Checklist for collecting client info
-└── [future-client]/
-    └── ...
+└── [your-client]/
 ```
 
 ## Adding a New Client
 
-1. Create a new directory: `clients/[client-name]/`
-2. Copy the template files from `reflectionz-salon/`
+1. Copy the **template** (works for any business type):
+   ```bash
+   cp -r clients/template clients/[client-slug]
+   ```
+2. Edit `clients/[client-slug]/config.json` with their info
 3. Fill in the onboarding checklist with the client
 4. Update `config.json` with their information
 5. Deploy their configuration

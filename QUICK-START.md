@@ -2,7 +2,19 @@
 
 ## Starting the Servers
 
-### Backend (Terminal 1)
+### One command (backend + frontend together)
+
+From the project root:
+
+- **Windows (CMD):** `bin\dev.cmd`
+- **Windows (PowerShell):** `.\bin\dev.cmd` or `npm run dev`
+- **Mac/Linux:** `./bin/dev` or `npm run dev`
+
+You should see both servers start (backend on port 8000, frontend on port 3000). Stop with `Ctrl+C`.
+
+### Or start separately (two terminals)
+
+**Terminal 1 – Backend:**
 
 ```bash
 cd backend
@@ -11,16 +23,9 @@ python main.py
 
 Wait for: `INFO:     Uvicorn running on http://0.0.0.0:8000`
 
-### Frontend (Terminal 2 - NEW WINDOW)
+**Terminal 2 – Frontend:**
 
 ```powershell
-# Refresh PATH if npm not recognized
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-
-# Clear cache if stuck on "Starting..."
-Remove-Item -Path .next -Recurse -Force -ErrorAction SilentlyContinue
-
-# Start frontend
 npm run dev
 ```
 
@@ -43,6 +48,11 @@ Get-NetTCPConnection -LocalPort 8000 | ForEach-Object { Stop-Process -Id $_.Owni
 1. Stop (Ctrl+C)
 2. Clear cache: `Remove-Item -Path .next -Recurse -Force`
 3. Restart: `npm run dev`
+
+
+
+
+
 
 
 

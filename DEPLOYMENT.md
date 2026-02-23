@@ -150,10 +150,21 @@ For the web interface, deploy to **Vercel** (free, perfect for Next.js):
 - Restart the service after adding variables
 - Check variable names match exactly (case-sensitive)
 
+## Common deployment issues
+
+- **Railway "Application Error"**: Check logs (Railway → Logs). Often missing env vars or wrong **Root Directory** (set to `backend`) or **Start Command** (`uvicorn main:app --host 0.0.0.0 --port $PORT`).
+- **Finding your Railway URL**: Railway dashboard → your service → **Settings** → **Domains** (or **Generate Domain**). Use this URL in Twilio webhooks and set `NGROK_URL` to it.
+- **Stale build / old code**: In Railway, trigger a **Redeploy** or clear build cache in settings and redeploy.
+- **Wrong Python version**: Set Python version in `backend/requirements.txt` (e.g. `python_requires>=3.11`) or use a `.python-version` or runtime file if your platform supports it.
+
 ## Need Help?
 
 - Railway Docs: https://docs.railway.app
 - Render Docs: https://render.com/docs
 - Fly.io Docs: https://fly.io/docs
+
+
+
+
 
 

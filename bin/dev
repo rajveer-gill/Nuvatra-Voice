@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Start backend + frontend with one command (Mac/Linux)
+cd "$(dirname "$0")/.." && npm run dev

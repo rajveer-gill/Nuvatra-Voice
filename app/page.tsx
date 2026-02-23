@@ -1,11 +1,14 @@
 'use client'
 
-import VoiceReceptionist from '@/components/VoiceReceptionist'
-import Dashboard from '@/components/Dashboard'
+import dynamic from 'next/dynamic'
 import { useState } from 'react'
 
+const VoiceReceptionist = dynamic(() => import('@/components/VoiceReceptionist'), { ssr: false })
+const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
+const Appointments = dynamic(() => import('@/components/Appointments'), { ssr: false })
+
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'call' | 'dashboard'>('call')
+  const [activeTab, setActiveTab] = useState<'call' | 'dashboard' | 'appointments'>('call')
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
@@ -21,7 +24,7 @@ export default function Home() {
 
         <div className="max-w-6xl mx-auto">
           {/* Tab Navigation */}
-          <div className="flex justify-center mb-6 space-x-4">
+          <div className="flex justify-center mb-6 flex-wrap gap-2">
             <button
               onClick={() => setActiveTab('call')}
               className={`px-6 py-2 rounded-lg font-medium transition-all ${
@@ -31,6 +34,16 @@ export default function Home() {
               }`}
             >
               Voice Call
+            </button>
+            <button
+              onClick={() => setActiveTab('appointments')}
+              className={`px-6 py-2 rounded-lg font-medium transition-all ${
+                activeTab === 'appointments'
+                  ? 'bg-primary-600 text-white shadow-lg'
+                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              Appointments
             </button>
             <button
               onClick={() => setActiveTab('dashboard')}
@@ -45,16 +58,19 @@ export default function Home() {
           </div>
 
           {/* Content */}
-          {activeTab === 'call' ? (
-            <VoiceReceptionist />
-          ) : (
-            <Dashboard />
-          )}
+          {activeTab === 'call' && <VoiceReceptionist />}
+          {activeTab === 'appointments' && <Appointments />}
+          {activeTab === 'dashboard' && <Dashboard />}
         </div>
       </div>
     </main>
   )
 }
+
+
+
+
+
 
 
 

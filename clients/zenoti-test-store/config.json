@@ -1,0 +1,55 @@
+{
+  "client_id": "zenoti-test-store",
+  "plan": "pro",
+  "business_name": "Zenoti Test Salon",
+  "hours": "Tuesday–Saturday: 9 AM – 6 PM, Sunday: 10 AM – 4 PM, Closed Monday",
+  "phone": "+19254815386",
+  "forwarding_phone": "+19259978995",
+  "email": "",
+  "address": "",
+  "departments": ["Appointments", "Services & Pricing", "General", "Staff"],
+  "services": [
+    "Haircut & Styling",
+    "Color & Highlights",
+    "Balayage",
+    "Hair Treatment",
+    "Blowout",
+    "Manicure",
+    "Pedicure",
+    "Gel Nails",
+    "Waxing",
+    "Facial",
+    "Massage",
+    "Bridal Package"
+  ],
+  "specials": [],
+  "reservation_rules": [
+    "Appointments recommended; walk-ins welcome when available",
+    "Cancellations: please give 24 hours notice",
+    "First-time guests: arrive 10 minutes early for intake"
+  ],
+  "menu_link": "",
+  "greeting": "Thank you for calling {business_name}. How can I help you today?",
+  "staff": [
+    {
+      "name": "Manager",
+      "phone": "",
+      "role": "Manager",
+      "description": "General manager, scheduling, and account questions"
+    },
+    {
+      "name": "Reception",
+      "phone": "",
+      "role": "Reception",
+      "description": "Front desk and appointments"
+    }
+  ],
+  "locations": [
+    {
+      "name": "Main Street",
+      "forwarding_phone": "",
+      "address": ""
+    }
+  ],
+  "additional_info": "This is a test location for Nuvatra Voice (Pro plan). No Zenoti API; appointments and info are handled by the AI and stored in-dashboard."
+}
