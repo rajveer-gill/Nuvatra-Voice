@@ -125,15 +125,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Nuvatra Voice API", lifespan=lifespan)
 
 # CORS middleware
-# CORS configuration - allow localhost for development and production frontend
+# CORS configuration - allow localhost and production frontends
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://nuvatrasite.netlify.app",
+    "https://nuvatrahq.com",
 ]
 # Add production frontend URL if set
 frontend_url = os.getenv("FRONTEND_URL")
 if frontend_url:
-    allowed_origins.append(frontend_url)
+    u = frontend_url.rstrip("/")
+    if u not in allowed_origins:
+        allowed_origins.append(u)
 
 app.add_middleware(
     CORSMiddleware,

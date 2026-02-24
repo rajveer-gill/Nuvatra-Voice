@@ -19,10 +19,12 @@ Set these on your backend (e.g. Render):
 | `CLERK_JWKS_URL` | Yes (multi-tenant) | Clerk JWKS URL for JWT verification. In Clerk Dashboard: **Configure** → **API Keys** → Backend API URL. JWKS is `https://<your-clerk-domain>/.well-known/jwks.json` |
 | `CLERK_SECRET_KEY` | Yes (admin) | Clerk secret key for creating invitations |
 | `ADMIN_CLERK_USER_IDS` | Yes (admin) | Comma-separated Clerk user IDs (e.g. `user_2abc123,user_2xyz789`) who can access `/admin` |
-| `FRONTEND_URL` | Optional | Frontend URL for Clerk invite redirect (e.g. `https://nuvatrahq.com`) |
+| `FRONTEND_URL` | Optional | Frontend URL for Clerk invite redirect and CORS (e.g. `https://nuvatrasite.netlify.app`). Backend already allows `nuvatrasite.netlify.app` and `nuvatrahq.com`. |
 | `CLIENT_ID` | Optional | Used only in single-tenant mode (when `CLERK_JWKS_URL` is not set) |
 
 For **single-tenant** (one deployment per client): do not set `CLERK_JWKS_URL`; set `CLIENT_ID` instead. Existing behavior is unchanged.
+
+**Production:** For the live site (e.g. nuvatrasite.netlify.app), use Clerk **production** keys in Netlify env vars to avoid development limits and warnings.
 
 For **multi-tenant**: set `CLERK_JWKS_URL`, `CLERK_SECRET_KEY`, and `ADMIN_CLERK_USER_IDS`.
 
