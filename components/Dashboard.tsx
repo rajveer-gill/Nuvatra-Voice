@@ -2,9 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3 } from 'lucide-react'
-import axios from 'axios'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+import { useApiClient } from '@/lib/api'
 
 interface Appointment {
   id: number
@@ -56,6 +54,7 @@ interface CallLogEntry {
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 export default function Dashboard() {
+  const api = useApiClient()
   const [stats, setStats] = useState<Stats>({
     total_appointments: 0,
     total_messages: 0,
@@ -66,21 +65,22 @@ export default function Dashboard() {
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [recentCalls, setRecentCalls] = useState<CallLogEntry[]>([])
   const [loading, setLoading] = useState(true)
+  const [noTenant, setNoTenant] = useState(false)
 
   useEffect(() => {
     fetchData()
     const interval = setInterval(fetchData, 30000) // Refresh every 30 seconds
     return () => clearInterval(interval)
-  }, [])
+  }, [api])
 
   const fetchData = async () => {
     try {
       const [statsRes, appointmentsRes, messagesRes, summaryRes, callsRes] = await Promise.all([
-        axios.get(`${API_URL}/api/stats`),
-        axios.get(`${API_URL}/api/appointments`),
-        axios.get(`${API_URL}/api/messages`),
-        axios.get(`${API_URL}/api/analytics/summary`).catch(() => ({ data: null })),
-        axios.get(`${API_URL}/api/analytics/calls?limit=20`).catch(() => ({ data: { calls: [] } }))
+        api.get('/api/stats'),
+        api.get('/api/appointments'),
+        api.get('/api/messages'),
+        api.get('/api/analytics/summary').catch(() => ({ data: null })),
+        api.get('/api/analytics/calls?limit=20').catch(() => ({ data: { calls: [] } }))
       ])
 
       setStats(statsRes.data)
@@ -88,11 +88,25 @@ export default function Dashboard() {
       setMessages(messagesRes.data.messages || [])
       setAnalyticsSummary(summaryRes.data?.client_id != null ? summaryRes.data : null)
       setRecentCalls(callsRes.data?.calls || [])
-    } catch (error) {
+    } catch (error: unknown) {
+      const status = (error as { response?: { status?: number } })?.response?.status
+      if (status === 401 || status === 403) {
+        setNoTenant(true)
+      }
       console.error('Error fetching data:', error)
     } finally {
       setLoading(false)
     }
+  }
+
+  if (noTenant) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 space-y-4">
+        <p className="text-gray-600 text-center max-w-md">
+          Your account is not yet linked to a business. If you were invited, please use the link from your invite email. Otherwise, contact support.
+        </p>
+      </div>
+    )
   }
 
   if (loading) {

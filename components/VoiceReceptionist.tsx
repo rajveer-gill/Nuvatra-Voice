@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { Mic, MicOff, Phone, PhoneOff, Volume2 } from 'lucide-react'
-import axios from 'axios'
+import { useApiClient } from '@/lib/api'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -10,9 +10,8 @@ interface Message {
   timestamp: Date
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-
 export default function VoiceReceptionist() {
+  const api = useApiClient()
   const [isListening, setIsListening] = useState(false)
   const [isCallActive, setIsCallActive] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
@@ -132,7 +131,7 @@ export default function VoiceReceptionist() {
         content: m.content
       }))
 
-      const response = await axios.post(`${API_URL}/api/conversation`, {
+      const response = await api.post('/api/conversation', {
         message: text,
         session_id: sessionId,
         conversation_history: conversationHistory
@@ -187,8 +186,8 @@ export default function VoiceReceptionist() {
       console.log('Calling TTS endpoint with voice:', selectedVoice)
       
       // Call backend TTS endpoint
-      const response = await axios.post(
-        `${API_URL}/api/text-to-speech`,
+      const response = await api.post(
+        '/api/text-to-speech',
         {
           text: text,
           voice: selectedVoice

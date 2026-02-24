@@ -1,12 +1,33 @@
 """
 PostgreSQL database layer for production. Used when DATABASE_URL is set.
-Tables: appointments, messages, call_log, caller_memory, booked_slots
+Tables: appointments, messages, call_log, caller_memory, booked_slots, tenants, tenant_members
 """
 import os
 import json
+import contextvars
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from pathlib import Path
+
+# Request-scoped client_id (set by auth middleware or webhook)
+_request_client_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("request_client_id", default=None)
+
+def set_request_client_id(client_id: Optional[str]) -> None:
+    """Set the current request's client_id for all DB operations in this context."""
+    if client_id is not None:
+        _request_client_id.set(client_id)
+    else:
+        try:
+            _request_client_id.set(None)
+        except LookupError:
+            pass
+
+def clear_request_client_id() -> None:
+    """Clear the request client_id context (e.g. after request completes)."""
+    try:
+        _request_client_id.reset(_request_client_id.get())
+    except LookupError:
+        pass
 
 # Will be set on first use
 _conn = None
@@ -100,6 +121,26 @@ def init_db() -> bool:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tenants (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                client_id TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                twilio_phone_number TEXT NOT NULL,
+                plan TEXT NOT NULL DEFAULT 'starter',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tenant_members (
+                clerk_user_id TEXT NOT NULL,
+                tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                role TEXT NOT NULL DEFAULT 'member',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (clerk_user_id, tenant_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tenants_twilio_phone ON tenants(twilio_phone_number)")
         conn.commit()
         cur.close()
         conn.close()
@@ -111,7 +152,125 @@ def init_db() -> bool:
         return False
 
 def _client_id() -> str:
+    """Current request's client_id from context, or CLIENT_ID env, or 'default'."""
+    ctx = _request_client_id.get(None)
+    if ctx:
+        return ctx
     return os.getenv("CLIENT_ID", "").strip() or "default"
+
+def _normalize_e164(phone: str) -> str:
+    """Convert to E.164 for Twilio lookup."""
+    d = "".join(c for c in (phone or "") if c.isdigit())
+    if len(d) == 10:
+        return f"+1{d}"
+    if len(d) == 11 and d.startswith("1"):
+        return f"+{d}"
+    return f"+{d}" if d else phone
+
+# --- Tenants ---
+def db_tenant_create(client_id: str, name: str, twilio_phone_number: str, plan: str = "starter") -> Optional[dict]:
+    """Create a tenant. Returns tenant dict or None on conflict."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO tenants (client_id, name, twilio_phone_number, plan)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (client_id) DO NOTHING
+            RETURNING id, client_id, name, twilio_phone_number, plan, created_at
+        """, (client_id, name, twilio_phone_number, plan))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        if not row:
+            return None
+        return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4], "created_at": row[5].isoformat() if row[5] else None}
+    except Exception as e:
+        print(f"[DB] Failed to create tenant: {e}")
+        return None
+
+def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
+    """Look up tenant by Twilio phone number (E.164). Returns tenant or None."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    # Normalize: Twilio sends E.164; try exact match and alternate normalization
+    normalized = _normalize_e164(twilio_phone_number or "")
+    cur.execute("""
+        SELECT id, client_id, name, twilio_phone_number, plan
+        FROM tenants WHERE twilio_phone_number IN (%s, %s)
+        LIMIT 1
+    """, (twilio_phone_number or "", normalized))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
+
+def db_tenant_get_by_id(tenant_id: str) -> Optional[dict]:
+    """Look up tenant by UUID."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute("SELECT id, client_id, name, twilio_phone_number, plan FROM tenants WHERE id = %s", (tenant_id,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
+
+def db_tenant_member_add(clerk_user_id: str, tenant_id: str) -> bool:
+    """Add a member to a tenant. Returns True on success."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO tenant_members (clerk_user_id, tenant_id)
+            VALUES (%s, %s)
+            ON CONFLICT (clerk_user_id, tenant_id) DO NOTHING
+        """, (clerk_user_id, tenant_id))
+        cur.close()
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to add tenant member: {e}")
+        return False
+
+def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
+    """Get the tenant for a Clerk user (from tenant_members). Returns first tenant if multiple."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT t.id, t.client_id, t.name, t.twilio_phone_number, t.plan
+        FROM tenants t
+        JOIN tenant_members m ON m.tenant_id = t.id
+        WHERE m.clerk_user_id = %s
+        LIMIT 1
+    """, (clerk_user_id,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
+
+def db_tenant_list_all() -> List[dict]:
+    """List all tenants (admin only)."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute("SELECT id, client_id, name, twilio_phone_number, plan, created_at FROM tenants ORDER BY created_at DESC")
+    rows = cur.fetchall()
+    cur.close()
+    return [{"id": str(r[0]), "client_id": r[1], "name": r[2], "twilio_phone_number": r[3], "plan": r[4], "created_at": r[5].isoformat() if r[5] else None} for r in rows]
 
 def _normalize_phone(phone: str) -> str:
     return "".join(c for c in (phone or "") if c.isdigit())

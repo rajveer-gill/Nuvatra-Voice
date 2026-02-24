@@ -2,9 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { Calendar, Plus, RefreshCw, Clock, Mail, Phone, Check, X, Copy } from 'lucide-react'
-import axios from 'axios'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+import { useApiClient } from '@/lib/api'
 
 export interface Appointment {
   id: number
@@ -51,6 +49,7 @@ function copyBlock(apt: Appointment): string {
 }
 
 export default function Appointments() {
+  const api = useApiClient()
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<string>('all')
@@ -71,7 +70,7 @@ export default function Appointments() {
 
   const fetchAppointments = async () => {
     try {
-      const res = await axios.get(`${API_URL}/api/appointments`)
+      const res = await api.get('/api/appointments')
       setAppointments(res.data.appointments || [])
     } catch (e) {
       console.error('Failed to fetch appointments', e)
@@ -84,7 +83,7 @@ export default function Appointments() {
     fetchAppointments()
     const interval = setInterval(fetchAppointments, 30000)
     return () => clearInterval(interval)
-  }, [])
+  }, [api])
 
   const filtered = appointments.filter((a) => {
     if (statusFilter !== 'all' && a.status !== statusFilter) return false
@@ -101,7 +100,7 @@ export default function Appointments() {
     if (!form.name.trim() || !form.date.trim() || !form.time.trim()) return
     setSubmitting(true)
     try {
-      await axios.post(`${API_URL}/api/appointments`, {
+      await api.post('/api/appointments', {
         name: form.name.trim(),
         email: form.email.trim() || '',
         phone: form.phone.trim() || '',
@@ -122,7 +121,7 @@ export default function Appointments() {
   const handleStatusChange = async (id: number, newStatus: string) => {
     setUpdatingId(id)
     try {
-      await axios.patch(`${API_URL}/api/appointments/${id}`, { status: newStatus })
+      await api.patch(`/api/appointments/${id}`, { status: newStatus })
       await fetchAppointments()
     } catch (e) {
       console.error('Failed to update appointment', e)
@@ -150,7 +149,7 @@ export default function Appointments() {
     setUpdatingId(id)
     setAcceptRejectMsg(null)
     try {
-      await axios.post(`${API_URL}/api/appointments/${id}/accept`)
+      await api.post(`/api/appointments/${id}/accept`)
       await fetchAppointments()
       setAcceptRejectMsg({ id, msg: 'Accepted; confirmation text sent.' })
       setTimeout(() => setAcceptRejectMsg(null), 3000)
@@ -167,7 +166,7 @@ export default function Appointments() {
     setUpdatingId(id)
     setAcceptRejectMsg(null)
     try {
-      await axios.post(`${API_URL}/api/appointments/${id}/reject`)
+      await api.post(`/api/appointments/${id}/reject`)
       await fetchAppointments()
       setAcceptRejectMsg({ id, msg: "Rejected; we've asked them for other times." })
       setTimeout(() => setAcceptRejectMsg(null), 3000)

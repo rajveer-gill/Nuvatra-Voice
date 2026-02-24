@@ -9,7 +9,7 @@ print("=" * 60)
 import sys
 sys.stdout.flush()
 
-from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi import FastAPI, HTTPException, Request, Form, Depends
 from contextlib import asynccontextmanager
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
@@ -284,11 +284,20 @@ elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
 PROJECT_ROOT = _backend_dir.parent
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 
+# Auth: Clerk JWT verification for multi-tenant
+try:
+    from auth import get_bearer_token, verify_clerk_token
+except ImportError:
+    get_bearer_token = lambda r: None
+    verify_clerk_token = lambda t: ("", None)
+
 # Database: PostgreSQL when DATABASE_URL is set (production)
 USE_DB = False
 try:
     from database import (
         init_db,
+        set_request_client_id,
+        _client_id as get_db_client_id,
         db_appointments_get_all,
         db_appointments_insert,
         db_appointments_update,
@@ -303,6 +312,12 @@ try:
         db_caller_memory_upsert,
         db_booked_slots_load,
         db_booked_slots_save,
+        db_tenant_get_by_phone,
+        db_tenant_get_for_user,
+        db_tenant_get_by_id,
+        db_tenant_create,
+        db_tenant_member_add,
+        db_tenant_list_all,
     )
     USE_DB = init_db()
 except (ImportError, Exception) as e:
@@ -313,18 +328,19 @@ except (ImportError, Exception) as e:
 appointments: List[dict] = []
 messages: List[dict] = []
 
-def load_client_config():
-    """Load business config from clients/<CLIENT_ID>/config.json. Returns None if not set or file missing."""
-    if not CLIENT_ID:
+def load_client_config(client_id: Optional[str] = None):
+    """Load business config from clients/<client_id>/config.json. Uses request-scoped client_id if not passed."""
+    cid = (client_id or get_db_client_id()).strip()
+    if not cid:
         return None
-    config_path = PROJECT_ROOT / "clients" / CLIENT_ID / "config.json"
+    config_path = PROJECT_ROOT / "clients" / cid / "config.json"
     if not config_path.exists():
         print(f"WARNING: Client config not found: {config_path}")
         return None
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Normalize to BUSINESS_INFO shape
+        # Normalize to get_business_info() shape
         forwarding = (data.get("forwarding_phone") or os.getenv("BUSINESS_FORWARDING_PHONE") or "")
         if not forwarding and data.get("locations"):
             forwarding = data["locations"][0].get("forwarding_phone", "")
@@ -345,18 +361,14 @@ def load_client_config():
             "greeting": data.get("greeting", "Thank you for calling. How can I help you today?"),
             "plan": data.get("plan", "starter"),
         }
-        print(f"Loaded client config: {CLIENT_ID} ({info['name']})")
+        print(f"Loaded client config: {cid} ({info['name']})")
         return info
     except Exception as e:
         print(f"WARNING: Failed to load client config: {e}")
         return None
 
-# Business configuration: from client config or demo default
-_client_config = load_client_config()
-if _client_config:
-    BUSINESS_INFO = _client_config
-else:
-    BUSINESS_INFO = {
+# Business configuration: loaded per-request (multi-tenant) or at startup (single-tenant)
+_DEMO_BUSINESS_INFO = {
         "name": "Nuvatra Demo Restaurant",
         "hours": "Monday-Thursday: 11 AM - 9 PM, Friday-Saturday: 11 AM - 10 PM, Sunday: 12 PM - 8 PM",
         "phone": "(925) 481-5386",
@@ -382,11 +394,17 @@ else:
         "plan": "starter",
     }
 
+def get_business_info() -> dict:
+    """Get business config for current request (multi-tenant) or env CLIENT_ID (single-tenant)."""
+    cfg = load_client_config()
+    return cfg if cfg else _DEMO_BUSINESS_INFO
+
 def get_greeting_text() -> str:
     """Greeting for phone (uses client config if set)."""
-    raw = BUSINESS_INFO.get("greeting") or "Thank you for calling. How can I help you today?"
+    info = get_business_info()
+    raw = info.get("greeting") or "Thank you for calling. How can I help you today?"
     try:
-        return raw.format(business_name=BUSINESS_INFO.get("name", "us"))
+        return raw.format(business_name=info.get("name", "us"))
     except KeyError:
         return raw
 
@@ -428,6 +446,43 @@ class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
 
+def require_tenant(request: Request):
+    """
+    Dependency: multi-tenant mode requires Bearer token; single-tenant uses CLIENT_ID env.
+    Sets request client_id context for database operations.
+    """
+    jwks_url = os.getenv("CLERK_JWKS_URL", "").strip()
+    if not jwks_url:
+        # Single-tenant: use CLIENT_ID env; database._client_id() falls back to it
+        return None
+    # Multi-tenant: require Bearer token
+    token = get_bearer_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization required")
+    user_id, tenant_id_from_meta = verify_clerk_token(token)
+    tenant = None
+    if tenant_id_from_meta and USE_DB:
+        tenant = db_tenant_get_by_id(tenant_id_from_meta)
+    if not tenant and USE_DB:
+        tenant = db_tenant_get_for_user(user_id)
+    if not tenant:
+        raise HTTPException(status_code=403, detail="No tenant assigned to your account")
+    set_request_client_id(tenant["client_id"])
+    return tenant
+
+def require_admin(request: Request):
+    """Dependency: require Bearer token and admin user (user_id in ADMIN_CLERK_USER_IDS)."""
+    token = get_bearer_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization required")
+    user_id, _ = verify_clerk_token(token)
+    admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+    if not admin_ids:
+        raise HTTPException(status_code=403, detail="Admin not configured")
+    if user_id not in admin_ids:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user_id
+
 def _phone_to_e164(phone: str) -> Optional[str]:
     """Convert to E.164 for Twilio SMS (e.g. +15551234567). Returns None if too short."""
     digits = "".join(c for c in phone if c.isdigit())
@@ -456,10 +511,11 @@ def send_sms(to_phone: str, body: str) -> bool:
         return False
 
 def get_client_data_dir() -> Optional[Path]:
-    """Return Path to client data directory (for call_log, caller_memory). None if no CLIENT_ID."""
-    if not CLIENT_ID:
+    """Return Path to client data directory (for call_log, caller_memory). None if no client_id."""
+    cid = get_db_client_id()
+    if not cid or cid == "default":
         return None
-    d = PROJECT_ROOT / "clients" / CLIENT_ID
+    d = PROJECT_ROOT / "clients" / cid
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -518,7 +574,7 @@ def update_caller_memory(phone: str, name: Optional[str] = None, last_reason: Op
 
 def get_staff_phone_by_name(name: str) -> Optional[str]:
     """Return E.164 phone for staff member by name (case-insensitive match)."""
-    staff = BUSINESS_INFO.get("staff") or []
+    staff = get_business_info().get("staff") or []
     name_clean = name.strip().lower()
     for s in staff:
         if s.get("name", "").strip().lower() == name_clean:
@@ -885,8 +941,8 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         
         # Check if user wants to talk to a real person - forward if needed
         if should_forward_to_human("", ai_text):  # Check AI response for forwarding intent
-            print(f"🔄 Forwarding call to business phone: {BUSINESS_INFO.get('forwarding_phone')}")
-            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            print(f"🔄 Forwarding call to business phone: {get_business_info().get('forwarding_phone')}")
+            forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
                 call_data["outcome"] = "forwarded"
                 call_log_set_outcome(call_sid, "forwarded")
@@ -1065,10 +1121,10 @@ Respond with just the language name, nothing else."""
 def get_system_prompt(detected_language: str = "English", caller_memory: Optional[dict] = None, include_booked_slots: bool = False):
     # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
     # CRITICAL: Respond ONLY in the detected language (language can change mid-conversation)
-    services_list = ', '.join(BUSINESS_INFO.get('services', []))
-    specials_list = ' | '.join(BUSINESS_INFO.get('specials', []))
-    reservation_info = ' | '.join(BUSINESS_INFO.get('reservation_rules', []))
-    staff = BUSINESS_INFO.get("staff") or []
+    services_list = ', '.join(get_business_info().get('services', []))
+    specials_list = ' | '.join(get_business_info().get('specials', []))
+    reservation_info = ' | '.join(get_business_info().get('reservation_rules', []))
+    staff = get_business_info().get("staff") or []
     staff_block = ""
     if staff:
         staff_names = [s.get("name", "") for s in staff if s.get("name")]
@@ -1086,16 +1142,16 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
             slots_block = f"\n- {slots_text}"
         slots_block += "\n- When the caller has confirmed a booking (you have their name, phone, date, time, and service/reason) and the slot is available, reply with EXACTLY one line: BOOKING: name|phone|email|date|time|reason (use | as separator; date YYYY-MM-DD, time HH:MM; omit optional email if unknown). Do not output BOOKING until the caller has confirmed. If a requested time is taken, suggest another time or another stylist."
     
-    base_prompt = f"""Super peppy, warm AI receptionist for {BUSINESS_INFO['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! 
+    base_prompt = f"""Super peppy, warm AI receptionist for {get_business_info()['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! 
 
 You can help with:
-- Hours: {BUSINESS_INFO['hours']}
-- Location: {BUSINESS_INFO.get('address', 'N/A')}
+- Hours: {get_business_info()['hours']}
+- Location: {get_business_info().get('address', 'N/A')}
 - Services: {services_list}
 - Specials: {specials_list}
 - Reservations: {reservation_info}
-- Menu: Available at {BUSINESS_INFO.get('menu_link', 'our website')}
-- Routing to: {', '.join(BUSINESS_INFO.get('departments', []))}{staff_block}{memory_block}{slots_block}"""
+- Menu: Available at {get_business_info().get('menu_link', 'our website')}
+- Routing to: {', '.join(get_business_info().get('departments', []))}{staff_block}{memory_block}{slots_block}"""
     
     if detected_language != "English":
         return f"""{base_prompt} CRITICAL INSTRUCTION: The caller is currently speaking in {detected_language}. You MUST respond ONLY in {detected_language}. Do NOT respond in English or any other language. Every word of your response must be in {detected_language}. If the caller switches languages, adapt immediately and respond in their new language."""
@@ -1106,8 +1162,78 @@ You can help with:
 async def root():
     return {"message": "Nuvatra Voice API", "status": "running"}
 
+class AdminCreateTenantRequest(BaseModel):
+    client_id: str
+    name: str
+    twilio_phone_number: str
+    email: str
+    plan: Optional[str] = "starter"
+
+@app.post("/api/admin/tenants")
+async def admin_create_tenant(req: AdminCreateTenantRequest, _: str = Depends(require_admin)):
+    """Create tenant and send Clerk invite. Requires admin auth."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required for multi-tenant")
+    tenant = db_tenant_create(req.client_id, req.name, req.twilio_phone_number, req.plan or "starter")
+    if not tenant:
+        raise HTTPException(status_code=409, detail="Tenant already exists or create failed")
+    # Copy template config to clients/<client_id>/config.json
+    template_path = PROJECT_ROOT / "clients" / "template" / "config.json"
+    client_dir = PROJECT_ROOT / "clients" / req.client_id
+    client_dir.mkdir(parents=True, exist_ok=True)
+    config_path = client_dir / "config.json"
+    if template_path.exists():
+        with open(template_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        cfg["client_id"] = req.client_id
+        cfg["business_name"] = req.name
+        cfg["plan"] = req.plan or "starter"
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    # Send Clerk invitation with tenant_id in public_metadata
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    invite_sent = False
+    if clerk_secret:
+        import httpx
+        try:
+            resp = httpx.post(
+                "https://api.clerk.com/v1/invitations",
+                headers={"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"},
+                json={
+                    "email_address": req.email,
+                    "public_metadata": {"tenant_id": tenant["id"]},
+                    "redirect_url": os.getenv("FRONTEND_URL", "https://nuvatrahq.com") + "/dashboard",
+                },
+                timeout=10.0,
+            )
+            if resp.status_code >= 400:
+                print(f"[Admin] Clerk invite failed: {resp.status_code} {resp.text}")
+            else:
+                invite_sent = True
+        except Exception as e:
+            print(f"[Admin] Clerk invite error: {e}")
+    return {"success": True, "tenant": tenant, "invite_sent": invite_sent}
+
+@app.get("/api/admin/tenants")
+async def admin_list_tenants(_: str = Depends(require_admin)):
+    """List all tenants. Requires admin auth."""
+    if not USE_DB:
+        return {"tenants": []}
+    return {"tenants": db_tenant_list_all()}
+
+@app.post("/api/admin/tenants/{tenant_id}/members")
+async def admin_add_tenant_member(tenant_id: str, email: str = Form(...), _: str = Depends(require_admin)):
+    """Manually add a Clerk user to a tenant by linking after sign-up. Use Clerk invite for new users."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    # We would need Clerk API to look up user_id by email - skip for now; invite flow is primary
+    return {"success": False, "message": "Use Clerk Invitations for new users; metadata links tenant"}
+
 @app.post("/api/conversation", response_model=ConversationResponse)
-async def handle_conversation(request: ConversationRequest):
+async def handle_conversation(request: ConversationRequest, _: None = Depends(require_tenant)):
     try:
         # Booking context: include booked slots in prompt when user is discussing booking
         include_slots = _suggests_booking(request.message)
@@ -1161,7 +1287,7 @@ async def handle_conversation(request: ConversationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/appointments")
-async def create_appointment(appointment: AppointmentRequest):
+async def create_appointment(appointment: AppointmentRequest, _: None = Depends(require_tenant)):
     try:
         source = (appointment.source or "manual").strip().lower()
         if source not in ("receptionist", "manual"):
@@ -1201,7 +1327,7 @@ async def create_appointment(appointment: AppointmentRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/appointments")
-async def get_appointments():
+async def get_appointments(_: None = Depends(require_tenant)):
     lst = db_appointments_get_all() if USE_DB else appointments
     for a in lst:
         a.setdefault("source", "manual")
@@ -1209,7 +1335,7 @@ async def get_appointments():
     return {"appointments": lst}
 
 @app.patch("/api/appointments/{appointment_id}")
-async def update_appointment(appointment_id: int, update: AppointmentUpdate):
+async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: None = Depends(require_tenant)):
     """Update appointment status or details. Used by the appointments frontend."""
     kwargs = {}
     if update.status is not None: kwargs["status"] = update.status
@@ -1231,7 +1357,7 @@ async def update_appointment(appointment_id: int, update: AppointmentUpdate):
     raise HTTPException(status_code=404, detail="Appointment not found")
 
 @app.post("/api/appointments/{appointment_id}/accept")
-async def accept_appointment(appointment_id: int):
+async def accept_appointment(appointment_id: int, _: None = Depends(require_tenant)):
     """Store accepted: mark appointment accepted and send confirmation SMS to customer."""
     apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
     if not apt:
@@ -1240,7 +1366,7 @@ async def accept_appointment(appointment_id: int):
         apt = db_appointments_update(appointment_id, status="accepted") or apt
     else:
         apt["status"] = "accepted"
-    business_name = BUSINESS_INFO.get("name", "us")
+    business_name = get_business_info().get("name", "us")
     date = apt.get("date", "")
     time = apt.get("time", "")
     msg = f"Your appointment at {business_name} is confirmed for {date} at {time}. Reply if you need to change."
@@ -1248,7 +1374,7 @@ async def accept_appointment(appointment_id: int):
     return {"success": True, "appointment": apt}
 
 @app.post("/api/appointments/{appointment_id}/reject")
-async def reject_appointment(appointment_id: int):
+async def reject_appointment(appointment_id: int, _: None = Depends(require_tenant)):
     """Store rejected (time not available): release slot and send SMS asking for alternative times."""
     apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
     if not apt:
@@ -1265,7 +1391,7 @@ async def reject_appointment(appointment_id: int):
     return {"success": True, "appointment": apt}
 
 @app.post("/api/messages")
-async def create_message(message: MessageRequest):
+async def create_message(message: MessageRequest, _: None = Depends(require_tenant)):
     try:
         data = {"caller_name": message.caller_name, "caller_phone": message.caller_phone, "message": message.message, "urgency": message.urgency, "status": "unread"}
         if USE_DB:
@@ -1278,16 +1404,16 @@ async def create_message(message: MessageRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/messages")
-async def get_messages():
+async def get_messages(_: None = Depends(require_tenant)):
     lst = db_messages_get_all() if USE_DB else messages
     return {"messages": lst}
 
 @app.get("/api/business-info")
-async def get_business_info():
-    return BUSINESS_INFO
+async def api_get_business_info(_: None = Depends(require_tenant)):
+    return get_business_info()
 
 @app.get("/api/stats")
-async def get_stats():
+async def get_stats(_: None = Depends(require_tenant)):
     apts = db_appointments_get_all() if USE_DB else appointments
     msgs = db_messages_get_all() if USE_DB else messages
     pending = len([a for a in apts if a.get("status") == "pending"])
@@ -1314,7 +1440,7 @@ def _load_call_log() -> List[dict]:
         return []
 
 @app.get("/api/analytics/summary")
-async def get_analytics_summary():
+async def get_analytics_summary(_: None = Depends(require_tenant)):
     """Pro: Peak call times, outcomes, total calls. Requires CLIENT_ID."""
     log = _load_call_log()
     if not log:
@@ -1323,7 +1449,7 @@ async def get_analytics_summary():
             "by_outcome": {},
             "by_hour": {str(h): 0 for h in range(24)},
             "by_day_of_week": {str(d): 0 for d in range(7)},
-            "client_id": CLIENT_ID or None,
+            "client_id": get_db_client_id() or None,
         }
     by_outcome = {}
     by_hour = {str(h): 0 for h in range(24)}
@@ -1348,17 +1474,17 @@ async def get_analytics_summary():
     }
 
 @app.get("/api/analytics/calls")
-async def get_analytics_calls(limit: int = 50, outcome: Optional[str] = None):
+async def get_analytics_calls(limit: int = 50, outcome: Optional[str] = None, _: None = Depends(require_tenant)):
     """Pro: Recent calls for dashboard. Optional filter by outcome."""
     log = _load_call_log()
     # Log is stored oldest first; we want newest first
     log = list(reversed(log))
     if outcome:
         log = [e for e in log if (e.get("outcome") or "") == outcome]
-    return {"calls": log[:limit], "client_id": CLIENT_ID or None}
+    return {"calls": log[:limit], "client_id": get_db_client_id() or None}
 
 @app.post("/api/text-to-speech")
-async def text_to_speech(request: TTSRequest):
+async def text_to_speech(request: TTSRequest, _: None = Depends(require_tenant)):
     """
     Convert text to speech using OpenAI's TTS API.
     Returns audio file as streaming response.
@@ -1390,7 +1516,15 @@ async def text_to_speech(request: TTSRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Phone call storage (in production, use a database)
-active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid}}
+active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid, client_id, ...}}
+
+def _restore_call_context(call_sid: str) -> bool:
+    """Restore request client_id from active_calls for downstream phone handlers. Returns True if found."""
+    if call_sid and call_sid in active_calls:
+        cid = active_calls[call_sid].get("client_id") or CLIENT_ID or "default"
+        set_request_client_id(cid)
+        return True
+    return False
 
 # Response generation status (for 2-step flow to eliminate dead air)
 response_status = {}  # {call_sid: {"status": "pending"|"ready"|"error", "audio_url": str, "ai_text": str}}
@@ -1486,16 +1620,25 @@ async def handle_incoming_call(request: Request):
         
         print(f"📞 Incoming call: {from_number} -> {to_number} (CallSid: {call_sid})")
         
+        # Multi-tenant: resolve tenant by To number and set request context
+        tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
+        if tenant:
+            set_request_client_id(tenant["client_id"])
+        elif CLIENT_ID:
+            set_request_client_id(CLIENT_ID)
+        
         # Pro: call log start + customer memory for repeat callers
         call_log_start(call_sid, from_number, to_number)
         caller_memory = get_caller_memory(from_number)
         
-        # Create a new session for this call
+        # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"
+        client_id = tenant["client_id"] if tenant else (CLIENT_ID or "default")
         active_calls[call_sid] = {
             "session_id": session_id,
             "from_number": from_number,
             "to_number": to_number,
+            "client_id": client_id,
             "conversation_history": [],
             "detected_language": None,  # Will be detected from first speech input
             "started_at": datetime.now().isoformat(),
@@ -1545,7 +1688,7 @@ async def handle_incoming_call(request: Request):
         base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
         
         # On error, forward to business phone if available
-        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
             print(f"🔄 Error on incoming call - forwarding to business phone: {forwarding_phone}")
             error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
@@ -1579,6 +1722,7 @@ async def process_speech(request: Request):
         
         print(f"🎤 Speech received: {speech_result} (confidence: {confidence})")
         
+        _restore_call_context(call_sid or "")
         if not call_sid or call_sid not in active_calls:
             # Lost call session - forward to business phone if available
             response = VoiceResponse()
@@ -1590,7 +1734,7 @@ async def process_speech(request: Request):
                 else:
                     base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
             
-            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
                 print(f"🔄 Lost call session - forwarding to business phone: {forwarding_phone}")
                 response = forward_call_to_business(forwarding_phone, base_url, "English")
@@ -1694,8 +1838,8 @@ async def process_speech(request: Request):
         # Check if user wants to talk to a real person - check BEFORE generating response
         # We'll check the speech directly for forwarding keywords
         if should_forward_to_human(speech_result, ""):  # Pass empty string since we don't have AI response yet
-            print(f"🔄 Forwarding call to business phone: {BUSINESS_INFO.get('forwarding_phone')}")
-            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            print(f"🔄 Forwarding call to business phone: {get_business_info().get('forwarding_phone')}")
+            forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
                 call_data["outcome"] = "forwarded"
                 call_log_set_outcome(call_sid, "forwarded")
@@ -1772,7 +1916,7 @@ async def process_speech(request: Request):
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         
         # Check if we have a forwarding number - if so, forward on error
-        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
             print(f"🔄 Error occurred - forwarding to business phone: {forwarding_phone}")
             error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
@@ -1801,6 +1945,7 @@ async def handle_call_status(request: Request):
         call_status = form_data.get("CallStatus")
         
         print(f"📞 Call status update: {call_sid} -> {call_status}")
+        _restore_call_context(call_sid or "")
         
         # Clean up when call ends + Pro: persist call log and customer memory
         if call_status in ["completed", "failed", "busy", "no-answer", "canceled"]:
@@ -1848,11 +1993,12 @@ async def respond_with_audio(request: Request):
     try:
         form_data = await request.form()
         call_sid = form_data.get("CallSid")
+        _restore_call_context(call_sid or "")
         
         if not call_sid or call_sid not in response_status:
             # Lost response status - forward to business phone if available
             response = VoiceResponse()
-            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
                 print(f"🔄 Lost response status - forwarding to business phone: {forwarding_phone}")
                 # Try to get call data for language
@@ -1934,7 +2080,7 @@ async def respond_with_audio(request: Request):
         
         elif status == "error":
             # Error occurred - forward to business phone if available
-            forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+            forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
                 print(f"🔄 Error generating response - forwarding to business phone: {forwarding_phone}")
                 detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
@@ -1970,7 +2116,7 @@ async def respond_with_audio(request: Request):
         response = VoiceResponse()
         
         # On error, forward to business phone if available
-        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
             print(f"🔄 Error in respond endpoint - forwarding to business phone: {forwarding_phone}")
             # Try to get call data for language
@@ -2066,6 +2212,7 @@ async def process_recording(request: Request):
         form_data = await request.form()
         call_sid = form_data.get("CallSid")
         recording_url = form_data.get("RecordingUrl", "")
+        _restore_call_context(call_sid or "")
         
         print(f"🎙️ Recording received: {recording_url} for call {call_sid}")
         
@@ -2210,7 +2357,7 @@ async def process_recording(request: Request):
         base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
         
         # On error, forward to business phone if available
-        forwarding_phone = BUSINESS_INFO.get("forwarding_phone")
+        forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
             print(f"🔄 Error processing recording - forwarding to business phone: {forwarding_phone}")
             # Try to get call data for language

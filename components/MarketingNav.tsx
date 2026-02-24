@@ -18,14 +18,23 @@ export default function MarketingNav() {
           <li><Link href="/#contact" className="text-white/90 hover:text-white font-medium transition">Contact</Link></li>
           <li>
             <SignedOut>
-              <SignInButton mode="modal">
-                <button className="px-4 py-2 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition">
-                  Log in
-                </button>
-              </SignInButton>
+              <div className="flex items-center gap-3">
+                <Link href="/#contact" className="text-white/90 hover:text-white font-medium">
+                  Contact us
+                </Link>
+                <SignInButton mode="modal">
+                  <button className="px-4 py-2 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition">
+                    Log in
+                  </button>
+                </SignInButton>
+                <span className="text-white/60 text-sm">(by invite)</span>
+              </div>
             </SignedOut>
             <SignedIn>
               <div className="flex items-center gap-3">
+                <Link href="/admin" className="text-white/90 hover:text-white font-medium text-sm">
+                  Admin
+                </Link>
                 <Link href="/dashboard" className="px-4 py-2 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition">
                   Dashboard
                 </Link>
