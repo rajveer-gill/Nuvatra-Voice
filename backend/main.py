@@ -147,6 +147,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# #region agent log — CORS debug: log every request (method, path, Origin) and startup origins
+def _debug_log_payload(data: dict) -> None:
+    import json as _json
+    payload = {"sessionId": "e3c6b1", "timestamp": __import__("time").time() * 1000, "location": "main.py:CORS", "message": "request", "data": data}
+    try:
+        _log_path = _backend_dir.parent / "debug-e3c6b1.log"
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    print(f"[CORS-DEBUG] {payload}")
+@app.middleware("http")
+async def _cors_debug_middleware(request, call_next):
+    origin = request.headers.get("origin") or ""
+    _debug_log_payload({"method": request.method, "path": request.url.path, "origin": origin, "allowed_origins": allowed_origins})
+    return await call_next(request)
+# startup: log CORS config (hypothesis: confirm deployed code has correct origins)
+_debug_log_payload({"event": "startup", "allowed_origins": allowed_origins})
+# #endregion
+
 # Initialize OpenAI
 # Debug: Check installed versions BEFORE creating client
 print("=" * 50)
@@ -1172,6 +1192,11 @@ class AdminCreateTenantRequest(BaseModel):
     twilio_phone_number: str
     email: str
     plan: Optional[str] = "starter"
+
+@app.get("/api/debug/cors")
+async def debug_cors():
+    """No-auth endpoint to verify CORS config on deployed backend. e.g. curl https://your-api/api/debug/cors"""
+    return {"allowed_origins": allowed_origins}
 
 @app.post("/api/admin/tenants")
 async def admin_create_tenant(req: AdminCreateTenantRequest, _: str = Depends(require_admin)):
