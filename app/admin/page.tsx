@@ -22,6 +22,7 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [success, setSuccess] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
   const [form, setForm] = useState({
     client_id: '',
     name: '',
@@ -70,6 +71,23 @@ export default function AdminPage() {
       setError(err.response?.data?.detail || 'Failed to create tenant')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleDelete = async (tenant: Tenant) => {
+    if (!confirm(`Remove "${tenant.name}" (${tenant.client_id})? This cannot be undone.`)) return
+    setDeleting(tenant.id)
+    setError(null)
+    setSuccess(null)
+    try {
+      await api.delete(`/api/admin/tenants/${tenant.id}`)
+      setSuccess(`Tenant "${tenant.name}" removed.`)
+      fetchTenants()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setError(err.response?.data?.detail || 'Failed to remove tenant')
+    } finally {
+      setDeleting(null)
     }
   }
 
@@ -191,12 +209,22 @@ export default function AdminPage() {
           ) : (
             <ul className="space-y-3">
               {tenants.map((t) => (
-                <li key={t.id} className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0">
+                <li key={t.id} className="flex justify-between items-center py-3 border-b border-gray-100 last:border-0">
                   <div>
                     <span className="font-medium">{t.name}</span>
                     <span className="text-gray-500 text-sm ml-2">({t.client_id})</span>
+                    <div className="flex items-center gap-3 mt-1">
+                      <span className="text-sm text-gray-600">{t.twilio_phone_number}</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">{t.plan}</span>
+                    </div>
                   </div>
-                  <span className="text-sm text-gray-600">{t.twilio_phone_number}</span>
+                  <button
+                    onClick={() => handleDelete(t)}
+                    disabled={deleting === t.id}
+                    className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {deleting === t.id ? 'Removing…' : 'Remove'}
+                  </button>
                 </li>
               ))}
             </ul>

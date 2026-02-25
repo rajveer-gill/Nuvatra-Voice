@@ -340,6 +340,7 @@ try:
         db_tenant_get_for_user,
         db_tenant_get_by_id,
         db_tenant_create,
+        db_tenant_delete,
         db_tenant_member_add,
         db_tenant_list_all,
     )
@@ -1249,6 +1250,19 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
     if not USE_DB:
         return {"tenants": []}
     return {"tenants": db_tenant_list_all()}
+
+@app.delete("/api/admin/tenants/{tenant_id}")
+async def admin_delete_tenant(tenant_id: str, _: str = Depends(require_admin)):
+    """Delete a tenant. Cascades to tenant_members. Requires admin auth."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    deleted = db_tenant_delete(tenant_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="Failed to delete tenant")
+    return {"success": True, "deleted_tenant": tenant}
 
 @app.post("/api/admin/tenants/{tenant_id}/members")
 async def admin_add_tenant_member(tenant_id: str, email: str = Form(...), _: str = Depends(require_admin)):
