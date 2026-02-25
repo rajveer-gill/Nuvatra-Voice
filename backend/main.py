@@ -1231,7 +1231,7 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, _: str = Depends(re
                 json={
                     "email_address": req.email,
                     "public_metadata": {"tenant_id": tenant["id"]},
-                    "redirect_url": os.getenv("FRONTEND_URL", "https://nuvatrahq.com") + "/dashboard",
+                    "redirect_url": os.getenv("FRONTEND_URL", "https://nuvatrahq.com") + "/",
                 },
                 timeout=10.0,
             )

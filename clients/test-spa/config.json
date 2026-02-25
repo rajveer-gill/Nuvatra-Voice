@@ -1,0 +1,42 @@
+{
+  "client_id": "test-spa",
+  "plan": "growth",
+  "business_name": "Test Day Spa",
+  "hours": "Monday\u2013Friday: 9 AM \u2013 5 PM, Saturday: 10 AM \u2013 2 PM, Closed Sunday",
+  "phone": "",
+  "forwarding_phone": "",
+  "email": "",
+  "address": "",
+  "departments": [
+    "Appointments",
+    "General",
+    "Other"
+  ],
+  "services": [],
+  "specials": [],
+  "reservation_rules": [],
+  "menu_link": "",
+  "greeting": "Thank you for calling {business_name}. How can I help you today?",
+  "staff": [
+    {
+      "name": "Manager",
+      "phone": "",
+      "role": "Manager",
+      "description": "General inquiries and management"
+    },
+    {
+      "name": "Reception",
+      "phone": "",
+      "role": "Reception",
+      "description": "Appointments and front desk"
+    }
+  ],
+  "locations": [
+    {
+      "name": "Main Location",
+      "forwarding_phone": "",
+      "address": ""
+    }
+  ],
+  "additional_info": "Copy this template for any new business. Fill in services, hours, staff, and reservation rules for their industry (restaurant, salon, retail, etc.)."
+}
