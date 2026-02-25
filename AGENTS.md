@@ -26,8 +26,20 @@ See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `n
 
 `npm run lint` (runs `next lint`). Requires `.eslintrc.json` in the project root (already committed with `next/core-web-vitals` preset). Pre-existing warnings exist in the codebase.
 
+### Admin invite flow
+
+The admin page (`/admin`) creates tenants and sends Clerk invitations. It requires:
+1. **PostgreSQL** — `DATABASE_URL` in `backend/.env` (e.g. `postgresql://nuvatra:nuvatra@localhost:5432/nuvatra_voice`). Start PostgreSQL with `sudo pg_ctlcluster 16 main start`.
+2. **Clerk JWT verification** — `CLERK_JWKS_URL` in `backend/.env` (from Clerk Dashboard > API Keys > Advanced > JWKS URL).
+3. **Admin authorization** — `ADMIN_CLERK_USER_IDS` in `backend/.env` (comma-separated Clerk user IDs).
+4. **Clerk invitations** — `CLERK_SECRET_KEY` in `backend/.env` (from Clerk Dashboard).
+5. **Frontend auth** — `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` in `.env.local` (the `pk_test_...` key from Clerk Dashboard).
+
+Without `DATABASE_URL`, the admin endpoint returns 503. Without `CLERK_SECRET_KEY`, tenant creation succeeds but the invitation email is not sent.
+
 ### Gotchas
 
 - The backend's `main.py` hard-crashes at import time if `OPENAI_API_KEY` is unset. Always provide at least a placeholder in `backend/.env`.
 - Clerk validates publishable key format strictly. An invalid format key (e.g., `pk_test_placeholder`) causes 500 errors on every page. Either use real keys or remove them entirely for keyless mode.
+- Clerk keyless/dev mode provides temporary keys but still requires real email verification for sign-up — autonomous agents cannot complete sign-up without a real email or OAuth provider.
 - Backend pip packages install to `~/.local/` (user install). This is on the Python import path but scripts go to `~/.local/bin/` which may not be on `$PATH`.
