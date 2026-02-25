@@ -41,5 +41,6 @@ Without `DATABASE_URL`, the admin endpoint returns 503. Without `CLERK_SECRET_KE
 
 - The backend's `main.py` hard-crashes at import time if `OPENAI_API_KEY` is unset. Always provide at least a placeholder in `backend/.env`.
 - Clerk validates publishable key format strictly. An invalid format key (e.g., `pk_test_placeholder`) causes 500 errors on every page. Either use real keys or remove them entirely for keyless mode.
-- Clerk keyless/dev mode provides temporary keys but still requires real email verification for sign-up — autonomous agents cannot complete sign-up without a real email or OAuth provider.
+- The Clerk instance is configured for **invite-only** sign-up. There is no public "Sign up" option. Autonomous agents cannot create accounts — a human must log in via the Desktop pane with an existing Clerk account to test authenticated flows (dashboard, admin).
+- The frontend dev server may fail to bind port 3000 after restarts due to zombie node processes. Use port 3001 as fallback: `npx next dev --hostname 0.0.0.0 --port 3001 --turbo`.
 - Backend pip packages install to `~/.local/` (user install). This is on the Python import path but scripts go to `~/.local/bin/` which may not be on `$PATH`.
