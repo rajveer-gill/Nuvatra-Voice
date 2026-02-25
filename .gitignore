@@ -60,3 +60,6 @@ htmlcov/
 # Test coverage
 coverage/
 
+
+# clerk configuration (can include secrets)
+/.clerk/
