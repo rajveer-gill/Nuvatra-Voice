@@ -261,6 +261,17 @@ def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
         return None
     return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
 
+def db_tenant_get_members(tenant_id: str) -> List[str]:
+    """Get all clerk_user_ids for a tenant."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute("SELECT clerk_user_id FROM tenant_members WHERE tenant_id = %s", (tenant_id,))
+    rows = cur.fetchall()
+    cur.close()
+    return [r[0] for r in rows]
+
 def db_tenant_delete(tenant_id: str) -> bool:
     """Delete a tenant by UUID. Cascades to tenant_members. Returns True on success."""
     conn = _get_conn()

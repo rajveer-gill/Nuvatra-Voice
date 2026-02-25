@@ -341,6 +341,7 @@ try:
         db_tenant_get_by_id,
         db_tenant_create,
         db_tenant_delete,
+        db_tenant_get_members,
         db_tenant_member_add,
         db_tenant_list_all,
     )
@@ -1253,16 +1254,34 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
 
 @app.delete("/api/admin/tenants/{tenant_id}")
 async def admin_delete_tenant(tenant_id: str, _: str = Depends(require_admin)):
-    """Delete a tenant. Cascades to tenant_members. Requires admin auth."""
+    """Delete a tenant, ban its Clerk users, and cascade-delete tenant_members. Requires admin auth."""
     if not USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    member_ids = db_tenant_get_members(tenant_id)
     deleted = db_tenant_delete(tenant_id)
     if not deleted:
         raise HTTPException(status_code=500, detail="Failed to delete tenant")
-    return {"success": True, "deleted_tenant": tenant}
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    banned_users = []
+    if clerk_secret and member_ids:
+        import httpx
+        for uid in member_ids:
+            try:
+                resp = httpx.post(
+                    f"https://api.clerk.com/v1/users/{uid}/ban",
+                    headers={"Authorization": f"Bearer {clerk_secret}"},
+                    timeout=10.0,
+                )
+                if resp.status_code < 400:
+                    banned_users.append(uid)
+                else:
+                    print(f"[Admin] Failed to ban Clerk user {uid}: {resp.status_code} {resp.text}")
+            except Exception as e:
+                print(f"[Admin] Error banning Clerk user {uid}: {e}")
+    return {"success": True, "deleted_tenant": tenant, "banned_users": banned_users}
 
 @app.post("/api/admin/tenants/{tenant_id}/members")
 async def admin_add_tenant_member(tenant_id: str, email: str = Form(...), _: str = Depends(require_admin)):
