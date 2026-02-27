@@ -1221,29 +1221,66 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, _: str = Depends(re
         cfg["plan"] = req.plan or "starter"
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
-    # Send Clerk invitation with tenant_id in public_metadata
+    # Link the user to this tenant via Clerk.
+    # If the user already has a Clerk account (e.g. re-adding a previously removed client),
+    # update their metadata and add them to tenant_members directly.
+    # If the user is new, send a Clerk invitation.
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     invite_sent = False
+    user_relinked = False
     if clerk_secret:
         import httpx
+        headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+        # Check if user already exists in Clerk
+        existing_user_id = None
         try:
-            resp = httpx.post(
-                "https://api.clerk.com/v1/invitations",
-                headers={"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"},
-                json={
-                    "email_address": req.email,
-                    "public_metadata": {"tenant_id": tenant["id"]},
-                    "redirect_url": os.getenv("FRONTEND_URL", "https://nuvatrahq.com") + "/",
-                },
+            users_resp = httpx.get(
+                f"https://api.clerk.com/v1/users?email_address={req.email}",
+                headers=headers,
                 timeout=10.0,
             )
-            if resp.status_code >= 400:
-                print(f"[Admin] Clerk invite failed: {resp.status_code} {resp.text}")
-            else:
-                invite_sent = True
+            if users_resp.status_code < 400:
+                users = users_resp.json()
+                user_list = users if isinstance(users, list) else users.get("data", [])
+                if user_list:
+                    existing_user_id = user_list[0]["id"]
         except Exception as e:
-            print(f"[Admin] Clerk invite error: {e}")
-    return {"success": True, "tenant": tenant, "invite_sent": invite_sent}
+            print(f"[Admin] Error looking up Clerk user: {e}")
+
+        if existing_user_id:
+            # User already exists — re-link them directly
+            try:
+                httpx.patch(
+                    f"https://api.clerk.com/v1/users/{existing_user_id}",
+                    headers=headers,
+                    json={"public_metadata": {"tenant_id": tenant["id"]}},
+                    timeout=10.0,
+                )
+                db_tenant_member_add(existing_user_id, tenant["id"])
+                user_relinked = True
+                print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant['id']}")
+            except Exception as e:
+                print(f"[Admin] Error re-linking user: {e}")
+        else:
+            # New user — send Clerk invitation
+            try:
+                resp = httpx.post(
+                    "https://api.clerk.com/v1/invitations",
+                    headers=headers,
+                    json={
+                        "email_address": req.email,
+                        "public_metadata": {"tenant_id": tenant["id"]},
+                        "redirect_url": os.getenv("FRONTEND_URL", "https://nuvatrahq.com") + "/",
+                    },
+                    timeout=10.0,
+                )
+                if resp.status_code >= 400:
+                    print(f"[Admin] Clerk invite failed: {resp.status_code} {resp.text}")
+                else:
+                    invite_sent = True
+            except Exception as e:
+                print(f"[Admin] Clerk invite error: {e}")
+    return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked}
 
 @app.get("/api/admin/tenants")
 async def admin_list_tenants(_: str = Depends(require_admin)):
