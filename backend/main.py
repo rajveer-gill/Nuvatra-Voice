@@ -945,6 +945,10 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             apt = _create_appointment_from_booking(booking)
             if apt:
                 ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
+                # Send caller a text: thanks + we'll let them know when business confirms
+                business_name = get_business_info().get("name", "us")
+                thanks_msg = f"Thanks for calling! We've received your appointment request for {apt.get('date', '')} at {apt.get('time', '')}. We'll let you know when {business_name} confirms your appointment."
+                send_sms(apt.get("phone") or "", thanks_msg)
             else:
                 ai_text = "That time slot just got booked. Would you like to try another time or another stylist?"
         
