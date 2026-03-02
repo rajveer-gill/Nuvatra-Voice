@@ -58,7 +58,8 @@ For **multi-tenant**: set `CLERK_JWKS_URL`, `CLERK_SECRET_KEY`, and `ADMIN_CLERK
 ## 6. Twilio: One Number Per Client
 
 - Each client has a Twilio number in the `tenants` table
-- Point all numbers to the same webhook: `https://your-backend.onrender.com/api/phone/incoming`
+- **Voice webhook:** Point all numbers' Voice webhook to `https://your-backend.onrender.com/api/phone/incoming`
+- **Messaging webhook:** Point all numbers' Messaging webhook to `https://your-backend.onrender.com/api/sms/incoming` so the AI mobile receptionist can reply when customers text back
 - The backend looks up the tenant by the `To` number and uses that tenant’s config
 
 ### How phone-to-site works
@@ -72,6 +73,6 @@ When you add a new client with their Twilio number (via **/admin**), that number
 - [ ] Backend: Set `DATABASE_URL` (PostgreSQL)
 - [ ] Add your Clerk user ID to `ADMIN_CLERK_USER_IDS`
 - [ ] Create first tenant via `/admin`
-- [ ] Buy Twilio number, configure webhook, add to tenant
+- [ ] Buy Twilio number, configure Voice and Messaging webhooks, add to tenant
 - [ ] Edit `clients/<client_id>/config.json` for the business
 - [ ] Client accepts invite and uses dashboard

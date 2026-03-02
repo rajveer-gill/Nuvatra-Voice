@@ -141,6 +141,16 @@ def init_db() -> bool:
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tenants_twilio_phone ON tenants(twilio_phone_number)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sms_sessions (
+                phone TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                messages JSONB DEFAULT '[]',
+                appointment_id INT,
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (phone, client_id)
+            )
+        """)
         conn.commit()
         cur.close()
         conn.close()
@@ -393,6 +403,71 @@ def db_appointments_max_id() -> int:
     row = cur.fetchone()
     cur.close()
     return row[0] if row else 0
+
+def db_appointments_get_pending_by_phone(phone: str) -> Optional[dict]:
+    """Return most recent pending_review appointment for this phone, or None."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return None
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, phone, date, time, reason, status, source, created_at
+        FROM appointments
+        WHERE client_id = %s AND status = 'pending_review'
+          AND (regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = %s
+               OR regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = right(%s, 10))
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (_client_id(), norm, norm))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
+
+# --- SMS Sessions ---
+def db_sms_session_get(phone: str, client_id: str) -> Optional[dict]:
+    """Get SMS session for phone+client. Returns {messages, appointment_id} or None."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return None
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT messages, appointment_id, updated_at FROM sms_sessions WHERE phone = %s AND client_id = %s",
+        (norm, client_id)
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    msgs = row[0] if isinstance(row[0], list) else (json.loads(row[0]) if row[0] else [])
+    return {"messages": msgs, "appointment_id": row[1], "updated_at": row[2]}
+
+def db_sms_session_upsert(phone: str, client_id: str, messages: list, appointment_id: Optional[int] = None) -> None:
+    """Insert or update SMS session."""
+    conn = _get_conn()
+    if not conn:
+        return
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sms_sessions (phone, client_id, messages, appointment_id, updated_at)
+        VALUES (%s, %s, %s::jsonb, %s, NOW())
+        ON CONFLICT (phone, client_id) DO UPDATE SET
+            messages = EXCLUDED.messages,
+            appointment_id = COALESCE(EXCLUDED.appointment_id, sms_sessions.appointment_id),
+            updated_at = NOW()
+    """, (norm, client_id, json.dumps(messages), appointment_id))
+    conn.commit()
+    cur.close()
 
 # --- Messages ---
 def db_messages_get_all() -> List[dict]:

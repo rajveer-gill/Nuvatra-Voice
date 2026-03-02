@@ -60,6 +60,11 @@ htmlcov/
 # Test coverage
 coverage/
 
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
 
 # clerk configuration (can include secrets)
 /.clerk/

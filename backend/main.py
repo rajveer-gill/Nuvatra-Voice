@@ -344,6 +344,9 @@ try:
         db_tenant_get_members,
         db_tenant_member_add,
         db_tenant_list_all,
+        db_sms_session_get,
+        db_sms_session_upsert,
+        db_appointments_get_pending_by_phone,
     )
     USE_DB = init_db()
 except (ImportError, Exception) as e:
@@ -520,17 +523,21 @@ def _phone_to_e164(phone: str) -> Optional[str]:
         return f"+{digits}"
     return None
 
-def send_sms(to_phone: str, body: str) -> bool:
-    """Send SMS via Twilio. Returns True on success, False otherwise. Logs errors."""
-    if not TWILIO_AVAILABLE or not twilio_client or not TWILIO_SMS_FROM:
-        print("SMS skipped: Twilio not configured or SMS from number missing")
+def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> bool:
+    """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number)."""
+    if not TWILIO_AVAILABLE or not twilio_client:
+        print("SMS skipped: Twilio not configured")
+        return False
+    from_num = (from_override or TWILIO_SMS_FROM or "").strip()
+    if not from_num:
+        print("SMS skipped: SMS from number missing (set TWILIO_SMS_FROM or pass from_override)")
         return False
     e164 = _phone_to_e164(to_phone or "")
     if not e164:
         print(f"SMS skipped: invalid or short phone: {to_phone}")
         return False
     try:
-        twilio_client.messages.create(from_=TWILIO_SMS_FROM, to=e164, body=body)
+        twilio_client.messages.create(from_=from_num, to=e164, body=body)
         return True
     except Exception as e:
         print(f"SMS send failed: {e}")
@@ -945,10 +952,19 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             apt = _create_appointment_from_booking(booking)
             if apt:
                 ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
-                # Send caller a text: thanks + we'll let them know when business confirms
-                business_name = get_business_info().get("name", "us")
-                thanks_msg = f"Thanks for calling! We've received your appointment request for {apt.get('date', '')} at {apt.get('time', '')}. We'll let you know when {business_name} confirms your appointment."
-                send_sms(apt.get("phone") or "", thanks_msg)
+                # Send caller a text: human-like, full details, invite reply to confirm or change
+                thanks_msg = (
+                    f"Hey! Your reservation is pending. Here's what we have:\n"
+                    f"Name: {apt.get('name', '')}\n"
+                    f"Date: {apt.get('date', '')}\n"
+                    f"Time: {apt.get('time', '')}\n"
+                    f"Service: {apt.get('reason', '')}\n\n"
+                    f"Does this look right? Just reply to confirm, or let us know if you need to change anything. "
+                    f"We'll text you once the business confirms!"
+                )
+                to_number = apt.get("phone") or ""
+                from_number = call_data.get("to_number") if call_data else None
+                send_sms(to_number, thanks_msg, from_override=from_number)
             else:
                 ai_text = "That time slot just got booked. Would you like to try another time or another stylist?"
         
@@ -1727,6 +1743,66 @@ async def get_got_it_audio():
             "Content-Length": str(len(got_it_audio_cache))
         }
     )
+
+
+@app.post("/api/sms/incoming")
+async def handle_incoming_sms(request: Request):
+    """Twilio webhook for incoming SMS. AI-powered mobile receptionist replies like a real person."""
+    if not TWILIO_AVAILABLE:
+        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+    if not USE_DB:
+        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+    try:
+        form_data = await request.form()
+        from_number = form_data.get("From", "").strip()
+        to_number = form_data.get("To", "").strip()
+        body = (form_data.get("Body", "") or "").strip()
+        if not from_number or not to_number or not body:
+            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        tenant = db_tenant_get_by_phone(to_number)
+        if not tenant:
+            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        set_request_client_id(tenant["client_id"])
+        apt = db_appointments_get_pending_by_phone(from_number) if USE_DB else None
+        session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
+        messages = (session["messages"] if session else []) if session else []
+        messages.append({"role": "user", "content": body})
+        apt_info = ""
+        if apt:
+            apt_info = f"The customer has a PENDING appointment: Name {apt.get('name','')}, {apt.get('date','')} at {apt.get('time','')}, service: {apt.get('reason','')}."
+        else:
+            apt_info = "The customer does not have a pending appointment in the system."
+        business_name = get_business_info().get("name", "us")
+        history_str = "\n".join([f"{m['role']}: {m['content']}" for m in messages[-10:]])
+        sys_prompt = f"""You're the friendly text receptionist for {business_name}. Keep replies short (1-3 sentences), casual, like texting a friend.
+
+{apt_info}
+
+They just texted: "{body}"
+
+Previous conversation:
+{history_str}
+
+Respond naturally. If they confirm it's correct, say we'll text when the business confirms. If they want changes (date, time, name, etc.), acknowledge and say we'll update it—don't make up new details. For other questions (hours, location, services), answer from your knowledge. Be warm and helpful."""
+
+        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": body}],
+            temperature=0.8,
+            max_tokens=150,
+        )
+        reply = (resp.choices[0].message.content or "").strip()
+        if reply:
+            send_sms(from_number, reply, from_override=to_number)
+        messages.append({"role": "assistant", "content": reply})
+        db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"] if apt else None)
+        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+    except Exception as e:
+        print(f"SMS webhook error: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
 
 
 @app.post("/api/phone/incoming")
