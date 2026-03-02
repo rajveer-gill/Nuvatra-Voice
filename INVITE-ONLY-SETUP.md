@@ -61,6 +61,10 @@ For **multi-tenant**: set `CLERK_JWKS_URL`, `CLERK_SECRET_KEY`, and `ADMIN_CLERK
 - Point all numbers to the same webhook: `https://your-backend.onrender.com/api/phone/incoming`
 - The backend looks up the tenant by the `To` number and uses that tenant’s config
 
+### How phone-to-site works
+
+When you add a new client with their Twilio number (via **/admin**), that number is linked to their account in the database. Every incoming call to that number is mapped to that tenant's `client_id`. All reservations (and messages, call log) made from that number are stored under that client, so they appear only in that client's dashboard. No extra implementation is required—once the number's voice webhook points to your backend, the system routes calls and data to the correct client automatically.
+
 ## 7. Checklist
 
 - [ ] Clerk: Disable public sign-up / enable invite-only

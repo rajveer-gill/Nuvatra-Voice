@@ -939,6 +939,9 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
         if booking:
+            # Use caller's phone from Twilio when available (don't require asking)
+            if call_data.get("from_number"):
+                booking["phone"] = (booking.get("phone") or "").strip() or call_data["from_number"]
             apt = _create_appointment_from_booking(booking)
             if apt:
                 ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
