@@ -389,6 +389,7 @@ def load_client_config(client_id: Optional[str] = None):
             "locations": data.get("locations", []),
             "greeting": data.get("greeting", "Thank you for calling. How can I help you today?"),
             "plan": data.get("plan", "starter"),
+            "voice": data.get("voice", "fable"),
         }
         print(f"Loaded client config: {cid} ({info['name']})")
         return info
@@ -421,12 +422,17 @@ _DEMO_BUSINESS_INFO = {
         "locations": [],
         "greeting": "Thank you for calling. How can I help you today?",
         "plan": "starter",
+        "voice": "fable",
     }
 
 def get_business_info() -> dict:
     """Get business config for current request (multi-tenant) or env CLIENT_ID (single-tenant)."""
     cfg = load_client_config()
     return cfg if cfg else _DEMO_BUSINESS_INFO
+
+def get_tts_voice() -> str:
+    """Voice for TTS (phone/SMS). From business config or default fable."""
+    return get_business_info().get("voice", "fable") or "fable"
 
 def get_greeting_text() -> str:
     """Greeting for phone (uses client config if set)."""
@@ -1005,7 +1011,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         
         # Generate TTS audio URL
         ai_text_encoded = quote(ai_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={get_tts_voice()}"
         
         # Mark as ready
         response_status[call_sid] = {
@@ -1089,7 +1095,7 @@ def forward_call_to_business(forwarding_phone: str, base_url: str, detected_lang
     
     # Say message before forwarding
     message_encoded = quote(message)
-    tts_url = f"{base_url}/api/phone/tts-audio?text={message_encoded}&voice=fable"
+    tts_url = f"{base_url}/api/phone/tts-audio?text={message_encoded}&voice={get_tts_voice()}"
     response.play(tts_url)
     
     # Dial the business phone number
@@ -1555,6 +1561,69 @@ async def get_messages(_: None = Depends(require_tenant)):
 async def api_get_business_info(_: None = Depends(require_tenant)):
     return get_business_info()
 
+class BusinessInfoUpdate(BaseModel):
+    name: Optional[str] = None
+    hours: Optional[str] = None
+    phone: Optional[str] = None
+    forwarding_phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    departments: Optional[List[str]] = None
+    services: Optional[List[str]] = None
+    specials: Optional[List[str]] = None
+    reservation_rules: Optional[List[str]] = None
+    menu_link: Optional[str] = None
+    greeting: Optional[str] = None
+    voice: Optional[str] = None
+
+@app.patch("/api/business-info")
+async def api_update_business_info(update: BusinessInfoUpdate, _: None = Depends(require_tenant)):
+    """Update business config (store info, voice, etc.). Writes to clients/<client_id>/config.json."""
+    cid = get_db_client_id()
+    if not cid or cid == "default":
+        raise HTTPException(status_code=400, detail="No client context")
+    config_path = PROJECT_ROOT / "clients" / cid / "config.json"
+    if not config_path.exists():
+        raise HTTPException(status_code=404, detail="Client config not found")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read config: {e}")
+    if update.name is not None:
+        data["business_name"] = update.name
+    if update.hours is not None:
+        data["hours"] = update.hours
+    if update.phone is not None:
+        data["phone"] = update.phone
+    if update.forwarding_phone is not None:
+        data["forwarding_phone"] = update.forwarding_phone
+    if update.email is not None:
+        data["email"] = update.email
+    if update.address is not None:
+        data["address"] = update.address
+    if update.departments is not None:
+        data["departments"] = update.departments
+    if update.services is not None:
+        data["services"] = update.services
+    if update.specials is not None:
+        data["specials"] = update.specials
+    if update.reservation_rules is not None:
+        data["reservation_rules"] = update.reservation_rules
+    if update.menu_link is not None:
+        data["menu_link"] = update.menu_link
+    if update.greeting is not None:
+        data["greeting"] = update.greeting
+    if update.voice is not None:
+        data["voice"] = update.voice
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
+    return get_business_info()
+
 @app.get("/api/stats")
 async def get_stats(_: None = Depends(require_tenant)):
     apts = db_appointments_get_all() if USE_DB else appointments
@@ -1896,7 +1965,7 @@ async def handle_incoming_call(request: Request):
             print(f"🔄 Error on incoming call - forwarding to business phone: {forwarding_phone}")
             error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
             error_encoded = quote(error_text)
-            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
             response.play(tts_audio_url)
             response = forward_call_to_business(forwarding_phone, base_url, "English")
             return Response(content=str(response), media_type="application/xml")
@@ -1904,7 +1973,7 @@ async def handle_incoming_call(request: Request):
             # Fallback: just say error message if no forwarding number
             error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
             error_encoded = quote(error_text)
-            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
             response.play(tts_audio_url)
             response.hangup()
             return Response(content=str(response), media_type="application/xml")
@@ -1980,7 +2049,7 @@ async def process_speech(request: Request):
             # Ask user to repeat using Record + Whisper
             prompt_text = f"I detected you're speaking in {current_detected_lang}. For better accuracy, please speak again and press pound when done."
             prompt_encoded = quote(prompt_text)
-            tts_url = f"{base_url}/api/phone/tts-audio?text={prompt_encoded}&voice=fable"
+            tts_url = f"{base_url}/api/phone/tts-audio?text={prompt_encoded}&voice={get_tts_voice()}"
             response.play(tts_url)
             
             # Set up Record for Whisper transcription
@@ -2124,7 +2193,7 @@ async def process_speech(request: Request):
             print(f"🔄 Error occurred - forwarding to business phone: {forwarding_phone}")
             error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
             error_encoded = quote(error_text)
-            tts_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            tts_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
             response.play(tts_url)
             response = forward_call_to_business(forwarding_phone, base_url, "English")
             return Response(content=str(response), media_type="application/xml")
@@ -2132,7 +2201,7 @@ async def process_speech(request: Request):
             # No forwarding number - just ask to repeat
             error_text = "I'm sorry, I didn't catch that. Could you repeat?"
             error_encoded = quote(error_text)
-            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice=fable"
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
             response.play(tts_audio_url)
             response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
             return Response(content=str(response), media_type="application/xml")
@@ -2306,7 +2375,7 @@ async def respond_with_audio(request: Request):
             # Use OpenAI TTS (Fable voice) for consistency
             filler_text = "One sec."
             filler_encoded = quote(filler_text)
-            filler_audio_url = f"{base_url}/api/phone/tts-audio?text={filler_encoded}&voice=fable"
+            filler_audio_url = f"{base_url}/api/phone/tts-audio?text={filler_encoded}&voice={get_tts_voice()}"
             response.play(filler_audio_url)
             response.pause(length=1)
             response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
@@ -2525,7 +2594,7 @@ async def process_recording(request: Request):
         
         # Generate audio URL for AI response
         ai_text_encoded = quote(ai_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice=fable"
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={get_tts_voice()}"
         response.play(tts_audio_url)
         
         # Set up next input based on language

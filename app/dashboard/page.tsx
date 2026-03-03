@@ -6,13 +6,13 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { useApiClient } from '@/lib/api'
 
-const VoiceReceptionist = dynamic(() => import('@/components/VoiceReceptionist'), { ssr: false })
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
 const Appointments = dynamic(() => import('@/components/Appointments'), { ssr: false })
+const Settings = dynamic(() => import('@/components/Settings'), { ssr: false })
 
 export default function DashboardPage() {
   const api = useApiClient()
-  const [activeTab, setActiveTab] = useState<'call' | 'dashboard' | 'appointments'>('call')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'appointments' | 'settings'>('appointments')
   const [access, setAccess] = useState<'loading' | 'granted' | 'denied'>('loading')
 
   useEffect(() => {
@@ -81,16 +81,6 @@ export default function DashboardPage() {
         <div className="max-w-6xl mx-auto">
           <div className="flex justify-center mb-6 flex-wrap gap-2">
             <button
-              onClick={() => setActiveTab('call')}
-              className={`px-6 py-2 rounded-lg font-medium transition-all ${
-                activeTab === 'call'
-                  ? 'bg-primary-600 text-white shadow-lg'
-                  : 'bg-white text-gray-700 hover:bg-gray-100'
-              }`}
-            >
-              Voice Call
-            </button>
-            <button
               onClick={() => setActiveTab('appointments')}
               className={`px-6 py-2 rounded-lg font-medium transition-all ${
                 activeTab === 'appointments'
@@ -110,11 +100,21 @@ export default function DashboardPage() {
             >
               Dashboard
             </button>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`px-6 py-2 rounded-lg font-medium transition-all ${
+                activeTab === 'settings'
+                  ? 'bg-primary-600 text-white shadow-lg'
+                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              Settings
+            </button>
           </div>
 
-          {activeTab === 'call' && <VoiceReceptionist />}
           {activeTab === 'appointments' && <Appointments />}
           {activeTab === 'dashboard' && <Dashboard />}
+          {activeTab === 'settings' && <Settings />}
         </div>
       </div>
     </main>
