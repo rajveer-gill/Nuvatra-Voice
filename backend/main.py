@@ -130,6 +130,7 @@ allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://nuvatrasite.netlify.app",
+    "https://nuvatra-voice.vercel.app",
     "https://nuvatrahq.com",
 ]
 # Add production frontend URL if set
