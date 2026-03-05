@@ -7,12 +7,9 @@ import { useApiClient } from '@/lib/api'
 const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const
 const VOICE_SAMPLE_TEXT = "Hi there! Thanks for calling. How can I help you today?"
 
-const SPEECH_SPEED_OPTIONS = [
-  { value: 0.8, label: 'Slower' },
-  { value: 1.0, label: 'Normal' },
-  { value: 1.1, label: 'Slightly faster' },
-  { value: 1.25, label: 'Faster' },
-] as const
+const SPEECH_SPEED_MIN = 0.75
+const SPEECH_SPEED_MAX = 1.5
+const SPEECH_SPEED_STEP = 0.05
 
 const RANDOM_NAMES = [
   'Ava', 'Liam', 'Sophia', 'Noah', 'Olivia', 'Ethan', 'Mia', 'Lucas',
@@ -51,6 +48,8 @@ export default function Settings() {
       .then((res) => {
         const d = res.data
         setVoice(d.voice || 'fable')
+        const s = typeof d.speed === 'number' ? d.speed : 1.0
+        setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, s)))
         setReceptionistName(d.receptionist_name || '')
         setAiPhone(d.phone || '')
         setForm({
@@ -211,18 +210,21 @@ export default function Settings() {
         </p>
         <div className="mb-6">
           <label className="block text-sm font-medium text-gray-700 mb-1">Speaking speed</label>
-          <select
-            value={speechSpeed}
-            onChange={(e) => setSpeechSpeed(Number(e.target.value))}
-            className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
-          >
-            {SPEECH_SPEED_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-          <p className="text-xs text-gray-500 mt-1">How fast your receptionist speaks on calls and in messages.</p>
+          <div className="flex items-center gap-4">
+            <input
+              type="range"
+              min={SPEECH_SPEED_MIN}
+              max={SPEECH_SPEED_MAX}
+              step={SPEECH_SPEED_STEP}
+              value={speechSpeed}
+              onChange={(e) => setSpeechSpeed(Number(e.target.value))}
+              className="flex-1 h-2 rounded-lg appearance-none cursor-pointer bg-gray-200 accent-primary-600"
+            />
+            <span className="text-sm font-medium text-gray-700 tabular-nums min-w-[3rem]">
+              {speechSpeed.toFixed(2)}
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">Drag the slider to set exactly how fast your receptionist speaks (0.75 = slower, 1.5 = faster).</p>
         </div>
         <div className="flex flex-wrap gap-3">
           {VOICES.map((v) => (

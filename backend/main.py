@@ -23,6 +23,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import io
+import re
 from urllib.parse import quote
 import base64
 # Twilio imports (optional - only needed for phone integration)
@@ -77,7 +78,7 @@ async def pre_warm_openai():
         )
         print("[OK] OpenAI client pre-warmed successfully")
         print("[TTS] Generating greeting audio with OpenAI TTS...")
-        greeting_text = get_greeting_text()
+        greeting_text = add_sentence_pauses(get_greeting_text())
         greeting_audio = client.audio.speech.create(
             model="tts-1-hd",
             voice="fable",
@@ -90,7 +91,7 @@ async def pre_warm_openai():
         got_it_audio = client.audio.speech.create(
             model="tts-1-hd",
             voice="fable",
-            input="Got it, one moment.",
+            input=add_sentence_pauses("Got it, one moment."),
             speed=get_tts_speed()
         )
         got_it_audio_cache = got_it_audio.content
@@ -258,7 +259,7 @@ def generate_greeting_audio_sync():
         greeting_audio = client.audio.speech.create(
             model="tts-1-hd",  # HD model for best quality
             voice="fable",  # Same voice as rest of conversation
-            input=greeting_text,
+            input=add_sentence_pauses(greeting_text),
             speed=get_tts_speed()
         )
         greeting_audio_cache = greeting_audio.content
@@ -490,6 +491,13 @@ def get_tts_speed() -> float:
         return max(0.25, min(4.0, s))
     except (TypeError, ValueError):
         return 1.0
+
+def add_sentence_pauses(text: str) -> str:
+    """Insert short pauses after periods, exclamation points, and question marks so sentences don't run together."""
+    if not text or not text.strip():
+        return text
+    # After . ! ? (optionally followed by space) insert two newlines so TTS adds a brief pause
+    return re.sub(r"([.!?])\s*", r"\1\n\n", text).strip()
 
 def get_greeting_text() -> str:
     """Greeting for phone (uses client config if set)."""
@@ -1770,7 +1778,7 @@ async def text_to_speech(request: TTSRequest, _: None = Depends(require_tenant))
         response = client.audio.speech.create(
             model="tts-1-hd",  # HD model for smooth, natural, human-like quality
             voice=request.voice,
-            input=request.text,
+            input=add_sentence_pauses(request.text),
             speed=tts_speed
         )
         
@@ -1819,7 +1827,7 @@ async def get_greeting_audio():
             greeting_audio = client.audio.speech.create(
                 model="tts-1-hd",
                 voice="fable",
-                input=greeting_text,
+                input=add_sentence_pauses(greeting_text),
                 speed=get_tts_speed()
             )
             greeting_audio_cache = greeting_audio.content
@@ -1854,7 +1862,7 @@ async def get_got_it_audio():
             got_it_audio = client.audio.speech.create(
                 model="tts-1-hd",
                 voice="fable",
-                input=got_it_text,
+                input=add_sentence_pauses(got_it_text),
                 speed=get_tts_speed()
             )
             got_it_audio_cache = got_it_audio.content
@@ -2479,7 +2487,7 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
         response = client.audio.speech.create(
             model="tts-1-hd",  # HD model for ultra-smooth, natural speech
             voice=voice,
-            input=text,
+            input=add_sentence_pauses(text),
             speed=get_tts_speed()
         )
         
@@ -2512,7 +2520,7 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
         response = client.audio.speech.create(
             model="tts-1",  # Faster generation, still high quality
             voice=voice,
-            input=text,
+            input=add_sentence_pauses(text),
             speed=get_tts_speed()
         )
         
