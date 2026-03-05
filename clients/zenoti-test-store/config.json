@@ -1,55 +1,22 @@
 {
   "client_id": "zenoti-test-store",
   "plan": "pro",
-  "business_name": "Zenoti Test Salon",
-  "hours": "Tuesday–Saturday: 9 AM – 6 PM, Sunday: 10 AM – 4 PM, Closed Monday",
-  "phone": "+19254815386",
-  "forwarding_phone": "+19259978995",
+  "business_name": "Your Business",
+  "hours": "",
+  "phone": "",
+  "forwarding_phone": "",
   "email": "",
   "address": "",
-  "departments": ["Appointments", "Services & Pricing", "General", "Staff"],
-  "services": [
-    "Haircut & Styling",
-    "Color & Highlights",
-    "Balayage",
-    "Hair Treatment",
-    "Blowout",
-    "Manicure",
-    "Pedicure",
-    "Gel Nails",
-    "Waxing",
-    "Facial",
-    "Massage",
-    "Bridal Package"
-  ],
+  "departments": ["General"],
+  "services": [],
   "specials": [],
-  "reservation_rules": [
-    "Appointments recommended; walk-ins welcome when available",
-    "Cancellations: please give 24 hours notice",
-    "First-time guests: arrive 10 minutes early for intake"
-  ],
+  "reservation_rules": [],
   "menu_link": "",
-  "greeting": "Thank you for calling {business_name}. How can I help you today?",
-  "staff": [
-    {
-      "name": "Manager",
-      "phone": "",
-      "role": "Manager",
-      "description": "General manager, scheduling, and account questions"
-    },
-    {
-      "name": "Reception",
-      "phone": "",
-      "role": "Reception",
-      "description": "Front desk and appointments"
-    }
-  ],
-  "locations": [
-    {
-      "name": "Main Street",
-      "forwarding_phone": "",
-      "address": ""
-    }
-  ],
-  "additional_info": "This is a test location for Nuvatra Voice (Pro plan). No Zenoti API; appointments and info are handled by the AI and stored in-dashboard."
+  "greeting": "Thank you for calling. How can I help you today?",
+  "staff": [],
+  "locations": [],
+  "voice": "fable",
+  "speed": 1.0,
+  "receptionist_name": "",
+  "additional_info": "Legacy test client; use admin to create tenants and enter business info."
 }
