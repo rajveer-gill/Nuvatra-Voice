@@ -426,10 +426,55 @@ _DEMO_BUSINESS_INFO = {
         "voice": "fable",
     }
 
+def _default_business_info_for_tenant() -> Optional[dict]:
+    """Build minimal business info from the tenant DB record when no config file exists."""
+    if not USE_DB:
+        return None
+    cid = get_db_client_id()
+    if not cid or cid == "default":
+        return None
+    try:
+        from database import _get_conn
+        conn = _get_conn()
+        if not conn:
+            return None
+        cur = conn.cursor()
+        cur.execute("SELECT name, twilio_phone_number, plan FROM tenants WHERE client_id = %s", (cid,))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        return {
+            "name": row[0] or "",
+            "hours": "",
+            "phone": row[1] or "",
+            "forwarding_phone": "",
+            "email": "",
+            "address": "",
+            "departments": [],
+            "menu_link": "",
+            "services": [],
+            "specials": [],
+            "reservation_rules": [],
+            "staff": [],
+            "locations": [],
+            "greeting": "",
+            "plan": row[2] or "starter",
+            "voice": "fable",
+            "receptionist_name": "",
+        }
+    except Exception:
+        return None
+
 def get_business_info() -> dict:
     """Get business config for current request (multi-tenant) or env CLIENT_ID (single-tenant)."""
     cfg = load_client_config()
-    return cfg if cfg else _DEMO_BUSINESS_INFO
+    if cfg:
+        return cfg
+    tenant_info = _default_business_info_for_tenant()
+    if tenant_info:
+        return tenant_info
+    return _DEMO_BUSINESS_INFO
 
 def get_tts_voice() -> str:
     """Voice for TTS (phone/SMS). From business config or default fable."""

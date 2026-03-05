@@ -1,10 +1,18 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Volume2, Store, Save } from 'lucide-react'
+import { Volume2, Store, Save, Shuffle, User } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 
 const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const
+
+const RANDOM_NAMES = [
+  'Ava', 'Liam', 'Sophia', 'Noah', 'Olivia', 'Ethan', 'Mia', 'Lucas',
+  'Emma', 'Mason', 'Aria', 'Logan', 'Chloe', 'James', 'Lily', 'Aiden',
+  'Zoe', 'Carter', 'Nora', 'Owen', 'Ella', 'Riley', 'Luna', 'Kai',
+  'Ivy', 'Leo', 'Ruby', 'Max', 'Jade', 'Finn', 'Sage', 'Quinn',
+  'Sky', 'River', 'Hazel', 'Atlas', 'Willow', 'Juno', 'Nova', 'Iris',
+]
 
 export default function Settings() {
   const api = useApiClient()
@@ -12,10 +20,11 @@ export default function Settings() {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [voice, setVoice] = useState<string>('fable')
+  const [receptionistName, setReceptionistName] = useState('')
+  const [aiPhone, setAiPhone] = useState('')
   const [form, setForm] = useState({
     name: '',
     hours: '',
-    phone: '',
     forwarding_phone: '',
     email: '',
     address: '',
@@ -31,10 +40,11 @@ export default function Settings() {
       .then((res) => {
         const d = res.data
         setVoice(d.voice || 'fable')
+        setReceptionistName(d.receptionist_name || '')
+        setAiPhone(d.phone || '')
         setForm({
           name: d.name || '',
           hours: d.hours || '',
-          phone: d.phone || '',
           forwarding_phone: d.forwarding_phone || '',
           email: d.email || '',
           address: d.address || '',
@@ -49,6 +59,15 @@ export default function Settings() {
       .finally(() => setLoading(false))
   }, [api])
 
+  const randomizeName = () => {
+    const current = receptionistName.trim().toLowerCase()
+    let pick: string
+    do {
+      pick = RANDOM_NAMES[Math.floor(Math.random() * RANDOM_NAMES.length)]
+    } while (pick.toLowerCase() === current && RANDOM_NAMES.length > 1)
+    setReceptionistName(pick)
+  }
+
   const handleSave = async () => {
     setSaving(true)
     setMessage(null)
@@ -56,13 +75,13 @@ export default function Settings() {
       await api.patch('/api/business-info', {
         name: form.name || undefined,
         hours: form.hours || undefined,
-        phone: form.phone || undefined,
         forwarding_phone: form.forwarding_phone || undefined,
         email: form.email || undefined,
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
         greeting: form.greeting || undefined,
         voice: voice || undefined,
+        receptionist_name: receptionistName || undefined,
         services: form.services
           ? form.services.split('\n').map((s) => s.trim()).filter(Boolean)
           : undefined,
@@ -91,6 +110,51 @@ export default function Settings() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
+      {/* AI Receptionist Identity */}
+      <div className="bg-white rounded-2xl shadow-xl p-8">
+        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
+          <User className="w-6 h-6 text-primary-600" />
+          AI Receptionist
+        </h2>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Receptionist name</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={receptionistName}
+                onChange={(e) => setReceptionistName(e.target.value)}
+                className="flex-1 rounded-lg border border-gray-300 px-3 py-2"
+                placeholder="Give your AI receptionist a name"
+              />
+              <button
+                type="button"
+                onClick={randomizeName}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
+                title="Random name"
+              >
+                <Shuffle className="w-4 h-4" />
+                Random
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">This name is used when your AI introduces itself to callers.</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">AI receptionist phone number</label>
+            <input
+              type="text"
+              value={aiPhone}
+              readOnly
+              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-gray-500 cursor-not-allowed"
+            />
+            <p className="text-xs text-gray-500 mt-1">This is your AI receptionist&apos;s phone number. Contact your administrator to change it.</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Voice Settings */}
       <div className="bg-white rounded-2xl shadow-xl p-8">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <Volume2 className="w-6 h-6 text-primary-600" />
@@ -118,10 +182,11 @@ export default function Settings() {
         </div>
       </div>
 
+      {/* Store Info */}
       <div className="bg-white rounded-2xl shadow-xl p-8">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <Store className="w-6 h-6 text-primary-600" />
-          Store info & AI customizations
+          Store info &amp; AI customizations
         </h2>
         <p className="text-gray-600 text-sm mb-6">
           This information is used by your AI receptionist when answering calls and texts (hours, services, booking rules, etc.).
@@ -148,25 +213,16 @@ export default function Settings() {
               placeholder="e.g. Mon–Fri 9 AM–5 PM"
             />
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
-            <input
-              type="text"
-              value={form.phone}
-              onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
-              placeholder="(555) 123-4567"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Forwarding phone</label>
+          <div className="md:col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Forwarding phone number</label>
             <input
               type="text"
               value={form.forwarding_phone}
               onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2"
-              placeholder="Number to forward calls to"
+              placeholder="Number to forward calls to when a caller asks for a real person"
             />
+            <p className="text-xs text-gray-500 mt-1">When a caller asks to speak to someone, the AI will transfer the call to this number.</p>
           </div>
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
@@ -215,7 +271,7 @@ export default function Settings() {
               value={form.services}
               onChange={(e) => setForm((f) => ({ ...f, services: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
-              placeholder="Haircut\nColor\nStyling"
+              placeholder="Haircut&#10;Color&#10;Styling"
             />
           </div>
           <div className="md:col-span-2">
@@ -224,7 +280,7 @@ export default function Settings() {
               value={form.specials}
               onChange={(e) => setForm((f) => ({ ...f, specials: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
-              placeholder="Happy hour 4–6 PM\nTuesday 2-for-1"
+              placeholder="Happy hour 4–6 PM&#10;Tuesday 2-for-1"
             />
           </div>
           <div className="md:col-span-2">
@@ -233,7 +289,7 @@ export default function Settings() {
               value={form.reservation_rules}
               onChange={(e) => setForm((f) => ({ ...f, reservation_rules: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
-              placeholder="Reservations recommended for 6+\nSame-day booking by phone"
+              placeholder="Reservations recommended for 6+&#10;Same-day booking by phone"
             />
           </div>
         </div>
