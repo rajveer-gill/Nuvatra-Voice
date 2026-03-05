@@ -18,6 +18,18 @@ An intelligent AI-powered voice receptionist for businesses: handle calls, sched
 - **AI**: OpenAI GPT-4, TTS-1-HD
 - **Phone**: Twilio
 
+## Services We Use
+
+| Service | Purpose |
+|--------|---------|
+| **Render** | Backend API and PostgreSQL (24/7 hosting) |
+| **Vercel** | Frontend (marketing site + dashboard) deployment |
+| **Twilio** | Phone numbers, voice webhooks, SMS (calls and texts) |
+| **Clerk** | Authentication (sign-in, invite-only, JWT for API) |
+| **Squarespace** | Marketing/company website (separate from this app) |
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for Render/Vercel setup; [PHONE-SETUP.md](./PHONE-SETUP.md) for Twilio; [AUTH-SETUP.md](./AUTH-SETUP.md) for Clerk.
+
 ## Quick Start
 
 **Prerequisites:** Node.js 18+, Python 3.9+, OpenAI API key
@@ -47,21 +59,30 @@ An intelligent AI-powered voice receptionist for businesses: handle calls, sched
 
 4. Open **http://localhost:3000** – marketing home (public). Log in to access **Dashboard** (Nuvatra Voice).
 
-See **[QUICK-START.md](./QUICK-START.md)** for running backend and frontend in separate terminals and troubleshooting.
+### Run servers separately (optional)
+
+- **Backend:** `cd backend && python main.py` (port 8000)
+- **Frontend:** `npm run dev` (port 3000)
+
+### Troubleshooting
+
+- **Port 8000 in use (Windows):** `Get-NetTCPConnection -LocalPort 8000 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`
+- **Frontend stuck on "Starting...":** Stop, then `Remove-Item -Path .next -Recurse -Force`, then `npm run dev` again
+
+### Testing
+
+- **Web:** Open http://localhost:3000 → sign in → Appointments / Dashboard / Settings. Use Settings to set voice and store info.
+- **Phone:** Deploy backend, point Twilio webhooks to `https://your-backend-url/api/phone/incoming` and `.../api/phone/status`, then call your Twilio number. See [PHONE-SETUP.md](./PHONE-SETUP.md).
 
 ## Documentation
 
 | Doc | Description |
 |-----|-------------|
-| [QUICK-START.md](./QUICK-START.md) | Run servers, open app, basic troubleshooting |
-| [PHONE-SETUP.md](./PHONE-SETUP.md) | Twilio: number, webhooks, ngrok for local testing |
-| [DEPLOYMENT.md](./DEPLOYMENT.md) | Deploy backend (Railway, Render) and optional frontend (Vercel) |
-| [CLIENT-SETUP.md](./CLIENT-SETUP.md) | Add a new client: config, onboarding checklist |
-| [TESTING-GUIDE.md](./TESTING-GUIDE.md) | Test web and phone flows |
-| [AUTH-SETUP.md](./AUTH-SETUP.md) | **Clerk** – sign up, get keys, protect dashboard |
-| [PROTOTYPE-SETUP.md](./PROTOTYPE-SETUP.md) | **Prototype number 925-481-5386** – Twilio webhooks, env, SMS |
-| [PLANS-AND-FEATURES.md](./PLANS-AND-FEATURES.md) | **Starter / Growth / Pro** – feature matrix and what’s implemented vs roadmap |
-| [clients/README.md](./clients/README.md) | Client config structure and options |
+| [AUTH-SETUP.md](./AUTH-SETUP.md) | Clerk – sign up, API keys, protect dashboard |
+| [PHONE-SETUP.md](./PHONE-SETUP.md) | Twilio: number, webhooks, ngrok for local |
+| [DEPLOYMENT.md](./DEPLOYMENT.md) | Deploy backend (Render/Railway) and frontend (Vercel) |
+| [INVITE-ONLY-SETUP.md](./INVITE-ONLY-SETUP.md) | Invite-only sign-up, admin flow, multi-tenant |
+| [clients/README.md](./clients/README.md) | Client config structure and adding new clients |
 
 ## Configuration
 

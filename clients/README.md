@@ -1,45 +1,46 @@
 # Client Configurations
 
-This directory contains configuration files for each client's AI receptionist.
+Configuration files for each client's AI receptionist.
 
 ## Directory Structure
 
 ```
 clients/
-├── template/                # Generic template — copy for ANY new business
+├── template/                # Generic template — copy for any new business
 │   ├── config.json          # Pro plan config (placeholders)
 │   └── README.md
-├── zenoti-test-store/       # Prototype/test client (925-481-5386)
+├── zenoti-test-store/       # Test client
 ├── reflectionz-salon/
 └── [your-client]/
 ```
 
 ## Adding a New Client
 
-1. Copy the **template** (works for any business type):
+1. **Copy the template**
    ```bash
-   cp -r clients/template clients/[client-slug]
+   cp -r clients/template clients/[business-slug]
    ```
-2. Edit `clients/[client-slug]/config.json` with their info
-3. Fill in the onboarding checklist with the client
-4. Update `config.json` with their information
-5. Deploy their configuration
 
-## Client Configuration Format
+2. **Edit** `clients/[business-slug]/config.json`: business name, hours, phone, email, address, services, specials, reservation_rules, departments, staff, forwarding_phone. Use the template structure.
 
-Each client has a `config.json` file with:
-- Business name, hours, contact info
-- Services/menu information
-- Specials and promotions
-- Reservation/booking rules
-- Departments for call routing
-- Additional FAQs
+3. **Point the app** at this client: set `CLIENT_ID=[business-slug]` (backend loads `clients/<CLIENT_ID>/config.json`). For multi-tenant, create the tenant via `/admin` and assign a Twilio number.
 
-## Deployment
+4. **Twilio:** Set the number’s Voice webhook to `https://your-backend-url/api/phone/incoming` and Status to `.../api/phone/status`. See [PHONE-SETUP.md](../PHONE-SETUP.md). For invite-only flow see [INVITE-ONLY-SETUP.md](../INVITE-ONLY-SETUP.md).
 
-Each client can have:
-- Their own deployment instance (recommended for production)
-- Or use environment variables to switch between clients (for development)
+5. **Deploy and test** – call the number and verify hours, services, and booking.
+
+## What to Collect From the Client
+
+- Business name, address, email, hours
+- Phone (Twilio) and call forwarding number
+- Services (list or menu link), specials, reservation/booking rules
+- A few FAQs. For growth/pro: departments, staff, SMS preferences.
+
+See `reflectionz-salon/onboarding-checklist.md` for a detailed checklist.
+
+## Config Format
+
+Each client has `config.json` with: business name, hours, contact info, services, specials, reservation_rules, departments (routing), optional staff and locations.
 
 
 

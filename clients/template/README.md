@@ -21,8 +21,7 @@ Multi-language • Custom AI voice (alloy, echo, fable, onyx, nova, shimmer)
 **Data & reporting**  
 Call log • Analytics (by outcome, hour, day) • Lead capture records • Missed-call outcome tracking
 
-See **[PLANS-AND-FEATURES.md](../../PLANS-AND-FEATURES.md)** in the repo root for the full feature matrix and what’s implemented vs roadmap.
-
+See **[README.md](../../README.md)** in the repo root for overview and docs.
 ---
 
 ## Apply template to a new business

@@ -5,7 +5,7 @@
 ### Overview
 
 Nuvatra Voice is an AI voice receptionist SaaS with two services:
-- **Frontend**: Next.js 14 (TypeScript/React/Tailwind) — deployed on Netlify at `nuvatrasite.netlify.app`
+- **Frontend**: Next.js 14 (TypeScript/React/Tailwind) — deployed on Vercel (e.g. `nuvatra-voice.vercel.app`)
 - **Backend**: Python FastAPI — deployed on Render at `nuvatra-voice.onrender.com`
 
 See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `npm run dev:backend`, `npm run lint`, `npm run build`).
@@ -27,13 +27,13 @@ See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `n
 
 | Service | Host | Env vars location |
 |---|---|---|
-| Frontend | Netlify (`nuvatrasite.netlify.app`) | Netlify dashboard > Environment variables |
+| Frontend | Vercel (e.g. `nuvatra-voice.vercel.app`) | Vercel dashboard > Project > Environment Variables |
 | Backend | Render (`nuvatra-voice.onrender.com`) | Render dashboard > Environment tab |
 | Database | Render PostgreSQL (Virginia region) | Auto-linked via `DATABASE_URL` on Render |
 
 Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_JWKS_URL`, `ADMIN_CLERK_USER_IDS`, `FRONTEND_URL`.
 
-Key env vars for production frontend (Netlify): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`.
+Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`.
 
 ### Linting
 
@@ -69,4 +69,4 @@ Users are **not banned** — they can be re-invited later. The dashboard page ga
 - Backend pip packages install to `~/.local/` (user install). This is on the Python import path but scripts go to `~/.local/bin/` which may not be on `$PATH`.
 - Render uses Python 3.13; `psycopg2-binary` must be `>=2.9.10` for compatibility (older versions fail with `undefined symbol: _PyInterpreterState_Get`).
 - Invite `redirect_url` must point to a public route (`/`), not a protected route like `/dashboard`. The Clerk middleware blocks unauthenticated users before the SDK can process the invite ticket.
-- `FRONTEND_URL` on the backend must match the production domain (e.g., `https://nuvatrasite.netlify.app`) so Clerk invite links redirect correctly.
+- `FRONTEND_URL` on the backend must match the production domain (e.g., `https://nuvatra-voice.vercel.app`) so Clerk invite links redirect correctly.
