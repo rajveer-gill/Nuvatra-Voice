@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Volume2, Store, Save, Shuffle, User } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Volume2, Store, Save, Shuffle, User, Play, Square } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 
 const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const
+const VOICE_SAMPLE_TEXT = "Hi there! Thanks for calling. How can I help you today?"
 
 const RANDOM_NAMES = [
   'Ava', 'Liam', 'Sophia', 'Noah', 'Olivia', 'Ethan', 'Mia', 'Lucas',
@@ -20,6 +21,8 @@ export default function Settings() {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [voice, setVoice] = useState<string>('fable')
+  const [previewing, setPreviewing] = useState<string | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
   const [receptionistName, setReceptionistName] = useState('')
   const [aiPhone, setAiPhone] = useState('')
   const [form, setForm] = useState({
@@ -66,6 +69,41 @@ export default function Settings() {
       pick = RANDOM_NAMES[Math.floor(Math.random() * RANDOM_NAMES.length)]
     } while (pick.toLowerCase() === current && RANDOM_NAMES.length > 1)
     setReceptionistName(pick)
+  }
+
+  const previewVoice = async (v: string) => {
+    if (previewing === v) {
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
+      }
+      setPreviewing(null)
+      return
+    }
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    setPreviewing(v)
+    try {
+      const res = await api.post('/api/text-to-speech', { text: VOICE_SAMPLE_TEXT, voice: v }, { responseType: 'blob' })
+      const url = URL.createObjectURL(res.data)
+      const audio = new Audio(url)
+      audioRef.current = audio
+      audio.onended = () => {
+        setPreviewing(null)
+        URL.revokeObjectURL(url)
+        audioRef.current = null
+      }
+      audio.onerror = () => {
+        setPreviewing(null)
+        URL.revokeObjectURL(url)
+        audioRef.current = null
+      }
+      await audio.play()
+    } catch {
+      setPreviewing(null)
+    }
   }
 
   const handleSave = async () => {
@@ -163,23 +201,42 @@ export default function Settings() {
         <p className="text-gray-600 text-sm mb-4">
           Choose the voice for your AI receptionist (phone and SMS).
         </p>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-3">
           {VOICES.map((v) => (
-            <button
-              key={v}
-              type="button"
-              onClick={() => setVoice(v)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                voice === v
-                  ? 'bg-primary-600 text-white shadow-md'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              {v.charAt(0).toUpperCase() + v.slice(1)}
-              {v === 'fable' && ' (recommended)'}
-            </button>
+            <div key={v} className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setVoice(v)}
+                className={`px-4 py-2 rounded-l-lg text-sm font-medium transition-all ${
+                  voice === v
+                    ? 'bg-primary-600 text-white shadow-md'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                {v.charAt(0).toUpperCase() + v.slice(1)}
+                {v === 'fable' && ' (recommended)'}
+              </button>
+              <button
+                type="button"
+                onClick={() => previewVoice(v)}
+                disabled={previewing !== null && previewing !== v}
+                className={`px-2 py-2 rounded-r-lg text-sm transition-all ${
+                  previewing === v
+                    ? 'bg-red-500 text-white'
+                    : voice === v
+                      ? 'bg-primary-700 text-white hover:bg-primary-800'
+                      : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+                title={previewing === v ? 'Stop' : `Preview ${v}`}
+              >
+                {previewing === v ? <Square className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+              </button>
+            </div>
           ))}
         </div>
+        {previewing && (
+          <p className="text-xs text-gray-500 mt-2 animate-pulse">Playing {previewing} voice sample...</p>
+        )}
       </div>
 
       {/* Store Info */}
