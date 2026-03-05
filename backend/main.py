@@ -393,6 +393,7 @@ def load_client_config(client_id: Optional[str] = None):
             "plan": data.get("plan", "starter"),
             "voice": data.get("voice", "fable"),
             "speed": float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0,
+            "receptionist_name": data.get("receptionist_name", ""),
         }
         print(f"Loaded client config: {cid} ({info['name']})")
         return info
@@ -427,6 +428,7 @@ _DEMO_BUSINESS_INFO = {
         "plan": "starter",
         "voice": "fable",
         "speed": 1.0,
+        "receptionist_name": "",
     }
 
 def _default_business_info_for_tenant() -> Optional[dict]:
@@ -1642,6 +1644,7 @@ class BusinessInfoUpdate(BaseModel):
     greeting: Optional[str] = None
     voice: Optional[str] = None
     speed: Optional[float] = None
+    receptionist_name: Optional[str] = None
 
 @app.patch("/api/business-info")
 async def api_update_business_info(update: BusinessInfoUpdate, _: None = Depends(require_tenant)):
@@ -1685,6 +1688,8 @@ async def api_update_business_info(update: BusinessInfoUpdate, _: None = Depends
         data["voice"] = update.voice
     if update.speed is not None:
         data["speed"] = update.speed
+    if update.receptionist_name is not None:
+        data["receptionist_name"] = update.receptionist_name
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as f:
