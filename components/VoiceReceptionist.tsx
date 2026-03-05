@@ -383,7 +383,7 @@ export default function VoiceReceptionist() {
           {messages.length === 0 ? (
             <div className="text-center text-gray-500 mt-20">
               <Volume2 className="w-16 h-16 mx-auto mb-4 opacity-50" />
-              <p>Click "Start Call" to begin a conversation</p>
+              <p>Click &quot;Start Call&quot; to begin a conversation</p>
             </div>
           ) : (
             <div className="space-y-4">
@@ -453,10 +453,10 @@ export default function VoiceReceptionist() {
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <h3 className="font-semibold text-blue-900 mb-2">How it works:</h3>
           <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-            <li>Click "Start Call" to begin a conversation</li>
+            <li>Click &quot;Start Call&quot; to begin a conversation</li>
             <li>Speak naturally - the AI will understand and respond</li>
             <li>The receptionist can schedule appointments, take messages, and answer questions</li>
-            <li>Use "Mute" to temporarily stop listening</li>
+            <li>Use &quot;Mute&quot; to temporarily stop listening</li>
             <li>Powered by OpenAI for ultra-realistic voice quality</li>
           </ul>
         </div>

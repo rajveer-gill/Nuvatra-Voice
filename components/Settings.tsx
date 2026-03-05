@@ -7,6 +7,13 @@ import { useApiClient } from '@/lib/api'
 const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const
 const VOICE_SAMPLE_TEXT = "Hi there! Thanks for calling. How can I help you today?"
 
+const SPEECH_SPEED_OPTIONS = [
+  { value: 0.8, label: 'Slower' },
+  { value: 1.0, label: 'Normal' },
+  { value: 1.1, label: 'Slightly faster' },
+  { value: 1.25, label: 'Faster' },
+] as const
+
 const RANDOM_NAMES = [
   'Ava', 'Liam', 'Sophia', 'Noah', 'Olivia', 'Ethan', 'Mia', 'Lucas',
   'Emma', 'Mason', 'Aria', 'Logan', 'Chloe', 'James', 'Lily', 'Aiden',
@@ -21,6 +28,7 @@ export default function Settings() {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [voice, setVoice] = useState<string>('fable')
+  const [speechSpeed, setSpeechSpeed] = useState<number>(1.0)
   const [previewing, setPreviewing] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [receptionistName, setReceptionistName] = useState('')
@@ -86,7 +94,7 @@ export default function Settings() {
     }
     setPreviewing(v)
     try {
-      const res = await api.post('/api/text-to-speech', { text: VOICE_SAMPLE_TEXT, voice: v }, { responseType: 'blob' })
+      const res = await api.post('/api/text-to-speech', { text: VOICE_SAMPLE_TEXT, voice: v, speed: speechSpeed }, { responseType: 'blob' })
       const url = URL.createObjectURL(res.data)
       const audio = new Audio(url)
       audioRef.current = audio
@@ -199,8 +207,23 @@ export default function Settings() {
           Voice settings
         </h2>
         <p className="text-gray-600 text-sm mb-4">
-          Choose the voice for your AI receptionist (phone and SMS).
+          Choose the voice and speaking speed for your AI receptionist (phone and SMS).
         </p>
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-gray-700 mb-1">Speaking speed</label>
+          <select
+            value={speechSpeed}
+            onChange={(e) => setSpeechSpeed(Number(e.target.value))}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          >
+            {SPEECH_SPEED_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-gray-500 mt-1">How fast your receptionist speaks on calls and in messages.</p>
+        </div>
         <div className="flex flex-wrap gap-3">
           {VOICES.map((v) => (
             <div key={v} className="flex items-center gap-1">

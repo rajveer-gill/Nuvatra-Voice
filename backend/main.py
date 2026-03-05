@@ -82,7 +82,7 @@ async def pre_warm_openai():
             model="tts-1-hd",
             voice="fable",
             input=greeting_text,
-            speed=1.1
+            speed=get_tts_speed()
         )
         greeting_audio_cache = greeting_audio.content
         print(f"[OK] Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
@@ -91,7 +91,7 @@ async def pre_warm_openai():
             model="tts-1-hd",
             voice="fable",
             input="Got it, one moment.",
-            speed=1.1
+            speed=get_tts_speed()
         )
         got_it_audio_cache = got_it_audio.content
         print(f"[OK] 'Got it' audio generated and cached ({len(got_it_audio_cache)} bytes)")
@@ -259,7 +259,7 @@ def generate_greeting_audio_sync():
             model="tts-1-hd",  # HD model for best quality
             voice="fable",  # Same voice as rest of conversation
             input=greeting_text,
-            speed=1.1
+            speed=get_tts_speed()
         )
         greeting_audio_cache = greeting_audio.content
         print(f"[OK] Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
@@ -391,6 +391,7 @@ def load_client_config(client_id: Optional[str] = None):
             "greeting": data.get("greeting", "Thank you for calling. How can I help you today?"),
             "plan": data.get("plan", "starter"),
             "voice": data.get("voice", "fable"),
+            "speed": float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0,
         }
         print(f"Loaded client config: {cid} ({info['name']})")
         return info
@@ -424,6 +425,7 @@ _DEMO_BUSINESS_INFO = {
         "greeting": "Thank you for calling. How can I help you today?",
         "plan": "starter",
         "voice": "fable",
+        "speed": 1.0,
     }
 
 def _default_business_info_for_tenant() -> Optional[dict]:
@@ -461,6 +463,7 @@ def _default_business_info_for_tenant() -> Optional[dict]:
             "greeting": "",
             "plan": row[2] or "starter",
             "voice": "fable",
+            "speed": 1.0,
             "receptionist_name": "",
         }
     except Exception:
@@ -479,6 +482,14 @@ def get_business_info() -> dict:
 def get_tts_voice() -> str:
     """Voice for TTS (phone/SMS). From business config or default fable."""
     return get_business_info().get("voice", "fable") or "fable"
+
+def get_tts_speed() -> float:
+    """Speaking speed for TTS (OpenAI allows 0.25–4.0). From business config or default 1.0."""
+    try:
+        s = float(get_business_info().get("speed", 1.0))
+        return max(0.25, min(4.0, s))
+    except (TypeError, ValueError):
+        return 1.0
 
 def get_greeting_text() -> str:
     """Greeting for phone (uses client config if set)."""
@@ -526,6 +537,7 @@ class MessageRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
+    speed: Optional[float] = None  # OpenAI 0.25–4.0; if omitted uses business config
 
 def require_tenant(request: Request):
     """
@@ -1621,6 +1633,7 @@ class BusinessInfoUpdate(BaseModel):
     menu_link: Optional[str] = None
     greeting: Optional[str] = None
     voice: Optional[str] = None
+    speed: Optional[float] = None
 
 @app.patch("/api/business-info")
 async def api_update_business_info(update: BusinessInfoUpdate, _: None = Depends(require_tenant)):
@@ -1662,6 +1675,8 @@ async def api_update_business_info(update: BusinessInfoUpdate, _: None = Depends
         data["greeting"] = update.greeting
     if update.voice is not None:
         data["voice"] = update.voice
+    if update.speed is not None:
+        data["speed"] = update.speed
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as f:
@@ -1749,12 +1764,14 @@ async def text_to_speech(request: TTSRequest, _: None = Depends(require_tenant))
     Available voices: alloy, echo, fable, onyx, nova, shimmer
     """
     try:
+        tts_speed = request.speed if request.speed is not None else get_tts_speed()
+        tts_speed = max(0.25, min(4.0, float(tts_speed)))
         # Generate speech using OpenAI TTS HD model for maximum quality
         response = client.audio.speech.create(
             model="tts-1-hd",  # HD model for smooth, natural, human-like quality
             voice=request.voice,
             input=request.text,
-            speed=1.1  # Slightly faster for better flow
+            speed=tts_speed
         )
         
         # Convert response to bytes
@@ -1803,7 +1820,7 @@ async def get_greeting_audio():
                 model="tts-1-hd",
                 voice="fable",
                 input=greeting_text,
-                speed=1.1
+                speed=get_tts_speed()
             )
             greeting_audio_cache = greeting_audio.content
             print(f"✅ Greeting audio generated on-the-fly ({len(greeting_audio_cache)} bytes)")
@@ -1838,7 +1855,7 @@ async def get_got_it_audio():
                 model="tts-1-hd",
                 voice="fable",
                 input=got_it_text,
-                speed=1.1
+                speed=get_tts_speed()
             )
             got_it_audio_cache = got_it_audio.content
             print(f"✅ 'Got it' audio generated on-the-fly ({len(got_it_audio_cache)} bytes)")
@@ -2463,7 +2480,7 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
             model="tts-1-hd",  # HD model for ultra-smooth, natural speech
             voice=voice,
             input=text,
-            speed=1.1  # Slightly faster for better flow
+            speed=get_tts_speed()
         )
         
         # Convert response to bytes
@@ -2496,7 +2513,7 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             model="tts-1",  # Faster generation, still high quality
             voice=voice,
             input=text,
-            speed=1.1  # Slightly faster for better flow
+            speed=get_tts_speed()
         )
         
         # Convert response to bytes
