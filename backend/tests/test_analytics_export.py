@@ -6,7 +6,8 @@ from main import app
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
     return TestClient(app)
 
 
