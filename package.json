@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "cd backend && python -m pytest tests -v --tb=short",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed"
   },

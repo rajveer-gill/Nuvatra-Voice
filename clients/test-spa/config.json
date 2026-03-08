@@ -19,16 +19,16 @@
   "greeting": "Thank you for calling {business_name}. How can I help you today?",
   "staff": [
     {
-      "name": "Manager",
-      "phone": "",
-      "role": "Manager",
-      "description": "General inquiries and management"
+      "name": "A",
+      "phone": "+15551111111"
     },
     {
-      "name": "Reception",
-      "phone": "",
-      "role": "Reception",
-      "description": "Appointments and front desk"
+      "name": "B",
+      "phone": "+15552222222"
+    },
+    {
+      "name": "C",
+      "phone": "+15553333333"
     }
   ],
   "locations": [

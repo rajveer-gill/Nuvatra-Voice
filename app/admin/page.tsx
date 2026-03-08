@@ -12,6 +12,9 @@ interface Tenant {
   twilio_phone_number: string
   plan: string
   created_at: string | null
+  trial_ends_at?: string | null
+  subscription_status?: string | null
+  billing_exempt_until?: string | null
 }
 
 export default function AdminPage() {
@@ -28,8 +31,10 @@ export default function AdminPage() {
     name: '',
     twilio_phone_number: '',
     email: '',
-    plan: 'starter',
   })
+  const [exempting, setExempting] = useState<string | null>(null)
+  const [exemptAction, setExemptAction] = useState<Record<string, string>>({})
+  const [exemptUntilDate, setExemptUntilDate] = useState<Record<string, string>>({})
 
   const fetchTenants = async () => {
     try {
@@ -62,15 +67,51 @@ export default function AdminPage() {
     setSuccess(null)
     setError(null)
     try {
-      await api.post('/api/admin/tenants', form)
+      await api.post('/api/admin/tenants', { ...form, plan: 'free' })
       setSuccess(`Tenant "${form.name}" created. Invite sent to ${form.email}.`)
-      setForm({ client_id: '', name: '', twilio_phone_number: '', email: '', plan: 'starter' })
+      setForm({ client_id: '', name: '', twilio_phone_number: '', email: '' })
       fetchTenants()
     } catch (e: unknown) {
       const err = e as { response?: { status?: number; data?: { detail?: string } } }
       setError(err.response?.data?.detail || 'Failed to create tenant')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleBillingExempt = async (tenantId: string) => {
+    const action = exemptAction[tenantId]
+    if (!action) return
+    setExempting(tenantId)
+    setError(null)
+    setSuccess(null)
+    try {
+      if (action === 'extend_trial_1') {
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_trial_months: 1 })
+        setSuccess('Trial extended by 1 month.')
+      } else if (action === 'free_1') {
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 1 })
+        setSuccess('1 month billing exemption set.')
+      } else if (action === 'free_3') {
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 3 })
+        setSuccess('3 months billing exemption set.')
+      } else if (action === 'exempt_until') {
+        const date = exemptUntilDate[tenantId]
+        if (!date) {
+          setError('Pick a date for exempt until.')
+          return
+        }
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { exempt_until: date })
+        setSuccess(`Exempt until ${date} set.`)
+        setExemptUntilDate((d) => ({ ...d, [tenantId]: '' }))
+      }
+      setExemptAction((a) => ({ ...a, [tenantId]: '' }))
+      fetchTenants()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setError(err.response?.data?.detail || 'Failed to update billing')
+    } finally {
+      setExempting(null)
     }
   }
 
@@ -162,7 +203,7 @@ export default function AdminPage() {
                 onChange={(e) => setForm({ ...form, twilio_phone_number: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
-              <p className="text-xs text-gray-500 mt-1">Buy the number in Twilio Console, then add it here. Point the webhook to your backend /api/phone/incoming</p>
+              <p className="text-xs text-gray-500 mt-1">Buy the number in Twilio Console, then add it here. In Twilio, set Voice webhook to your-backend/api/phone/incoming and Messaging webhook to your-backend/api/sms/incoming.</p>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Client email (for invite)</label>
@@ -174,19 +215,7 @@ export default function AdminPage() {
                 onChange={(e) => setForm({ ...form, email: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
-              <p className="text-xs text-gray-500 mt-1">Clerk will send an invite. Only invited users can sign up.</p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Plan</label>
-              <select
-                value={form.plan}
-                onChange={(e) => setForm({ ...form, plan: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="starter">Starter</option>
-                <option value="growth">Growth</option>
-                <option value="pro">Pro</option>
-              </select>
+              <p className="text-xs text-gray-500 mt-1">Clerk will send an invite. New tenants get a 7-day free trial.</p>
             </div>
             <button
               type="submit"
@@ -207,24 +236,67 @@ export default function AdminPage() {
           ) : tenants.length === 0 ? (
             <p className="text-gray-500">No tenants yet.</p>
           ) : (
-            <ul className="space-y-3">
+            <ul className="space-y-4">
               {tenants.map((t) => (
-                <li key={t.id} className="flex justify-between items-center py-3 border-b border-gray-100 last:border-0">
-                  <div>
-                    <span className="font-medium">{t.name}</span>
-                    <span className="text-gray-500 text-sm ml-2">({t.client_id})</span>
-                    <div className="flex items-center gap-3 mt-1">
-                      <span className="text-sm text-gray-600">{t.twilio_phone_number}</span>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">{t.plan}</span>
+                <li key={t.id} className="py-4 border-b border-gray-100 last:border-0">
+                  <div className="flex justify-between items-start gap-4 flex-wrap">
+                    <div>
+                      <span className="font-medium">{t.name}</span>
+                      <span className="text-gray-500 text-sm ml-2">({t.client_id})</span>
+                      <div className="flex items-center gap-3 mt-1 flex-wrap">
+                        <span className="text-sm text-gray-600">{t.twilio_phone_number}</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">{t.plan}</span>
+                        {t.subscription_status && (
+                          <span className="text-xs text-gray-500">status: {t.subscription_status}</span>
+                        )}
+                      </div>
+                      {(t.trial_ends_at || t.billing_exempt_until) && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {t.trial_ends_at && <>Trial ends: {new Date(t.trial_ends_at).toLocaleDateString()}</>}
+                          {t.trial_ends_at && t.billing_exempt_until && ' · '}
+                          {t.billing_exempt_until && <>Exempt until: {new Date(t.billing_exempt_until).toLocaleDateString()}</>}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={exemptAction[t.id] || ''}
+                          onChange={(e) => setExemptAction((a) => ({ ...a, [t.id]: e.target.value }))}
+                          className="text-sm border border-gray-300 rounded px-2 py-1"
+                        >
+                          <option value="">Exempt from payment…</option>
+                          <option value="extend_trial_1">Extend trial 1 month</option>
+                          <option value="free_1">Give 1 month free</option>
+                          <option value="free_3">Give 3 months free</option>
+                          <option value="exempt_until">Exempt until date</option>
+                        </select>
+                        {exemptAction[t.id] === 'exempt_until' && (
+                          <input
+                            type="date"
+                            value={exemptUntilDate[t.id] || ''}
+                            onChange={(e) => setExemptUntilDate((d) => ({ ...d, [t.id]: e.target.value }))}
+                            className="text-sm border border-gray-300 rounded px-2 py-1"
+                          />
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleBillingExempt(t.id)}
+                          disabled={exempting === t.id || !exemptAction[t.id] || (exemptAction[t.id] === 'exempt_until' && !exemptUntilDate[t.id])}
+                          className="text-sm px-2 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-50"
+                        >
+                          {exempting === t.id ? 'Applying…' : 'Apply'}
+                        </button>
+                      </div>
+                      <button
+                        onClick={() => handleDelete(t)}
+                        disabled={deleting === t.id}
+                        className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {deleting === t.id ? 'Removing…' : 'Remove'}
+                      </button>
                     </div>
                   </div>
-                  <button
-                    onClick={() => handleDelete(t)}
-                    disabled={deleting === t.id}
-                    className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {deleting === t.id ? 'Removing…' : 'Remove'}
-                  </button>
                 </li>
               ))}
             </ul>

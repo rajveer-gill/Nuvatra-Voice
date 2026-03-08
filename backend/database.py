@@ -45,6 +45,19 @@ def _get_conn():
         _conn = psycopg2.connect(url)
     return _conn
 
+def db_ping() -> bool:
+    """Return True if DB is reachable (for health check)."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        return True
+    except Exception:
+        return False
+
 def init_db() -> bool:
     """Initialize database: create tables if not exist. Returns True if DB is used."""
     global _use_db
@@ -131,6 +144,18 @@ def init_db() -> bool:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Migration: add subscription/trial columns if missing (PostgreSQL 9.5+)
+        for col, typ in [
+            ("trial_ends_at", "TIMESTAMPTZ"),
+            ("subscription_status", "TEXT"),
+            ("stripe_customer_id", "TEXT"),
+            ("stripe_subscription_id", "TEXT"),
+            ("billing_exempt_until", "TIMESTAMPTZ"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {typ}")
+            except Exception:
+                pass
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tenant_members (
                 clerk_user_id TEXT NOT NULL,
@@ -151,6 +176,73 @@ def init_db() -> bool:
                 PRIMARY KEY (phone, client_id)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id BIGSERIAL PRIMARY KEY,
+                occurred_at TIMESTAMPTZ DEFAULT NOW(),
+                actor_type TEXT NOT NULL,
+                actor_id TEXT,
+                action TEXT NOT NULL,
+                resource_type TEXT,
+                resource_id TEXT,
+                client_id TEXT,
+                details JSONB,
+                ip TEXT,
+                request_id TEXT
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_client_occurred ON audit_events(client_id, occurred_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_action_occurred ON audit_events(action, occurred_at)")
+        # Plan tier tables
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tenant_usage (
+                id SERIAL PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                month TEXT NOT NULL CHECK (month ~ '^\\d{4}-\\d{2}$'),
+                voice_minutes INTEGER NOT NULL DEFAULT 0 CHECK (voice_minutes >= 0),
+                sms_count INTEGER NOT NULL DEFAULT 0 CHECK (sms_count >= 0),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(client_id, month)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tenant_usage_client_month ON tenant_usage(client_id, month)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS leads (
+                id SERIAL PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                name TEXT,
+                phone TEXT NOT NULL,
+                reason TEXT,
+                source TEXT CHECK (source IN ('call', 'sms')),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_client_created ON leads(client_id, created_at DESC)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sms_automations (
+                id SERIAL PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                trigger TEXT NOT NULL CHECK (trigger IN ('after_inquiry', 'post_call')),
+                template TEXT NOT NULL,
+                enabled BOOLEAN DEFAULT true,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sms_automations_client ON sms_automations(client_id)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS overage_processed (
+                client_id TEXT NOT NULL,
+                month TEXT NOT NULL CHECK (month ~ '^\\d{4}-\\d{2}$'),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (client_id, month)
+            )
+        """)
+        try:
+            cur.execute("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ")
+        except Exception:
+            pass
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_status_date ON appointments(client_id, status)")
         conn.commit()
         cur.close()
         conn.close()
@@ -178,28 +270,50 @@ def _normalize_e164(phone: str) -> str:
     return f"+{d}" if d else phone
 
 # --- Tenants ---
-def db_tenant_create(client_id: str, name: str, twilio_phone_number: str, plan: str = "starter") -> Optional[dict]:
-    """Create a tenant. Returns tenant dict or None on conflict."""
+def db_tenant_create(client_id: str, name: str, twilio_phone_number: str, plan: str = "free") -> Optional[dict]:
+    """Create a tenant with 7-day trial. Returns tenant dict or None on conflict."""
     conn = _get_conn()
     if not conn:
         return None
     try:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO tenants (client_id, name, twilio_phone_number, plan)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO tenants (client_id, name, twilio_phone_number, plan, subscription_status, trial_ends_at)
+            VALUES (%s, %s, %s, %s, 'trialing', NOW() + INTERVAL '7 days')
             ON CONFLICT (client_id) DO NOTHING
-            RETURNING id, client_id, name, twilio_phone_number, plan, created_at
+            RETURNING id, client_id, name, twilio_phone_number, plan, created_at,
+                trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until
         """, (client_id, name, twilio_phone_number, plan))
         row = cur.fetchone()
         conn.commit()
         cur.close()
         if not row:
             return None
-        return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4], "created_at": row[5].isoformat() if row[5] else None}
+        return _row_to_tenant(row)
     except Exception as e:
         print(f"[DB] Failed to create tenant: {e}")
         return None
+
+def _row_to_tenant(row) -> dict:
+    """Map tenant SELECT row (with subscription columns) to dict. Row has 11 cols from _tenant_select_cols."""
+    base = {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
+    base["created_at"] = row[5].isoformat() if len(row) > 5 and row[5] else None
+    if len(row) >= 11:
+        base["trial_ends_at"] = row[6].isoformat() if row[6] else None
+        base["subscription_status"] = row[7] or "trialing"
+        base["stripe_customer_id"] = row[8]
+        base["stripe_subscription_id"] = row[9]
+        base["billing_exempt_until"] = row[10].isoformat() if row[10] else None
+    else:
+        base["trial_ends_at"] = None
+        base["subscription_status"] = "trialing"
+        base["stripe_customer_id"] = None
+        base["stripe_subscription_id"] = None
+        base["billing_exempt_until"] = None
+    return base
+
+def _tenant_select_cols():
+    return "id, client_id, name, twilio_phone_number, plan, created_at, trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until"
 
 def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
     """Look up tenant by Twilio phone number (E.164). Returns tenant or None."""
@@ -207,10 +321,9 @@ def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
     if not conn:
         return None
     cur = conn.cursor()
-    # Normalize: Twilio sends E.164; try exact match and alternate normalization
     normalized = _normalize_e164(twilio_phone_number or "")
-    cur.execute("""
-        SELECT id, client_id, name, twilio_phone_number, plan
+    cur.execute(f"""
+        SELECT {_tenant_select_cols()}
         FROM tenants WHERE twilio_phone_number IN (%s, %s)
         LIMIT 1
     """, (twilio_phone_number or "", normalized))
@@ -218,7 +331,7 @@ def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
     cur.close()
     if not row:
         return None
-    return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
+    return _row_to_tenant(row)
 
 def db_tenant_get_by_id(tenant_id: str) -> Optional[dict]:
     """Look up tenant by UUID."""
@@ -226,12 +339,12 @@ def db_tenant_get_by_id(tenant_id: str) -> Optional[dict]:
     if not conn:
         return None
     cur = conn.cursor()
-    cur.execute("SELECT id, client_id, name, twilio_phone_number, plan FROM tenants WHERE id = %s", (tenant_id,))
+    cur.execute(f"SELECT {_tenant_select_cols()} FROM tenants WHERE id = %s", (tenant_id,))
     row = cur.fetchone()
     cur.close()
     if not row:
         return None
-    return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
+    return _row_to_tenant(row)
 
 def db_tenant_member_add(clerk_user_id: str, tenant_id: str) -> bool:
     """Add a member to a tenant. Returns True on success."""
@@ -259,7 +372,8 @@ def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
         return None
     cur = conn.cursor()
     cur.execute("""
-        SELECT t.id, t.client_id, t.name, t.twilio_phone_number, t.plan
+        SELECT t.id, t.client_id, t.name, t.twilio_phone_number, t.plan, t.created_at,
+               t.trial_ends_at, t.subscription_status, t.stripe_customer_id, t.stripe_subscription_id, t.billing_exempt_until
         FROM tenants t
         JOIN tenant_members m ON m.tenant_id = t.id
         WHERE m.clerk_user_id = %s
@@ -269,7 +383,7 @@ def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
     cur.close()
     if not row:
         return None
-    return {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
+    return _row_to_tenant(row)
 
 def db_tenant_get_members(tenant_id: str) -> List[str]:
     """Get all clerk_user_ids for a tenant."""
@@ -304,10 +418,139 @@ def db_tenant_list_all() -> List[dict]:
     if not conn:
         return []
     cur = conn.cursor()
-    cur.execute("SELECT id, client_id, name, twilio_phone_number, plan, created_at FROM tenants ORDER BY created_at DESC")
+    cur.execute(f"SELECT {_tenant_select_cols()} FROM tenants ORDER BY created_at DESC", ())
     rows = cur.fetchall()
     cur.close()
-    return [{"id": str(r[0]), "client_id": r[1], "name": r[2], "twilio_phone_number": r[3], "plan": r[4], "created_at": r[5].isoformat() if r[5] else None} for r in rows]
+    return [_row_to_tenant(r) for r in rows]
+
+def db_tenant_update_subscription(
+    tenant_id: str,
+    *,
+    stripe_customer_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] = None,
+    subscription_status: Optional[str] = None,
+    plan: Optional[str] = None,
+) -> bool:
+    """Update tenant subscription fields (from Stripe webhook). Returns True on success."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        updates = []
+        params = []
+        if stripe_customer_id is not None:
+            updates.append("stripe_customer_id = %s")
+            params.append(stripe_customer_id)
+        if stripe_subscription_id is not None:
+            updates.append("stripe_subscription_id = %s")
+            params.append(stripe_subscription_id)
+        if subscription_status is not None:
+            updates.append("subscription_status = %s")
+            params.append(subscription_status)
+        if plan is not None:
+            updates.append("plan = %s")
+            params.append(plan)
+        if not updates:
+            cur.close()
+            return True
+        params.append(tenant_id)
+        cur.execute(f"UPDATE tenants SET {', '.join(updates)} WHERE id = %s", params)
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to update tenant subscription: {e}")
+        return False
+
+def db_tenant_set_billing_exempt(tenant_id: str, exempt_until: Optional[datetime]) -> bool:
+    """Set billing_exempt_until for a tenant (admin). None clears exemption. Returns True on success."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE tenants SET billing_exempt_until = %s WHERE id = %s", (exempt_until, tenant_id))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to set billing exempt: {e}")
+        return False
+
+def db_tenant_extend_trial(tenant_id: str, trial_ends_at: datetime) -> bool:
+    """Set trial_ends_at for a tenant (admin). Returns True on success."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE tenants SET trial_ends_at = %s WHERE id = %s", (trial_ends_at, tenant_id))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to extend trial: {e}")
+        return False
+
+def db_tenant_get_by_stripe_subscription_id(stripe_subscription_id: str) -> Optional[dict]:
+    """Look up tenant by Stripe subscription ID (for webhook invoice.payment_failed)."""
+    if not stripe_subscription_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute(f"SELECT {_tenant_select_cols()} FROM tenants WHERE stripe_subscription_id = %s LIMIT 1", (stripe_subscription_id,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return _row_to_tenant(row)
+
+def db_tenant_get_by_client_id(client_id: str) -> Optional[dict]:
+    """Look up tenant by client_id."""
+    if not client_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute(f"SELECT {_tenant_select_cols()} FROM tenants WHERE client_id = %s LIMIT 1", (client_id,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return _row_to_tenant(row)
+
+def db_audit_append(
+    actor_type: str,
+    action: str,
+    *,
+    actor_id: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    details: Optional[dict] = None,
+    ip: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> None:
+    """Append an audit event. Does not log full PII (e.g. no message bodies)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        details_json = json.dumps(details) if details is not None else None
+        cid = client_id if client_id is not None else _client_id()
+        cur.execute("""
+            INSERT INTO audit_events (actor_type, actor_id, action, resource_type, resource_id, client_id, details, ip, request_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+        """, (actor_type, actor_id, action, resource_type, resource_id, cid or None, details_json, ip, request_id))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"[DB] Failed to append audit: {e}")
 
 def _normalize_phone(phone: str) -> str:
     return "".join(c for c in (phone or "") if c.isdigit())
@@ -403,6 +646,47 @@ def db_appointments_max_id() -> int:
     row = cur.fetchone()
     cur.close()
     return row[0] if row else 0
+
+def db_appointments_get_accepted_for_date(client_id: str, date: str) -> List[dict]:
+    """Get accepted appointments for client_id and date (YYYY-MM-DD) with reminder_sent_at IS NULL."""
+    if not client_id or not date:
+        return []
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, phone, date, time, reason, status
+        FROM appointments
+        WHERE client_id = %s AND status = 'accepted' AND date = %s AND reminder_sent_at IS NULL
+        ORDER BY time
+    """, (client_id, date))
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {"id": r[0], "name": r[1], "email": r[2] or "", "phone": r[3] or "", "date": r[4], "time": r[5] or "", "reason": r[6] or "", "status": r[7]}
+        for r in rows
+    ]
+
+def db_appointments_mark_reminder_sent(appointment_id: int, client_id: str) -> bool:
+    """Atomically set reminder_sent_at if not already set. Returns True if updated."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE appointments SET reminder_sent_at = NOW()
+            WHERE id = %s AND client_id = %s AND reminder_sent_at IS NULL
+            RETURNING id
+        """, (appointment_id, client_id))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return row is not None
+    except Exception as e:
+        print(f"[DB] Failed to mark reminder sent: {e}")
+        return False
 
 def db_appointments_get_pending_by_phone(phone: str) -> Optional[dict]:
     """Return most recent pending_review appointment for this phone, or None."""
@@ -511,6 +795,258 @@ def db_messages_max_id() -> int:
     cur.close()
     return row[0] if row else 0
 
+# --- Usage tracking ---
+def db_usage_get(client_id: str, month: str) -> Optional[dict]:
+    """Get usage for client_id and month (YYYY-MM). Returns {voice_minutes, sms_count} or None."""
+    if not client_id or not month:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT voice_minutes, sms_count FROM tenant_usage WHERE client_id = %s AND month = %s",
+        (client_id, month)
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return {"voice_minutes": 0, "sms_count": 0}
+    return {"voice_minutes": row[0] or 0, "sms_count": row[1] or 0}
+
+def db_usage_increment_voice(client_id: str, month: str, minutes: int) -> bool:
+    """Atomically increment voice_minutes. Returns True on success."""
+    if not client_id or not month or minutes < 0:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO tenant_usage (client_id, month, voice_minutes, sms_count)
+            VALUES (%s, %s, %s, 0)
+            ON CONFLICT (client_id, month) DO UPDATE SET
+                voice_minutes = tenant_usage.voice_minutes + EXCLUDED.voice_minutes,
+                updated_at = NOW()
+        """, (client_id, month, minutes))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to increment voice usage: {e}")
+        return False
+
+def db_usage_increment_sms(client_id: str, month: str) -> bool:
+    """Atomically increment sms_count. Returns True on success."""
+    if not client_id or not month:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO tenant_usage (client_id, month, voice_minutes, sms_count)
+            VALUES (%s, %s, 0, 1)
+            ON CONFLICT (client_id, month) DO UPDATE SET
+                sms_count = tenant_usage.sms_count + 1,
+                updated_at = NOW()
+        """, (client_id, month))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to increment SMS usage: {e}")
+        return False
+
+# --- Leads ---
+def db_leads_insert(client_id: str, name: Optional[str], phone: str, reason: str, source: str) -> Optional[int]:
+    """Insert a lead. Returns id or None on failure."""
+    if not client_id or not phone or source not in ("call", "sms"):
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO leads (client_id, name, phone, reason, source)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (client_id, name or "", phone, reason or "", source))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] Failed to insert lead: {e}")
+        return None
+
+def db_leads_get_all(client_id: str, limit: int = 100) -> List[dict]:
+    """Get leads for client_id, newest first."""
+    if not client_id:
+        return []
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, phone, reason, source, created_at
+        FROM leads WHERE client_id = %s ORDER BY created_at DESC LIMIT %s
+    """, (client_id, limit))
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {"id": r[0], "name": r[1] or "", "phone": r[2], "reason": r[3] or "", "source": r[4], "created_at": r[5].isoformat() if r[5] else ""}
+        for r in rows
+    ]
+
+# --- SMS Automations ---
+def db_sms_automations_get_all(client_id: str) -> List[dict]:
+    """Get all sms_automations for client_id."""
+    if not client_id:
+        return []
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute("SELECT id, trigger, template, enabled, created_at FROM sms_automations WHERE client_id = %s ORDER BY id", (client_id,))
+    rows = cur.fetchall()
+    cur.close()
+    return [{"id": r[0], "trigger": r[1], "template": r[2], "enabled": bool(r[3]), "created_at": r[4].isoformat() if r[4] else ""} for r in rows]
+
+def db_sms_automations_count(client_id: str) -> int:
+    """Count sms_automations for client_id."""
+    if not client_id:
+        return 0
+    conn = _get_conn()
+    if not conn:
+        return 0
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM sms_automations WHERE client_id = %s", (client_id,))
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row else 0
+
+def db_sms_automations_get_by_trigger(client_id: str, trigger: str) -> List[dict]:
+    """Get enabled automations for client_id and trigger."""
+    if not client_id or trigger not in ("after_inquiry", "post_call"):
+        return []
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, trigger, template, enabled FROM sms_automations WHERE client_id = %s AND trigger = %s AND enabled = true",
+        (client_id, trigger)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return [{"id": r[0], "trigger": r[1], "template": r[2], "enabled": bool(r[3])} for r in rows]
+
+def db_sms_automations_insert(client_id: str, trigger: str, template: str, enabled: bool = True) -> Optional[int]:
+    """Insert sms_automation. Returns id or None."""
+    if not client_id or trigger not in ("after_inquiry", "post_call"):
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO sms_automations (client_id, trigger, template, enabled) VALUES (%s, %s, %s, %s) RETURNING id",
+            (client_id, trigger, template, enabled)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] Failed to insert sms_automation: {e}")
+        return None
+
+def db_sms_automations_update(automation_id: int, client_id: str, template: Optional[str] = None, enabled: Optional[bool] = None) -> bool:
+    """Update sms_automation. Returns True on success."""
+    if not client_id:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        updates = []
+        params = []
+        if template is not None:
+            updates.append("template = %s")
+            params.append(template)
+        if enabled is not None:
+            updates.append("enabled = %s")
+            params.append(enabled)
+        if not updates:
+            cur.close()
+            return True
+        params.extend([automation_id, client_id])
+        cur.execute(
+            f"UPDATE sms_automations SET {', '.join(updates)} WHERE id = %s AND client_id = %s",
+            params
+        )
+        conn.commit()
+        cur.close()
+        return cur.rowcount > 0 if hasattr(cur, 'rowcount') else True
+    except Exception as e:
+        print(f"[DB] Failed to update sms_automation: {e}")
+        return False
+
+def db_sms_automations_delete(automation_id: int, client_id: str) -> bool:
+    """Delete sms_automation. Returns True on success."""
+    if not client_id:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sms_automations WHERE id = %s AND client_id = %s", (automation_id, client_id))
+        conn.commit()
+        deleted = cur.rowcount > 0
+        cur.close()
+        return deleted
+    except Exception as e:
+        print(f"[DB] Failed to delete sms_automation: {e}")
+        return False
+
+# --- Overage processed ---
+def db_overage_processed_exists(client_id: str, month: str) -> bool:
+    """Check if overage was already processed for this client/month."""
+    if not client_id or not month:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM overage_processed WHERE client_id = %s AND month = %s LIMIT 1", (client_id, month))
+    row = cur.fetchone()
+    cur.close()
+    return row is not None
+
+def db_overage_processed_insert(client_id: str, month: str) -> bool:
+    """Record that overage was processed for this client/month."""
+    if not client_id or not month:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO overage_processed (client_id, month) VALUES (%s, %s) ON CONFLICT DO NOTHING", (client_id, month))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to insert overage_processed: {e}")
+        return False
+
 # --- Call log ---
 def db_call_log_append(entry: dict) -> None:
     conn = _get_conn()
@@ -532,18 +1068,28 @@ def db_call_log_append(entry: dict) -> None:
     except Exception as e:
         print(f"[DB] Failed to append call log: {e}")
 
-def db_call_log_load(limit: int = 5000) -> List[dict]:
+def db_call_log_load(limit: int = 5000, days: Optional[int] = None) -> List[dict]:
+    """Load call log. If days is set, only include entries from last N days."""
     conn = _get_conn()
     if not conn:
         return []
     cur = conn.cursor()
-    cur.execute("""
-        SELECT call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category
-        FROM call_log WHERE client_id = %s ORDER BY created_at DESC LIMIT %s
-    """, (_client_id(), limit))
+    cid = _client_id()
+    if days is not None and days > 0:
+        cur.execute("""
+            SELECT call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category, created_at
+            FROM call_log
+            WHERE client_id = %s AND created_at >= NOW() - make_interval(days => %s::int)
+            ORDER BY created_at DESC LIMIT %s
+        """, (cid, days, limit))
+    else:
+        cur.execute("""
+            SELECT call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category, created_at
+            FROM call_log WHERE client_id = %s ORDER BY created_at DESC LIMIT %s
+        """, (cid, limit))
     rows = cur.fetchall()
     cur.close()
-    return [{"call_sid": r[0], "from_number": r[1], "to_number": r[2], "start_iso": r[3], "end_iso": r[4], "outcome": r[5], "duration_sec": r[6], "category": r[7]} for r in rows]
+    return [{"call_sid": r[0], "from_number": r[1], "to_number": r[2], "start_iso": r[3], "end_iso": r[4], "outcome": r[5], "duration_sec": r[6], "category": r[7], "created_at": r[8].isoformat() if len(r) > 8 and r[8] else None} for r in rows]
 
 # --- Caller memory ---
 def db_caller_memory_get(phone: str) -> Optional[dict]:

@@ -66,6 +66,10 @@ export default function Dashboard() {
   const [recentCalls, setRecentCalls] = useState<CallLogEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [noTenant, setNoTenant] = useState(false)
+  const [hasExport, setHasExport] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [usage, setUsage] = useState<{ voice_minutes: number; sms_count: number; month: string } | null>(null)
+  const [minutesCap, setMinutesCap] = useState<number | null>(null)
 
   useEffect(() => {
     fetchData()
@@ -75,14 +79,20 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     try {
-      const [statsRes, appointmentsRes, messagesRes, summaryRes, callsRes] = await Promise.all([
+      const [statsRes, appointmentsRes, messagesRes, summaryRes, callsRes, subRes] = await Promise.all([
         api.get('/api/stats'),
         api.get('/api/appointments'),
         api.get('/api/messages'),
         api.get('/api/analytics/summary').catch(() => ({ data: null })),
-        api.get('/api/analytics/calls?limit=20').catch(() => ({ data: { calls: [] } }))
+        api.get('/api/analytics/calls?limit=20').catch(() => ({ data: { calls: [] } })),
+        api.get('/api/subscription').catch(() => ({ data: null }))
       ])
 
+      const sub = subRes?.data as { limits?: { has_export?: boolean; minutes_cap?: number }; usage?: { voice_minutes?: number; sms_count?: number; month?: string } } | null
+      const limits = sub?.limits
+      setHasExport(!!limits?.has_export)
+      setMinutesCap(limits?.minutes_cap ?? null)
+      setUsage(sub?.usage ?? null)
       setStats(statsRes.data)
       setAppointments(appointmentsRes.data.appointments || [])
       setMessages(messagesRes.data.messages || [])
@@ -119,6 +129,30 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* Usage widget */}
+      {usage != null && minutesCap != null && minutesCap > 0 && (
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">Usage this month</h3>
+          <div className="flex items-center gap-4">
+            <div className="flex-1">
+              <div className="flex justify-between text-sm text-gray-600 mb-1">
+                <span>Voice minutes: {usage.voice_minutes} / {minutesCap}</span>
+                {usage.voice_minutes > minutesCap && (
+                  <span className="text-amber-600">Overage: {usage.voice_minutes - minutesCap} extra min</span>
+                )}
+              </div>
+              <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${usage.voice_minutes >= minutesCap ? 'bg-amber-500' : 'bg-primary-600'}`}
+                  style={{ width: `${Math.min(100, (usage.voice_minutes / minutesCap) * 100)}%` }}
+                />
+              </div>
+            </div>
+            <div className="text-sm text-gray-600">SMS: {usage.sms_count}</div>
+          </div>
+        </div>
+      )}
+
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-white rounded-lg shadow-md p-6">
@@ -161,10 +195,38 @@ export default function Dashboard() {
       {/* Pro: Call Analytics */}
       {analyticsSummary != null && (
         <div className="bg-white rounded-lg shadow-md p-6">
-          <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
-            <BarChart3 className="w-5 h-5 mr-2" />
-            Call Analytics (Pro)
-          </h2>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-bold text-gray-900 flex items-center">
+              <BarChart3 className="w-5 h-5 mr-2" />
+              Call Analytics (Pro)
+            </h2>
+            {hasExport && (
+              <button
+                type="button"
+                disabled={exporting}
+                onClick={async () => {
+                  setExporting(true)
+                  try {
+                    const res = await api.get('/api/analytics/export', { responseType: 'blob' })
+                    const blob = new Blob([res.data], { type: 'text/csv' })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = 'call_log.csv'
+                    a.click()
+                    setTimeout(() => URL.revokeObjectURL(url), 100)
+                  } catch {
+                    // 403 or error - ignore
+                  } finally {
+                    setExporting(false)
+                  }
+                }}
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
+              >
+                {exporting ? 'Exporting…' : 'Export CSV'}
+              </button>
+            )}
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
             <div>
               <p className="text-gray-600 text-sm font-medium">Total calls</p>

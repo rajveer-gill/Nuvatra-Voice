@@ -20,6 +20,7 @@ Set these on your backend (e.g. Render):
 | `CLERK_SECRET_KEY` | Yes (admin) | Clerk secret key for creating invitations |
 | `ADMIN_CLERK_USER_IDS` | Yes (admin) | Comma-separated Clerk user IDs (e.g. `user_2abc123,user_2xyz789`) who can access `/admin` |
 | `FRONTEND_URL` | Optional | Frontend URL for Clerk invite redirect and CORS (e.g. `https://nuvatra-voice.vercel.app`). Backend allows the Vercel domain and `nuvatrahq.com`. |
+| `TWILIO_AUTH_TOKEN` | Recommended | Twilio Auth Token (from Twilio Console). When set, the backend validates `X-Twilio-Signature` on `/api/phone/incoming` and `/api/sms/incoming` so only Twilio can trigger webhooks. |
 | `CLIENT_ID` | Optional | Used only in single-tenant mode (when `CLERK_JWKS_URL` is not set) |
 
 For **single-tenant** (one deployment per client): do not set `CLERK_JWKS_URL`; set `CLIENT_ID` instead. Existing behavior is unchanged.

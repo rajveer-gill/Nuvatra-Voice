@@ -133,10 +133,12 @@ export default function HomePage() {
               <Image src="/assets/nuvatra-logo.svg" alt="Nuvatra" width={35} height={35} className="invert" />
               <span className="font-semibold tracking-wider">NUVATRA</span>
             </div>
-            <div className="flex gap-8">
+            <div className="flex flex-wrap justify-center gap-6 md:gap-8">
               <Link href="/#home" className="text-white/80 hover:text-white">Home</Link>
               <Link href="/#products" className="text-white/80 hover:text-white">Products</Link>
               <Link href="/#contact" className="text-white/80 hover:text-white">Contact</Link>
+              <Link href="/terms" className="text-white/80 hover:text-white">Terms of Service</Link>
+              <Link href="/privacy" className="text-white/80 hover:text-white">Privacy Policy</Link>
             </div>
             <p className="text-white/70 text-sm">&copy; {new Date().getFullYear()} Nuvatra. All rights reserved.</p>
           </div>

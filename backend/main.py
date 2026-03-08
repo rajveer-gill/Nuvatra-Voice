@@ -15,11 +15,18 @@ import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Literal
+import uuid
+import logging
 import openai
+
+logger = logging.getLogger("nuvatra")
 import os
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+import hmac
+import math
+import time
 import json
 from pathlib import Path
 import io
@@ -30,10 +37,26 @@ import base64
 try:
     from twilio.twiml.voice_response import VoiceResponse
     from twilio.rest import Client as TwilioClient
+    from twilio.request_validator import RequestValidator
     TWILIO_AVAILABLE = True
 except ImportError:
+    VoiceResponse = None
+    TwilioClient = None
+    RequestValidator = None
     TWILIO_AVAILABLE = False
     print("WARNING: Twilio not installed - phone features will be disabled. Install with: pip install twilio")
+
+try:
+    from plans import get_plan_limits
+except ImportError:
+    get_plan_limits = None  # type: ignore
+
+try:
+    import stripe
+    STRIPE_AVAILABLE = True
+except ImportError:
+    stripe = None
+    STRIPE_AVAILABLE = False
 
 # Load .env from backend directory (where this script is located)
 # Get the directory where this script is located
@@ -49,6 +72,14 @@ if env_path.exists():
 else:
     # Fallback: try default load_dotenv behavior
     load_dotenv()
+
+# Structured logging: level from LOG_LEVEL env
+_log_level = (os.getenv("LOG_LEVEL") or "INFO").strip().upper()
+logger.setLevel(getattr(logging, _log_level, logging.INFO))
+if not logger.handlers:
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter("%(levelname)s|%(name)s|%(message)s"))
+    logger.addHandler(h)
 
 # Verify API key is loaded
 api_key = os.getenv("OPENAI_API_KEY")
@@ -149,25 +180,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# #region agent log — CORS debug: log every request (method, path, Origin) and startup origins
-def _debug_log_payload(data: dict) -> None:
-    import json as _json
-    payload = {"sessionId": "e3c6b1", "timestamp": __import__("time").time() * 1000, "location": "main.py:CORS", "message": "request", "data": data}
-    try:
-        _log_path = _backend_dir.parent / "debug-e3c6b1.log"
-        with open(_log_path, "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps(payload) + "\n")
-    except Exception:
-        pass
-    print(f"[CORS-DEBUG] {payload}")
 @app.middleware("http")
-async def _cors_debug_middleware(request, call_next):
-    origin = request.headers.get("origin") or ""
-    _debug_log_payload({"method": request.method, "path": request.url.path, "origin": origin, "allowed_origins": allowed_origins})
+async def request_id_middleware(request: Request, call_next):
+    """Set X-Request-ID for correlation; include in audit log and response."""
+    req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = req_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = req_id
+    return response
+
+# In-memory rate limit for public webhooks (phone/SMS) — 120 req/min per IP
+_webhook_rate_limit: dict = {}  # ip -> list of timestamps
+_webhook_rate_limit_lock = asyncio.Lock()
+WEBHOOK_RATE_LIMIT_PER_MIN = 120
+
+async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
+    """Return 429 response if IP over limit for /api/phone/incoming or /api/sms/incoming; else None."""
+    path = request.url.path
+    if path not in ("/api/phone/incoming", "/api/sms/incoming"):
+        return None
+    ip = request.client.host if request.client else "unknown"
+    now = datetime.now(timezone.utc).timestamp()
+    async with _webhook_rate_limit_lock:
+        if ip not in _webhook_rate_limit:
+            _webhook_rate_limit[ip] = []
+        times = _webhook_rate_limit[ip]
+        # Prune older than 1 minute
+        times[:] = [t for t in times if now - t < 60]
+        if len(times) >= WEBHOOK_RATE_LIMIT_PER_MIN:
+            return Response(content="Too Many Requests", status_code=429)
+        times.append(now)
+    return None
+
+@app.middleware("http")
+async def webhook_rate_limit_middleware(request: Request, call_next):
+    """Apply rate limit to phone/SMS webhooks."""
+    if request.url.path in ("/api/phone/incoming", "/api/sms/incoming"):
+        resp = await _webhook_rate_limit_check(request)
+        if resp is not None:
+            return resp
     return await call_next(request)
-# startup: log CORS config (hypothesis: confirm deployed code has correct origins)
-_debug_log_payload({"event": "startup", "allowed_origins": allowed_origins})
-# #endregion
+
+# CORS debug: only when DEBUG_CORS=1 (avoid file I/O and noise in production)
+if os.getenv("DEBUG_CORS", "").strip() == "1":
+    def _debug_log_payload(data: dict) -> None:
+        import json as _json
+        payload = {"sessionId": "e3c6b1", "timestamp": __import__("time").time() * 1000, "location": "main.py:CORS", "message": "request", "data": data}
+        try:
+            _log_path = _backend_dir.parent / "debug-e3c6b1.log"
+            with open(_log_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps(payload) + "\n")
+        except Exception:
+            pass
+        print(f"[CORS-DEBUG] {payload}")
+    @app.middleware("http")
+    async def _cors_debug_middleware(request, call_next):
+        origin = request.headers.get("origin") or ""
+        _debug_log_payload({"method": request.method, "path": request.url.path, "origin": origin, "allowed_origins": allowed_origins})
+        return await call_next(request)
+    _debug_log_payload({"event": "startup", "allowed_origins": allowed_origins})
 
 # Initialize OpenAI
 # Debug: Check installed versions BEFORE creating client
@@ -346,14 +417,68 @@ try:
         db_tenant_get_members,
         db_tenant_member_add,
         db_tenant_list_all,
+        db_tenant_update_subscription,
+        db_tenant_set_billing_exempt,
+        db_tenant_extend_trial,
+        db_tenant_get_by_stripe_subscription_id,
+        db_tenant_get_by_client_id,
+        db_usage_get,
+        db_usage_increment_voice,
+        db_usage_increment_sms,
+        db_leads_insert,
+        db_leads_get_all,
+        db_sms_automations_get_all,
+        db_sms_automations_count,
+        db_sms_automations_get_by_trigger,
+        db_sms_automations_insert,
+        db_sms_automations_update,
+        db_sms_automations_delete,
+        db_overage_processed_exists,
+        db_overage_processed_insert,
+        db_audit_append,
         db_sms_session_get,
         db_sms_session_upsert,
         db_appointments_get_pending_by_phone,
+        db_appointments_get_accepted_for_date,
+        db_appointments_mark_reminder_sent,
+        db_tenant_list_all,
+        db_ping,
     )
     USE_DB = init_db()
 except (ImportError, Exception) as e:
     if os.getenv("DATABASE_URL"):
         print(f"[WARN] Database init failed (using in-memory storage): {e}")
+
+def audit_log(
+    actor_type: str,
+    action: str,
+    *,
+    actor_id: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    details: Optional[dict] = None,
+    request: Optional[Request] = None,
+) -> None:
+    """Append an audit event. No full PII (e.g. no message bodies)."""
+    if not USE_DB:
+        return
+    try:
+        ip = request.client.host if request and request.client else None
+        request_id = getattr(request.state, "request_id", None) if request else None
+        db_audit_append(
+            actor_type=actor_type,
+            action=action,
+            actor_id=actor_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            client_id=client_id,
+            details=details,
+            ip=ip,
+            request_id=request_id,
+        )
+    except Exception:
+        pass
 
 # In-memory fallback when no database (dev / testing)
 appointments: List[dict] = []
@@ -561,6 +686,7 @@ def require_tenant(request: Request):
     # Multi-tenant: require Bearer token
     token = get_bearer_token(request)
     if not token:
+        audit_log("user", "auth_failure", details={"reason": "no_token"}, request=request)
         raise HTTPException(status_code=401, detail="Authorization required")
     user_id, tenant_id_from_meta = verify_clerk_token(token)
     tenant = None
@@ -569,6 +695,7 @@ def require_tenant(request: Request):
     if not tenant and USE_DB:
         tenant = db_tenant_get_for_user(user_id)
     if not tenant:
+        audit_log("user", "auth_failure", actor_id=user_id, details={"reason": "no_tenant"}, request=request)
         raise HTTPException(status_code=403, detail="No tenant assigned to your account")
     set_request_client_id(tenant["client_id"])
     return tenant
@@ -577,14 +704,67 @@ def require_admin(request: Request):
     """Dependency: require Bearer token and admin user (user_id in ADMIN_CLERK_USER_IDS)."""
     token = get_bearer_token(request)
     if not token:
+        audit_log("admin", "auth_failure", details={"reason": "no_token"}, request=request)
         raise HTTPException(status_code=401, detail="Authorization required")
     user_id, _ = verify_clerk_token(token)
     admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
     if not admin_ids:
+        audit_log("admin", "auth_failure", actor_id=user_id, details={"reason": "admin_not_configured"}, request=request)
         raise HTTPException(status_code=403, detail="Admin not configured")
     if user_id not in admin_ids:
+        audit_log("admin", "auth_failure", actor_id=user_id, details={"reason": "not_admin"}, request=request)
         raise HTTPException(status_code=403, detail="Admin access required")
     return user_id
+
+def get_tenant_subscription_state(tenant: Optional[dict]) -> dict:
+    """Return subscription state for the tenant. If tenant is None (single-tenant), can_use_app is True."""
+    if not tenant:
+        return {"can_use_app": True, "trial_ends_at": None, "subscription_status": None, "plan": "starter", "billing_exempt_until": None}
+    if not USE_DB:
+        return {"can_use_app": True, "trial_ends_at": None, "subscription_status": tenant.get("subscription_status"), "plan": tenant.get("plan", "starter"), "billing_exempt_until": None}
+    now = datetime.now(timezone.utc)
+    trial_ends_at = tenant.get("trial_ends_at")
+    subscription_status = tenant.get("subscription_status") or "trialing"
+    billing_exempt_until = tenant.get("billing_exempt_until")
+    plan = tenant.get("plan") or "free"
+    exempt_active = False
+    if billing_exempt_until:
+        try:
+            exempt_dt = datetime.fromisoformat(billing_exempt_until.replace("Z", "+00:00")) if isinstance(billing_exempt_until, str) else billing_exempt_until
+            if exempt_dt.tzinfo is None:
+                exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
+            exempt_active = now < exempt_dt
+        except Exception:
+            pass
+    trial_active = False
+    if trial_ends_at and subscription_status == "trialing":
+        try:
+            trial_dt = datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00")) if isinstance(trial_ends_at, str) else trial_ends_at
+            if trial_dt.tzinfo is None:
+                trial_dt = trial_dt.replace(tzinfo=timezone.utc)
+            trial_active = now < trial_dt
+        except Exception:
+            pass
+    paid_active = subscription_status == "active"
+    can_use_app = exempt_active or trial_active or paid_active
+    return {
+        "can_use_app": can_use_app,
+        "trial_ends_at": trial_ends_at,
+        "subscription_status": subscription_status,
+        "plan": plan,
+        "billing_exempt_until": billing_exempt_until,
+    }
+
+def require_active_subscription(tenant: Optional[dict] = Depends(require_tenant)):
+    """Dependency: after require_tenant, require that tenant can use the app (trial or paid or exempt)."""
+    state = get_tenant_subscription_state(tenant)
+    if not state.get("can_use_app"):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "SUBSCRIPTION_REQUIRED", "message": "Subscription required. Your trial has ended. Please choose a plan to continue."},
+            headers={"X-Subscription-Required": "true"},
+        )
+    return tenant
 
 def _phone_to_e164(phone: str) -> Optional[str]:
     """Convert to E.164 for Twilio SMS (e.g. +15551234567). Returns None if too short."""
@@ -598,7 +778,8 @@ def _phone_to_e164(phone: str) -> Optional[str]:
     return None
 
 def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> bool:
-    """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number)."""
+    """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number).
+    Records usage via db_usage_increment_sms when client_id is set."""
     if not TWILIO_AVAILABLE or not twilio_client:
         print("SMS skipped: Twilio not configured")
         return False
@@ -610,11 +791,45 @@ def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> b
     if not e164:
         print(f"SMS skipped: invalid or short phone: {to_phone}")
         return False
-    try:
-        twilio_client.messages.create(from_=from_num, to=e164, body=body)
+    last_err = None
+    for attempt in range(3):
+        try:
+            twilio_client.messages.create(from_=from_num, to=e164, body=body)
+            # Record SMS usage for billing (graceful degradation)
+            if USE_DB:
+                cid = get_db_client_id()
+                if cid and cid != "default":
+                    try:
+                        month = datetime.now(timezone.utc).strftime("%Y-%m")
+                        db_usage_increment_sms(cid, month)
+                    except Exception as e:
+                        logger.error("SMS usage increment failed: %s", e)
+            return True
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                import time
+                time.sleep(2 ** attempt)
+    print(f"SMS send failed after retries: {last_err}")
+    return False
+
+def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
+    """Validate X-Twilio-Signature so only Twilio can trigger webhooks. Returns True if valid or if auth token not set (backward compat)."""
+    auth_token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    if not auth_token:
         return True
+    if not TWILIO_AVAILABLE or not RequestValidator:
+        return True
+    sig = request.headers.get("X-Twilio-Signature", "")
+    if not sig:
+        return False
+    url = str(request.url)
+    params = dict(form_data) if hasattr(form_data, "keys") else {k: v for k, v in form_data.items()}
+    try:
+        validator = RequestValidator(auth_token)
+        return validator.validate(url, params, sig)
     except Exception as e:
-        print(f"SMS send failed: {e}")
+        print(f"Twilio signature validation error: {e}")
         return False
 
 def get_client_data_dir() -> Optional[Path]:
@@ -1025,6 +1240,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 booking["phone"] = (booking.get("phone") or "").strip() or call_data["from_number"]
             apt = _create_appointment_from_booking(booking)
             if apt:
+                call_data["appointment_created"] = True
                 ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
                 # Send caller a text: human-like, full details, invite reply to confirm or change
                 thanks_msg = (
@@ -1093,13 +1309,16 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         print(f"❌ Error generating response for call {call_sid}: {e}")
         import traceback
         traceback.print_exc()
+        # Graceful fallback: play fallback message so caller does not get dead air
+        fallback_encoded = quote(TTS_FALLBACK_TEXT)
+        fallback_tts_url = f"{base_url}/api/phone/tts-audio?text={fallback_encoded}&voice={get_tts_voice()}"
         response_status[call_sid] = {
-            "status": "error",
-            "audio_url": None,
-            "ai_text": None,
+            "status": "ready",
+            "audio_url": fallback_tts_url,
+            "ai_text": TTS_FALLBACK_TEXT,
             "error": str(e)
         }
-        print(f"⚠️ Response generation failed - caller will be forwarded to business phone")
+        print(f"⚠️ Using fallback message for call {call_sid}")
 
 def should_forward_to_human(user_input: str, ai_response: str) -> bool:
     """
@@ -1285,6 +1504,131 @@ You can help with:
 async def root():
     return {"message": "Nuvatra Voice API", "status": "running"}
 
+@app.get("/api/health")
+async def health():
+    """Health check for load balancers and monitoring. Returns 200 with status and DB reachability."""
+    db_ok = "ok" if (USE_DB and db_ping()) else ("error" if USE_DB else "n/a")
+    return {"status": "ok", "database": db_ok}
+
+def _verify_cron_secret(request: Request) -> bool:
+    """Constant-time comparison of X-Cron-Secret. Returns True if valid."""
+    expected = (os.getenv("CRON_SECRET") or "").strip()
+    if not expected:
+        logger.warning("CRON_SECRET not set; cron auth disabled")
+        return False
+    received = request.headers.get("X-Cron-Secret", "")
+    return hmac.compare_digest(expected.encode(), received.encode()) if received else False
+
+@app.post("/api/cron/appointment-reminders")
+async def cron_appointment_reminders(request: Request):
+    """Day-before SMS reminders for accepted appointments. Requires X-Cron-Secret. Idempotent."""
+    if not _verify_cron_secret(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not USE_DB:
+        return {"ok": True, "reminders_sent": 0, "errors": 0, "skipped": 0, "tenants_processed": 0}
+    tz_name = (os.getenv("REMINDER_TIMEZONE") or "UTC").strip()
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    tomorrow_local = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
+    reminders_sent = 0
+    errors = 0
+    skipped = 0
+    tenants_processed = 0
+    tenants = db_tenant_list_all()
+    for t in tenants:
+        limits = get_plan_limits(t) if get_plan_limits else {}
+        if not limits.get("has_reminders"):
+            continue
+        tenants_processed += 1
+        cid = t.get("client_id")
+        twilio_num = t.get("twilio_phone_number")
+        if not cid or not twilio_num:
+            continue
+        appointments = db_appointments_get_accepted_for_date(cid, tomorrow_local)
+        for apt in appointments:
+            apt_id = apt.get("id")
+            phone = apt.get("phone")
+            if not phone:
+                skipped += 1
+                continue
+            if not db_appointments_mark_reminder_sent(apt_id, cid):
+                skipped += 1
+                continue
+            cfg = load_client_config(cid)
+            business_name = (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
+            time_str = apt.get("time", "")
+            body = f"Reminder: You have an appointment tomorrow at {time_str} at {business_name}. Reply YES to confirm or if you need to reschedule."
+            ok = False
+            for attempt in range(3):
+                try:
+                    set_request_client_id(cid)
+                    if send_sms(phone, body, from_override=twilio_num):
+                        ok = True
+                        reminders_sent += 1
+                        break
+                except Exception as e:
+                    logger.error("reminder_sms_failed", extra={"client_id": cid, "appointment_id": apt_id, "error": str(e)})
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+            if not ok:
+                errors += 1
+    return {"ok": True, "reminders_sent": reminders_sent, "errors": errors, "skipped": skipped, "tenants_processed": tenants_processed}
+
+@app.post("/api/cron/process-overage")
+async def cron_process_overage(request: Request):
+    """Monthly overage billing. Compute overage for previous month and create Stripe invoice items. Requires X-Cron-Secret."""
+    if not _verify_cron_secret(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not USE_DB or not STRIPE_AVAILABLE or not stripe:
+        return {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 0}
+    price_per_min = float((os.getenv("OVERAGE_PRICE_PER_MINUTE") or "0.05").strip())
+    prev_month = (datetime.now(timezone.utc) - timedelta(days=28)).strftime("%Y-%m")
+    tenants_processed = 0
+    invoices_created = 0
+    errors = 0
+    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not secret:
+        return {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 1}
+    stripe.api_key = secret
+    tenants = db_tenant_list_all()
+    for t in tenants:
+        if t.get("subscription_status") != "active" or not t.get("stripe_customer_id"):
+            continue
+        cid = t.get("client_id")
+        if not cid:
+            continue
+        if db_overage_processed_exists(cid, prev_month):
+            continue
+        limits = get_plan_limits(t) if get_plan_limits else {}
+        cap = limits.get("minutes_cap", 999999)
+        usage = db_usage_get(cid, prev_month)
+        voice_minutes = usage.get("voice_minutes") or 0
+        overage = max(0, voice_minutes - cap)
+        if overage <= 0:
+            db_overage_processed_insert(cid, prev_month)
+            tenants_processed += 1
+            continue
+        try:
+            amount_cents = int(overage * price_per_min * 100)
+            if amount_cents <= 0:
+                continue
+            stripe.InvoiceItem.create(
+                customer=t["stripe_customer_id"],
+                amount=amount_cents,
+                currency="usd",
+                description=f"Extra minutes ({prev_month})",
+            )
+            db_overage_processed_insert(cid, prev_month)
+            invoices_created += 1
+        except Exception as e:
+            logger.error("overage_invoice_failed", extra={"client_id": cid, "month": prev_month, "error": str(e)})
+            errors += 1
+        tenants_processed += 1
+    return {"ok": True, "tenants_processed": tenants_processed, "invoices_created": invoices_created, "errors": errors}
+
 class AdminCreateTenantRequest(BaseModel):
     client_id: str
     name: str
@@ -1298,26 +1642,41 @@ async def debug_cors():
     return {"allowed_origins": allowed_origins}
 
 @app.post("/api/admin/tenants")
-async def admin_create_tenant(req: AdminCreateTenantRequest, _: str = Depends(require_admin)):
+async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, admin_user_id: str = Depends(require_admin)):
     """Create tenant and send Clerk invite. Requires admin auth."""
     if not USE_DB:
         raise HTTPException(status_code=503, detail="Database required for multi-tenant")
-    tenant = db_tenant_create(req.client_id, req.name, req.twilio_phone_number, req.plan or "starter")
+    # New tenants get 7-day trial (plan=free, subscription_status=trialing); no paid plan at creation
+    tenant = db_tenant_create(req.client_id, req.name, req.twilio_phone_number, "free")
     if not tenant:
         raise HTTPException(status_code=409, detail="Tenant already exists or create failed")
-    # Copy template config to clients/<client_id>/config.json
-    template_path = PROJECT_ROOT / "clients" / "template" / "config.json"
+    # Create config with only admin-provided info; client fills the rest in Settings
     client_dir = PROJECT_ROOT / "clients" / req.client_id
     client_dir.mkdir(parents=True, exist_ok=True)
     config_path = client_dir / "config.json"
-    if template_path.exists():
-        with open(template_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        cfg["client_id"] = req.client_id
-        cfg["business_name"] = req.name
-        cfg["plan"] = req.plan or "starter"
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
+    cfg = {
+        "client_id": req.client_id,
+        "business_name": req.name,
+        "phone": req.twilio_phone_number or "",
+        "plan": "free",
+        "hours": "",
+        "forwarding_phone": "",
+        "email": "",
+        "address": "",
+        "departments": [],
+        "services": [],
+        "specials": [],
+        "reservation_rules": [],
+        "menu_link": "",
+        "greeting": "",
+        "staff": [],
+        "locations": [],
+        "voice": "fable",
+        "speed": 1.0,
+        "receptionist_name": "",
+    }
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
     # Link the user to this tenant via Clerk.
     # If the user already has a Clerk account (e.g. re-adding a previously removed client),
     # update their metadata and add them to tenant_members directly.
@@ -1377,6 +1736,7 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, _: str = Depends(re
                     invite_sent = True
             except Exception as e:
                 print(f"[Admin] Clerk invite error: {e}")
+    audit_log("admin", "tenant_created", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant["id"], client_id=tenant["client_id"], details={"name": req.name}, request=request)
     return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked}
 
 @app.get("/api/admin/tenants")
@@ -1387,7 +1747,7 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
     return {"tenants": db_tenant_list_all()}
 
 @app.delete("/api/admin/tenants/{tenant_id}")
-async def admin_delete_tenant(tenant_id: str, _: str = Depends(require_admin)):
+async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: str = Depends(require_admin)):
     """Delete a tenant and revoke access for its members.
 
     Steps:
@@ -1436,21 +1796,70 @@ async def admin_delete_tenant(tenant_id: str, _: str = Depends(require_admin)):
                 revoked_users.append(uid)
             except Exception as e:
                 print(f"[Admin] Error revoking access for Clerk user {uid}: {e}")
+    audit_log("admin", "tenant_deleted", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"name": tenant.get("name")}, request=request)
     return {"success": True, "deleted_tenant": tenant, "revoked_users": revoked_users}
 
+class BillingExemptUpdate(BaseModel):
+    exempt_until: Optional[str] = None
+    extend_months: Optional[int] = None
+    extend_trial_months: Optional[int] = None
+
+@app.patch("/api/admin/tenants/{tenant_id}/billing-exempt")
+async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, request: Request, admin_user_id: str = Depends(require_admin)):
+    """Set billing exemption or extend trial for a tenant. Admin only."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    now = datetime.now(timezone.utc)
+    if req.extend_trial_months is not None and req.extend_trial_months >= 0:
+        trial_ends_at = tenant.get("trial_ends_at")
+        try:
+            if trial_ends_at:
+                trial_dt = datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00")) if isinstance(trial_ends_at, str) else trial_ends_at
+                if trial_dt.tzinfo is None:
+                    trial_dt = trial_dt.replace(tzinfo=timezone.utc)
+                base = max(trial_dt, now)
+            else:
+                base = now
+            new_ends = base + timedelta(days=30 * req.extend_trial_months)
+            if db_tenant_extend_trial(tenant_id, new_ends):
+                audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "extend_trial_months", "months": req.extend_trial_months, "trial_ends_at": new_ends.isoformat()}, request=request)
+                return {"success": True, "trial_ends_at": new_ends.isoformat()}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if req.extend_months is not None and req.extend_months >= 0:
+        exempt_until = now + timedelta(days=30 * req.extend_months)
+        if db_tenant_set_billing_exempt(tenant_id, exempt_until):
+            audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "extend_months", "months": req.extend_months, "exempt_until": exempt_until.isoformat()}, request=request)
+            return {"success": True, "billing_exempt_until": exempt_until.isoformat()}
+    if req.exempt_until:
+        try:
+            exempt_dt = datetime.fromisoformat(req.exempt_until.replace("Z", "+00:00"))
+            if exempt_dt.tzinfo is None:
+                exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
+            if db_tenant_set_billing_exempt(tenant_id, exempt_dt):
+                audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "exempt_until", "exempt_until": exempt_dt.isoformat()}, request=request)
+                return {"success": True, "billing_exempt_until": exempt_dt.isoformat()}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid exempt_until date: {e}")
+    raise HTTPException(status_code=400, detail="Provide exempt_until, extend_months, or extend_trial_months")
+
 @app.post("/api/admin/tenants/{tenant_id}/members")
-async def admin_add_tenant_member(tenant_id: str, email: str = Form(...), _: str = Depends(require_admin)):
+async def admin_add_tenant_member(tenant_id: str, request: Request, email: str = Form(...), admin_user_id: str = Depends(require_admin)):
     """Manually add a Clerk user to a tenant by linking after sign-up. Use Clerk invite for new users."""
     if not USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    audit_log("admin", "tenant_member_add_attempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"email": email}, request=request)
     # We would need Clerk API to look up user_id by email - skip for now; invite flow is primary
     return {"success": False, "message": "Use Clerk Invitations for new users; metadata links tenant"}
 
 @app.post("/api/conversation", response_model=ConversationResponse)
-async def handle_conversation(request: ConversationRequest, _: None = Depends(require_tenant)):
+async def handle_conversation(request: ConversationRequest, _: None = Depends(require_active_subscription)):
     try:
         # Booking context: include booked slots in prompt when user is discussing booking
         include_slots = _suggests_booking(request.message)
@@ -1504,7 +1913,7 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/appointments")
-async def create_appointment(appointment: AppointmentRequest, _: None = Depends(require_tenant)):
+async def create_appointment(appointment: AppointmentRequest, _: None = Depends(require_active_subscription)):
     try:
         source = (appointment.source or "manual").strip().lower()
         if source not in ("receptionist", "manual"):
@@ -1544,7 +1953,7 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/appointments")
-async def get_appointments(_: None = Depends(require_tenant)):
+async def get_appointments(_: None = Depends(require_active_subscription)):
     lst = db_appointments_get_all() if USE_DB else appointments
     for a in lst:
         a.setdefault("source", "manual")
@@ -1552,7 +1961,7 @@ async def get_appointments(_: None = Depends(require_tenant)):
     return {"appointments": lst}
 
 @app.patch("/api/appointments/{appointment_id}")
-async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: None = Depends(require_tenant)):
+async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: None = Depends(require_active_subscription)):
     """Update appointment status or details. Used by the appointments frontend."""
     kwargs = {}
     if update.status is not None: kwargs["status"] = update.status
@@ -1574,7 +1983,7 @@ async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: 
     raise HTTPException(status_code=404, detail="Appointment not found")
 
 @app.post("/api/appointments/{appointment_id}/accept")
-async def accept_appointment(appointment_id: int, _: None = Depends(require_tenant)):
+async def accept_appointment(appointment_id: int, request: Request, _: None = Depends(require_active_subscription)):
     """Store accepted: mark appointment accepted and send confirmation SMS to customer."""
     apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
     if not apt:
@@ -1583,6 +1992,7 @@ async def accept_appointment(appointment_id: int, _: None = Depends(require_tena
         apt = db_appointments_update(appointment_id, status="accepted") or apt
     else:
         apt["status"] = "accepted"
+    audit_log("user", "appointment_accepted", resource_type="appointment", resource_id=str(appointment_id), details={"date": apt.get("date"), "time": apt.get("time")}, request=request)
     business_name = get_business_info().get("name", "us")
     date = apt.get("date", "")
     time = apt.get("time", "")
@@ -1591,7 +2001,7 @@ async def accept_appointment(appointment_id: int, _: None = Depends(require_tena
     return {"success": True, "appointment": apt}
 
 @app.post("/api/appointments/{appointment_id}/reject")
-async def reject_appointment(appointment_id: int, _: None = Depends(require_tenant)):
+async def reject_appointment(appointment_id: int, request: Request, _: None = Depends(require_active_subscription)):
     """Store rejected (time not available): release slot and send SMS asking for alternative times."""
     apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
     if not apt:
@@ -1600,6 +2010,7 @@ async def reject_appointment(appointment_id: int, _: None = Depends(require_tena
         apt = db_appointments_update(appointment_id, status="rejected") or apt
     else:
         apt["status"] = "rejected"
+    audit_log("user", "appointment_rejected", resource_type="appointment", resource_id=str(appointment_id), details={"date": apt.get("date"), "time": apt.get("time")}, request=request)
     release_slot(appointment_id)
     date = apt.get("date", "")
     time = apt.get("time", "")
@@ -1608,7 +2019,7 @@ async def reject_appointment(appointment_id: int, _: None = Depends(require_tena
     return {"success": True, "appointment": apt}
 
 @app.post("/api/messages")
-async def create_message(message: MessageRequest, _: None = Depends(require_tenant)):
+async def create_message(message: MessageRequest, _: None = Depends(require_active_subscription)):
     try:
         data = {"caller_name": message.caller_name, "caller_phone": message.caller_phone, "message": message.message, "urgency": message.urgency, "status": "unread"}
         if USE_DB:
@@ -1620,14 +2031,245 @@ async def create_message(message: MessageRequest, _: None = Depends(require_tena
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class SmsAutomationCreate(BaseModel):
+    trigger: Literal["after_inquiry", "post_call"]
+    template: str
+
+class SmsAutomationUpdate(BaseModel):
+    template: Optional[str] = None
+    enabled: Optional[bool] = None
+
+@app.get("/api/sms-automations")
+async def get_sms_automations(_: None = Depends(require_active_subscription)):
+    """List SMS automations. Growth/Pro only."""
+    cid = get_db_client_id()
+    if not cid or cid == "default":
+        return {"automations": []}
+    tenant = db_tenant_get_by_client_id(cid)
+    if not tenant or not get_plan_limits or get_plan_limits(tenant).get("sms_automations_max", 0) <= 0:
+        return {"automations": []}
+    automations = db_sms_automations_get_all(cid)
+    return {"automations": automations}
+
+@app.post("/api/sms-automations")
+async def create_sms_automation(req: SmsAutomationCreate, tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+    """Create SMS automation. Growth: max 2, Pro: unlimited."""
+    cid = get_db_client_id()
+    if not cid or cid == "default":
+        raise HTTPException(status_code=400, detail="No client context")
+    if not tenant or not get_plan_limits:
+        raise HTTPException(status_code=403, detail="Plan does not include SMS automations")
+    limits = get_plan_limits(tenant)
+    if limits.get("sms_automations_max", 0) <= 0:
+        raise HTTPException(status_code=403, detail="Plan does not include SMS automations")
+    count = db_sms_automations_count(cid)
+    if count >= limits.get("sms_automations_max", 0):
+        raise HTTPException(status_code=403, detail=f"Plan allows up to {limits.get('sms_automations_max')} automations")
+    automation_id = db_sms_automations_insert(cid, req.trigger, req.template or "")
+    if not automation_id:
+        raise HTTPException(status_code=500, detail="Failed to create automation")
+    return {"id": automation_id, "trigger": req.trigger, "template": req.template}
+
+@app.patch("/api/sms-automations/{automation_id}")
+async def update_sms_automation(automation_id: int, req: SmsAutomationUpdate, _: None = Depends(require_active_subscription)):
+    cid = get_db_client_id()
+    if not cid or cid == "default":
+        raise HTTPException(status_code=400, detail="No client context")
+    ok = db_sms_automations_update(automation_id, cid, template=req.template, enabled=req.enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Automation not found")
+    return {"ok": True}
+
+@app.delete("/api/sms-automations/{automation_id}")
+async def delete_sms_automation(automation_id: int, _: None = Depends(require_active_subscription)):
+    cid = get_db_client_id()
+    if not cid or cid == "default":
+        raise HTTPException(status_code=400, detail="No client context")
+    ok = db_sms_automations_delete(automation_id, cid)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Automation not found")
+    return {"ok": True}
+
+@app.get("/api/leads")
+async def get_leads(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+    """Get leads for the current tenant. Growth/Pro only; Starter returns empty."""
+    cid = get_db_client_id()
+    if not cid or cid == "default":
+        return {"leads": []}
+    if tenant and get_plan_limits:
+        limits = get_plan_limits(tenant)
+        if not limits.get("has_lead_capture"):
+            return {"leads": []}
+    leads = db_leads_get_all(cid, 100) if USE_DB else []
+    return {"leads": leads}
+
 @app.get("/api/messages")
-async def get_messages(_: None = Depends(require_tenant)):
+async def get_messages(_: None = Depends(require_active_subscription)):
     lst = db_messages_get_all() if USE_DB else messages
     return {"messages": lst}
 
+@app.get("/api/subscription")
+async def get_subscription(tenant: Optional[dict] = Depends(require_tenant)):
+    """Return subscription state, plan limits, and usage for the current tenant."""
+    state = get_tenant_subscription_state(tenant)
+    if get_plan_limits:
+        state["limits"] = get_plan_limits(tenant)
+    cid = get_db_client_id()
+    if USE_DB and cid and cid != "default":
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        usage = db_usage_get(cid, month)
+        state["usage"] = {
+            "voice_minutes": usage.get("voice_minutes") or 0,
+            "sms_count": usage.get("sms_count") or 0,
+            "month": month,
+        }
+    else:
+        state["usage"] = {"voice_minutes": 0, "sms_count": 0, "month": datetime.now(timezone.utc).strftime("%Y-%m")}
+    return state
+
+# ---------- Stripe billing ----------
+def _stripe_price_id(plan: str) -> Optional[str]:
+    key = f"STRIPE_{plan.upper()}_PRICE_ID"
+    return (os.getenv(key) or os.getenv("STRIPE_PRICE_ID") or "").strip() or None
+
+class CreateCheckoutSessionRequest(BaseModel):
+    plan: Literal["starter", "growth", "pro"]
+
+@app.post("/api/create-checkout-session")
+async def create_checkout_session(req: CreateCheckoutSessionRequest, tenant: Optional[dict] = Depends(require_tenant)):
+    """Create a Stripe Checkout session for the given plan. Returns { url } for redirect."""
+    if not STRIPE_AVAILABLE or not stripe:
+        raise HTTPException(status_code=503, detail="Billing not configured")
+    if not tenant or not USE_DB:
+        raise HTTPException(status_code=403, detail="Tenant required")
+    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    stripe.api_key = secret
+    price_id = _stripe_price_id(req.plan)
+    if not price_id:
+        raise HTTPException(status_code=503, detail=f"Price not configured for plan: {req.plan}")
+    frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+    success_url = f"{frontend}/dashboard?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{frontend}/dashboard"
+    tenant_id = tenant.get("id")
+    stripe_customer_id = tenant.get("stripe_customer_id")
+    if not stripe_customer_id:
+        try:
+            cust = stripe.Customer.create(
+                metadata={"tenant_id": str(tenant_id), "client_id": tenant.get("client_id", "")},
+                email=None,
+            )
+            stripe_customer_id = cust.id
+            db_tenant_update_subscription(tenant_id, stripe_customer_id=stripe_customer_id)
+        except Exception as e:
+            logger.error("Stripe customer create failed: %s", e)
+            raise HTTPException(status_code=500, detail="Could not create billing customer")
+    try:
+        session = stripe.checkout.Session.create(
+            customer=stripe_customer_id,
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={"tenant_id": str(tenant_id), "plan": req.plan},
+            subscription_data={"metadata": {"tenant_id": str(tenant_id), "plan": req.plan}},
+        )
+        return {"url": session.url}
+    except Exception as e:
+        logger.error("Stripe checkout session failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/create-portal-session")
+async def create_portal_session(tenant: Optional[dict] = Depends(require_tenant)):
+    """Create a Stripe Customer Portal session for managing subscription. Returns { url }."""
+    if not STRIPE_AVAILABLE or not stripe:
+        raise HTTPException(status_code=503, detail="Billing not configured")
+    if not tenant or not USE_DB:
+        raise HTTPException(status_code=403, detail="Tenant required")
+    stripe_customer_id = tenant.get("stripe_customer_id")
+    if not stripe_customer_id:
+        raise HTTPException(status_code=400, detail="No billing account. Subscribe to a plan first.")
+    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    stripe.api_key = secret
+    frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+    return_url = f"{frontend}/dashboard"
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=stripe_customer_id,
+            return_url=return_url,
+        )
+        return {"url": session.url}
+    except Exception as e:
+        logger.error("Stripe portal session failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/stripe-webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhooks: subscription and payment events. Raw body required for signature verification."""
+    if not STRIPE_AVAILABLE or not stripe:
+        raise HTTPException(status_code=503, detail="Billing not configured")
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Webhook secret not configured")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig, secret)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.SignatureVerificationError as e:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    if not USE_DB:
+        return {"received": True}
+    # Handle events
+    if event.type == "checkout.session.completed":
+        session = event.data.object
+        meta = session.get("metadata") or {}
+        tenant_id = meta.get("tenant_id")
+        plan = meta.get("plan") or "starter"
+        sub_id = session.get("subscription")
+        customer_id = session.get("customer")
+        if tenant_id and (sub_id or customer_id):
+            db_tenant_update_subscription(tenant_id, stripe_customer_id=customer_id, stripe_subscription_id=sub_id, subscription_status="active", plan=plan)
+            tenant = db_tenant_get_by_id(tenant_id)
+            audit_log("stripe", "checkout.session.completed", resource_type="tenant", resource_id=tenant_id, client_id=tenant["client_id"] if tenant else None, details={"plan": plan, "subscription_id": sub_id}, request=request)
+    elif event.type == "customer.subscription.updated":
+        sub = event.data.object
+        sub_id = sub.get("id")
+        tenant_id = (sub.get("metadata") or {}).get("tenant_id")
+        status = sub.get("status")
+        if tenant_id and sub_id:
+            plan = (sub.get("metadata") or {}).get("plan") or "starter"
+            db_tenant_update_subscription(tenant_id, stripe_subscription_id=sub_id, subscription_status=status, plan=plan)
+            tenant = db_tenant_get_by_id(tenant_id)
+            audit_log("stripe", "customer.subscription.updated", resource_type="tenant", resource_id=tenant_id, client_id=tenant["client_id"] if tenant else None, details={"status": status, "plan": plan}, request=request)
+    elif event.type == "customer.subscription.deleted":
+        sub = event.data.object
+        tenant_id = (sub.get("metadata") or {}).get("tenant_id")
+        if tenant_id:
+            tenant = db_tenant_get_by_id(tenant_id)
+            db_tenant_update_subscription(tenant_id, subscription_status="canceled")
+            audit_log("stripe", "customer.subscription.deleted", resource_type="tenant", resource_id=tenant_id, client_id=tenant["client_id"] if tenant else None, details={}, request=request)
+    elif event.type == "invoice.payment_failed":
+        inv = event.data.object
+        sub_id = inv.get("subscription")
+        if sub_id and USE_DB:
+            tenant = db_tenant_get_by_stripe_subscription_id(sub_id)
+            if tenant:
+                db_tenant_update_subscription(tenant["id"], subscription_status="past_due")
+                audit_log("stripe", "invoice.payment_failed", resource_type="tenant", resource_id=tenant["id"], client_id=tenant.get("client_id"), details={"subscription_id": sub_id}, request=request)
+    return {"received": True}
+
 @app.get("/api/business-info")
-async def api_get_business_info(_: None = Depends(require_tenant)):
+async def api_get_business_info(_: None = Depends(require_active_subscription)):
     return get_business_info()
+
+class StaffMember(BaseModel):
+    name: str = ""
+    phone: str = ""
 
 class BusinessInfoUpdate(BaseModel):
     name: Optional[str] = None
@@ -1645,9 +2287,10 @@ class BusinessInfoUpdate(BaseModel):
     voice: Optional[str] = None
     speed: Optional[float] = None
     receptionist_name: Optional[str] = None
+    staff: Optional[List[StaffMember]] = None
 
 @app.patch("/api/business-info")
-async def api_update_business_info(update: BusinessInfoUpdate, _: None = Depends(require_tenant)):
+async def api_update_business_info(update: BusinessInfoUpdate, request: Request, _: None = Depends(require_active_subscription)):
     """Update business config (store info, voice, etc.). Writes to clients/<client_id>/config.json."""
     cid = get_db_client_id()
     if not cid or cid == "default":
@@ -1690,16 +2333,25 @@ async def api_update_business_info(update: BusinessInfoUpdate, _: None = Depends
         data["speed"] = update.speed
     if update.receptionist_name is not None:
         data["receptionist_name"] = update.receptionist_name
+    if update.staff is not None:
+        tenant = db_tenant_get_by_client_id(cid)
+        if tenant and get_plan_limits:
+            limits = get_plan_limits(tenant)
+            staff_max = limits.get("staff_max", 1)
+            if len(update.staff) > staff_max:
+                raise HTTPException(status_code=403, detail=f"Plan allows up to {staff_max} staff member(s). Upgrade to add more.")
+        data["staff"] = [{"name": s.name or "", "phone": s.phone or ""} for s in update.staff]
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
+    audit_log("user", "business_info_updated", resource_type="config", client_id=cid, details={"fields": [k for k in update.model_dump(exclude_none=True)]}, request=request)
     return get_business_info()
 
 @app.get("/api/stats")
-async def get_stats(_: None = Depends(require_tenant)):
+async def get_stats(_: None = Depends(require_active_subscription)):
     apts = db_appointments_get_all() if USE_DB else appointments
     msgs = db_messages_get_all() if USE_DB else messages
     pending = len([a for a in apts if a.get("status") == "pending"])
@@ -1709,10 +2361,10 @@ async def get_stats(_: None = Depends(require_tenant)):
         "pending_appointments": pending
     }
 
-def _load_call_log() -> List[dict]:
-    """Load call log from client data dir. Returns list of call entries (newest first)."""
+def _load_call_log(days: Optional[int] = None) -> List[dict]:
+    """Load call log. If days set, filter by plan (DB only). Returns list of call entries (newest first)."""
     if USE_DB:
-        return db_call_log_load()
+        return db_call_log_load(limit=5000, days=days)
     data_dir = get_client_data_dir()
     if not data_dir:
         return []
@@ -1725,10 +2377,15 @@ def _load_call_log() -> List[dict]:
     except Exception:
         return []
 
+def _call_log_days(tenant: Optional[dict]) -> int:
+    """Return call log retention days for plan."""
+    return get_plan_limits(tenant).get("call_log_days", 30) if get_plan_limits else 9999
+
 @app.get("/api/analytics/summary")
-async def get_analytics_summary(_: None = Depends(require_tenant)):
-    """Pro: Peak call times, outcomes, total calls. Requires CLIENT_ID."""
-    log = _load_call_log()
+async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+    """Pro: Peak call times, outcomes, total calls. Filtered by plan (call_log_days)."""
+    days = _call_log_days(tenant)
+    log = _load_call_log(days=days)
     if not log:
         return {
             "total_calls": 0,
@@ -1760,17 +2417,45 @@ async def get_analytics_summary(_: None = Depends(require_tenant)):
     }
 
 @app.get("/api/analytics/calls")
-async def get_analytics_calls(limit: int = 50, outcome: Optional[str] = None, _: None = Depends(require_tenant)):
-    """Pro: Recent calls for dashboard. Optional filter by outcome."""
-    log = _load_call_log()
-    # Log is stored oldest first; we want newest first
-    log = list(reversed(log))
+async def get_analytics_calls(limit: int = 50, outcome: Optional[str] = None, tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+    """Pro: Recent calls for dashboard. Filtered by plan (call_log_days). Optional filter by outcome."""
+    days = _call_log_days(tenant)
+    log = _load_call_log(days=days)
     if outcome:
         log = [e for e in log if (e.get("outcome") or "") == outcome]
     return {"calls": log[:limit], "client_id": get_db_client_id() or None}
 
+@app.get("/api/analytics/export")
+async def get_analytics_export(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+    """Export call log as CSV. Growth/Pro only."""
+    if not tenant or not get_plan_limits or not get_plan_limits(tenant).get("has_export"):
+        raise HTTPException(status_code=403, detail="Export is available on Growth and Pro plans")
+    days = _call_log_days(tenant)
+    log = _load_call_log(days=days)
+    import csv
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["call_sid", "from_number", "to_number", "start_iso", "end_iso", "outcome", "duration_sec", "category", "created_at"])
+    for e in log:
+        writer.writerow([
+            e.get("call_sid", ""),
+            e.get("from_number", ""),
+            e.get("to_number", ""),
+            e.get("start_iso", ""),
+            e.get("end_iso", ""),
+            e.get("outcome", ""),
+            e.get("duration_sec", ""),
+            e.get("category", ""),
+            e.get("created_at", ""),
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=call_log.csv"},
+    )
+
 @app.post("/api/text-to-speech")
-async def text_to_speech(request: TTSRequest, _: None = Depends(require_tenant)):
+async def text_to_speech(request: TTSRequest, _: None = Depends(require_active_subscription)):
     """
     Convert text to speech using OpenAI's TTS API.
     Returns audio file as streaming response.
@@ -1814,6 +2499,9 @@ def _restore_call_context(call_sid: str) -> bool:
         return True
     return False
 
+# Fallback when OpenAI/TTS fails - play this so caller does not get dead air
+TTS_FALLBACK_TEXT = "We're experiencing a brief technical issue. Please try again in a moment."
+
 # Response generation status (for 2-step flow to eliminate dead air)
 response_status = {}  # {call_sid: {"status": "pending"|"ready"|"error", "audio_url": str, "ai_text": str}}
 
@@ -1841,7 +2529,18 @@ async def get_greeting_audio():
             print(f"❌ Failed to generate greeting audio: {e}")
             import traceback
             traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Failed to generate greeting: {e}")
+            try:
+                fallback_audio = client.audio.speech.create(
+                    model="tts-1-hd",
+                    voice="fable",
+                    input=add_sentence_pauses(TTS_FALLBACK_TEXT),
+                    speed=1.0,
+                )
+                greeting_audio_cache = fallback_audio.content
+                print("✅ Serving fallback greeting audio")
+            except Exception as e2:
+                print(f"❌ Fallback greeting audio failed: {e2}")
+                raise HTTPException(status_code=500, detail=f"Failed to generate greeting: {e}")
     
     print(f"🎵 Serving greeting audio ({len(greeting_audio_cache)} bytes)")
     return Response(
@@ -1876,7 +2575,18 @@ async def get_got_it_audio():
             print(f"❌ Failed to generate 'got it' audio: {e}")
             import traceback
             traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Failed to generate 'got it' audio: {e}")
+            try:
+                got_it_audio = client.audio.speech.create(
+                    model="tts-1-hd",
+                    voice="fable",
+                    input=add_sentence_pauses(TTS_FALLBACK_TEXT),
+                    speed=1.0,
+                )
+                got_it_audio_cache = got_it_audio.content
+                print("✅ Serving fallback 'got it' audio")
+            except Exception as e2:
+                print(f"❌ Fallback 'got it' audio failed: {e2}")
+                raise HTTPException(status_code=500, detail=f"Failed to generate 'got it' audio: {e}")
     
     print(f"🎵 Serving 'got it' audio ({len(got_it_audio_cache)} bytes)")
     return Response(
@@ -1899,6 +2609,9 @@ async def handle_incoming_sms(request: Request):
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
     try:
         form_data = await request.form()
+        form_dict = dict(form_data)
+        if not _validate_twilio_webhook(request, form_dict):
+            return Response(content="", status_code=403, media_type="application/xml")
         from_number = form_data.get("From", "").strip()
         to_number = form_data.get("To", "").strip()
         body = (form_data.get("Body", "") or "").strip()
@@ -1908,6 +2621,14 @@ async def handle_incoming_sms(request: Request):
         if not tenant:
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         set_request_client_id(tenant["client_id"])
+        # Pre-SMS usage check: allow overage, log for billing (Option B)
+        if get_plan_limits:
+            limits = get_plan_limits(tenant)
+            month = datetime.now(timezone.utc).strftime("%Y-%m")
+            usage = db_usage_get(tenant["client_id"], month)
+            total = (usage.get("voice_minutes") or 0) + (usage.get("sms_count") or 0)
+            if total >= limits.get("minutes_cap", 999999):
+                audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": limits.get("minutes_cap")}, request=request)
         apt = db_appointments_get_pending_by_phone(from_number) if USE_DB else None
         session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
         messages = (session["messages"] if session else []) if session else []
@@ -1942,11 +2663,32 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
             send_sms(from_number, reply, from_override=to_number)
         messages.append({"role": "assistant", "content": reply})
         db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"] if apt else None)
+        # Lead capture: when no pending appointment and plan allows, treat as inquiry
+        if not apt and get_plan_limits and get_plan_limits(tenant).get("has_lead_capture"):
+            body_lower = (body or "").lower().strip()
+            if len(body_lower) > 5 and body_lower not in ("yes", "no", "ok", "nope", "sure", "thanks"):
+                try:
+                    db_leads_insert(tenant["client_id"], None, from_number, body[:500] if body else "inquiry", "sms")
+                except Exception:
+                    pass
+                # SMS automation: after_inquiry - send template to customer
+                if USE_DB:
+                    automations = db_sms_automations_get_by_trigger(tenant["client_id"], "after_inquiry")
+                    for auto in automations:
+                        template = (auto.get("template") or "").strip()
+                        if not template:
+                            continue
+                        cfg = load_client_config(tenant["client_id"])
+                        business_name = (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
+                        msg = template.replace("{business_name}", business_name).replace("{name}", business_name)
+                        try:
+                            set_request_client_id(tenant["client_id"])
+                            send_sms(from_number, msg[:1600], from_override=to_number)
+                        except Exception:
+                            pass
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
     except Exception as e:
-        print(f"SMS webhook error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("SMS webhook error: %s", e)
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
 
 
@@ -1960,13 +2702,16 @@ async def handle_incoming_call(request: Request):
     """
     try:
         # Log the incoming request for debugging
-        print(f"Incoming call webhook received from: {request.client.host if request.client else 'unknown'}")
+        logger.info("Incoming call webhook from %s", request.client.host if request.client else "unknown")
         form_data = await request.form()
+        form_dict = dict(form_data)
+        if not _validate_twilio_webhook(request, form_dict):
+            raise HTTPException(status_code=403, detail="Invalid webhook signature")
         call_sid = form_data.get("CallSid")
         from_number = form_data.get("From")
         to_number = form_data.get("To")
         
-        print(f"📞 Incoming call: {from_number} -> {to_number} (CallSid: {call_sid})")
+        logger.info("Incoming call: %s -> %s (CallSid: %s)", from_number, to_number, call_sid)
         
         # Multi-tenant: resolve tenant by To number and set request context
         tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
@@ -1974,6 +2719,14 @@ async def handle_incoming_call(request: Request):
             set_request_client_id(tenant["client_id"])
         elif CLIENT_ID:
             set_request_client_id(CLIENT_ID)
+        # Pre-call usage check: allow overage, log for billing (Option B)
+        if USE_DB and tenant and get_plan_limits:
+            limits = get_plan_limits(tenant)
+            month = datetime.now(timezone.utc).strftime("%Y-%m")
+            usage = db_usage_get(tenant["client_id"], month)
+            total = (usage.get("voice_minutes") or 0) + (usage.get("sms_count") or 0)
+            if total >= limits.get("minutes_cap", 999999):
+                audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": limits.get("minutes_cap")}, request=request)
         
         # Pro: call log start + customer memory for repeat callers
         call_log_start(call_sid, from_number, to_number)
@@ -2297,6 +3050,31 @@ async def handle_call_status(request: Request):
         
         # Clean up when call ends + Pro: persist call log and customer memory
         if call_status in ["completed", "failed", "busy", "no-answer", "canceled"]:
+            # Read Twilio Duration and set in call_log_entries before call_log_end
+            duration_raw = form_data.get("Duration")
+            if duration_raw is not None:
+                try:
+                    dur = int(duration_raw)
+                    if call_sid in call_log_entries and dur >= 0:
+                        call_log_entries[call_sid]["duration_sec"] = dur
+                except (ValueError, TypeError):
+                    pass
+            # Capture client_id, from_number, appointment_created, duration_sec before we delete from active_calls
+            client_id_before = None
+            from_number_before = None
+            appointment_created = False
+            if call_sid in active_calls:
+                call_data_cp = active_calls[call_sid]
+                client_id_before = call_data_cp.get("client_id")
+                from_number_before = call_data_cp.get("from_number")
+                appointment_created = call_data_cp.get("appointment_created") or False
+            if not client_id_before:
+                client_id_before = get_db_client_id()
+            if not from_number_before and call_sid in call_log_entries:
+                from_number_before = call_log_entries[call_sid].get("from_number")
+            duration_sec = 0
+            if call_sid in call_log_entries:
+                duration_sec = call_log_entries[call_sid].get("duration_sec") or 0
             if call_sid in active_calls:
                 call_data = active_calls[call_sid]
                 outcome = call_data.get("outcome")
@@ -2312,6 +3090,23 @@ async def handle_call_status(request: Request):
                 # Call was logged but not in active_calls (e.g. quick hangup)
                 call_log_set_outcome(call_sid, "missed" if call_status == "completed" else call_status)
                 call_log_end(call_sid)
+            # Lead capture: when call ended without booking and plan allows
+            if USE_DB and client_id_before and client_id_before != "default" and from_number_before and get_plan_limits:
+                try:
+                    tenant = db_tenant_get_by_client_id(client_id_before)
+                    if tenant and get_plan_limits(tenant).get("has_lead_capture") and not appointment_created:
+                        db_leads_insert(client_id_before, None, from_number_before, "inquiry", "call")
+                except Exception as e:
+                    logger.error("lead_capture_failed", extra={"client_id": client_id_before, "error": str(e)})
+            # Record voice usage for billing (graceful degradation: log on failure, do not raise)
+            if USE_DB and client_id_before and client_id_before != "default":
+                try:
+                    minutes = max(0, math.ceil(duration_sec / 60))
+                    month = datetime.now(timezone.utc).strftime("%Y-%m")
+                    if not db_usage_increment_voice(client_id_before, month, minutes):
+                        logger.error("usage_increment_failed", extra={"client_id": client_id_before, "month": month, "error": "db_usage_increment_voice returned False"})
+                except Exception as e:
+                    logger.error("usage_increment_failed", extra={"client_id": client_id_before, "error": str(e)})
         
         return Response(content="OK", media_type="text/plain")
     
@@ -2545,7 +3340,26 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     
     except Exception as e:
         print(f"TTS audio generation error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            response = client.audio.speech.create(
+                model="tts-1",
+                voice=voice,
+                input=add_sentence_pauses(TTS_FALLBACK_TEXT),
+                speed=1.0,
+            )
+            audio_bytes = io.BytesIO(response.content)
+            audio_bytes.seek(0)
+            return StreamingResponse(
+                audio_bytes,
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": "inline; filename=speech.mp3",
+                    "Cache-Control": "no-cache",
+                },
+            )
+        except Exception as e2:
+            print(f"TTS fallback also failed: {e2}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/phone/process-recording")
 async def process_recording(request: Request):

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Volume2, Store, Save, Shuffle, User, Play, Square } from 'lucide-react'
+import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, Plus, Trash2, MessageSquare } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 
 const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const
@@ -10,6 +10,100 @@ const VOICE_SAMPLE_TEXT = "Hi there! Thanks for calling. How can I help you toda
 const SPEECH_SPEED_MIN = 0.25
 const SPEECH_SPEED_MAX = 4
 const SPEECH_SPEED_STEP = 0.05
+
+function SmsAutomationsSection({
+  automations,
+  smsAutomationsMax,
+  onRefresh,
+  api,
+}: {
+  automations: { id: number; trigger: string; template: string; enabled: boolean }[]
+  smsAutomationsMax: number
+  onRefresh: () => void
+  api: ReturnType<typeof useApiClient>
+}) {
+  const [newTrigger, setNewTrigger] = useState<'after_inquiry' | 'post_call'>('after_inquiry')
+  const [newTemplate, setNewTemplate] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const handleAdd = async () => {
+    if (!newTemplate.trim()) return
+    setSaving(true)
+    setMsg(null)
+    try {
+      await api.post('/api/sms-automations', { trigger: newTrigger, template: newTemplate.trim() })
+      setNewTemplate('')
+      onRefresh()
+      setMsg({ type: 'success', text: 'Automation added' })
+    } catch {
+      setMsg({ type: 'error', text: 'Failed to add automation (plan limit or error)' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDelete = async (id: number) => {
+    try {
+      await api.delete(`/api/sms-automations/${id}`)
+      onRefresh()
+    } catch {
+      setMsg({ type: 'error', text: 'Failed to delete' })
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-2xl shadow-xl p-8">
+      <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
+        <MessageSquare className="w-6 h-6 text-primary-600" />
+        SMS Automations
+      </h2>
+      <p className="text-gray-600 text-sm mb-2">
+        Auto-send a follow-up text when someone inquires but doesn&apos;t book. Use {'{business_name}'} in the template.
+      </p>
+      <p className="text-xs text-gray-500 mb-4">Your plan allows {smsAutomationsMax} automation(s). Growth: 2, Pro: unlimited.</p>
+      {automations.map((a) => (
+        <div key={a.id} className="flex items-start gap-2 mb-3 p-3 bg-gray-50 rounded-lg">
+          <div className="flex-1">
+            <span className="text-xs font-medium text-gray-500">{a.trigger.replace(/_/g, ' ')}</span>
+            <p className="text-sm text-gray-800 mt-0.5">{a.template}</p>
+          </div>
+          <button type="button" onClick={() => handleDelete(a.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded">
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
+      ))}
+      {automations.length < smsAutomationsMax && (
+        <div className="mt-4 space-y-2">
+          <select
+            value={newTrigger}
+            onChange={(e) => setNewTrigger(e.target.value as 'after_inquiry' | 'post_call')}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          >
+            <option value="after_inquiry">After inquiry (no booking)</option>
+            <option value="post_call">Post call</option>
+          </select>
+          <input
+            type="text"
+            value={newTemplate}
+            onChange={(e) => setNewTemplate(e.target.value)}
+            placeholder="e.g. Thanks for reaching out! Here's our menu: {business_name}"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+          />
+          <button
+            type="button"
+            onClick={handleAdd}
+            disabled={saving || !newTemplate.trim()}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+          >
+            <Plus className="w-4 h-4" /> Add automation
+          </button>
+        </div>
+      )}
+      {msg && <p className={`mt-2 text-sm ${msg.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>{msg.text}</p>}
+    </div>
+  )
+}
 
 const RANDOM_NAMES = [
   'Ava', 'Liam', 'Sophia', 'Noah', 'Olivia', 'Ethan', 'Mia', 'Lucas',
@@ -30,6 +124,7 @@ export default function Settings() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [receptionistName, setReceptionistName] = useState('')
   const [aiPhone, setAiPhone] = useState('')
+  const [portalLoading, setPortalLoading] = useState(false)
   const [form, setForm] = useState({
     name: '',
     hours: '',
@@ -42,14 +137,26 @@ export default function Settings() {
     specials: '' as string,
     reservation_rules: '' as string,
   })
+  const [staff, setStaff] = useState<{ name: string; phone: string }[]>([])
+  const [staffMax, setStaffMax] = useState<number | null>(null)
+  const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
+  const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
 
   useEffect(() => {
-    api.get('/api/business-info')
-      .then((res) => {
-        const d = res.data
+    Promise.all([
+      api.get('/api/business-info'),
+      api.get('/api/subscription').catch(() => ({ data: null })),
+      api.get('/api/sms-automations').catch(() => ({ data: { automations: [] } })),
+    ]).then(([infoRes, subRes, automationsRes]) => {
+        const d = infoRes.data
         setVoice(d.voice || 'fable')
-        const s = typeof d.speed === 'number' ? d.speed : 1.0
-        setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, s)))
+        const limits = (subRes?.data as { limits?: { staff_max?: number; sms_automations_max?: number } } | null)?.limits
+        if (limits?.staff_max != null) setStaffMax(limits.staff_max)
+        if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
+        const staffArr = (d.staff || []) as { name?: string; phone?: string }[]
+        setStaff(staffArr.length ? staffArr.map((x) => ({ name: x.name || '', phone: x.phone || '' })) : [])
+        const spd = typeof d.speed === 'number' ? d.speed : 1.0
+        setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
         setReceptionistName(d.receptionist_name || '')
         setAiPhone(d.phone || '')
         setForm({
@@ -64,9 +171,10 @@ export default function Settings() {
           specials: Array.isArray(d.specials) ? d.specials.join('\n') : '',
           reservation_rules: Array.isArray(d.reservation_rules) ? d.reservation_rules.join('\n') : '',
         })
+      setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
       })
-      .catch(() => setMessage({ type: 'error', text: 'Failed to load settings' }))
-      .finally(() => setLoading(false))
+    .catch(() => setMessage({ type: 'error', text: 'Failed to load settings' }))
+    .finally(() => setLoading(false))
   }, [api])
 
   const randomizeName = () => {
@@ -113,6 +221,11 @@ export default function Settings() {
     }
   }
 
+  const addStaff = () => setStaff((prev) => [...prev, { name: '', phone: '' }])
+  const removeStaff = (i: number) => setStaff((prev) => prev.filter((_, idx) => idx !== i))
+  const updateStaff = (i: number, field: 'name' | 'phone', value: string) =>
+    setStaff((prev) => prev.map((s, idx) => idx === i ? { ...s, [field]: value } : s))
+
   const handleSave = async () => {
     setSaving(true)
     setMessage(null)
@@ -127,6 +240,7 @@ export default function Settings() {
         greeting: form.greeting || undefined,
         voice: voice || undefined,
         receptionist_name: receptionistName || undefined,
+        staff: staff.filter((s) => s.name.trim() || s.phone.trim()).map((s) => ({ name: s.name, phone: s.phone })),
         services: form.services
           ? form.services.split('\n').map((s) => s.trim()).filter(Boolean)
           : undefined,
@@ -142,6 +256,22 @@ export default function Settings() {
       setMessage({ type: 'error', text: 'Failed to save settings' })
     } finally {
       setSaving(false)
+    }
+  }
+
+  const openBillingPortal = async () => {
+    setPortalLoading(true)
+    try {
+      const { data } = await api.post<{ url: string }>('/api/create-portal-session')
+      if (data?.url) {
+        window.location.href = data.url
+        return
+      }
+      setMessage({ type: 'error', text: 'Could not open billing portal' })
+    } catch {
+      setMessage({ type: 'error', text: 'Could not open billing portal' })
+    } finally {
+      setPortalLoading(false)
     }
   }
 
@@ -195,6 +325,7 @@ export default function Settings() {
               className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-gray-500 cursor-not-allowed"
             />
             <p className="text-xs text-gray-500 mt-1">This is your AI receptionist&apos;s phone number. Contact your administrator to change it.</p>
+            <p className="text-xs text-gray-500 mt-1">Calls and texts work when your number&apos;s Voice and Messaging webhooks are set in Twilio. If calls or texts aren&apos;t working, contact your administrator.</p>
           </div>
         </div>
       </div>
@@ -277,6 +408,47 @@ export default function Settings() {
         )}
       </div>
 
+      {/* SMS Automations (Growth/Pro) */}
+      {smsAutomationsMax != null && smsAutomationsMax > 0 && (
+        <SmsAutomationsSection
+          automations={automations}
+          smsAutomationsMax={smsAutomationsMax}
+          onRefresh={() => api.get('/api/sms-automations').then((r) => setAutomations(r.data?.automations || []))}
+          api={api}
+        />
+      )}
+
+      {/* Billing */}
+      <div className="bg-white rounded-2xl shadow-xl p-8">
+        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
+          <CreditCard className="w-6 h-6 text-primary-600" />
+          Billing
+        </h2>
+        <p className="text-gray-600 text-sm mb-4">
+          Change plan, update payment method, or manage your subscription.
+        </p>
+        <button
+          type="button"
+          onClick={openBillingPortal}
+          disabled={portalLoading}
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
+        >
+          <CreditCard className="w-4 h-4" />
+          {portalLoading ? 'Opening…' : 'Manage subscription'}
+        </button>
+        <p className="mt-4 text-xs text-gray-500">
+          To cancel your subscription, use &quot;Manage subscription&quot; above; cancellation is available in the billing portal.
+        </p>
+        <button
+          type="button"
+          onClick={openBillingPortal}
+          disabled={portalLoading}
+          className="mt-3 text-xs text-gray-500 hover:text-gray-700 underline"
+        >
+          Cancel service
+        </button>
+      </div>
+
       {/* Store Info */}
       <div className="bg-white rounded-2xl shadow-xl p-8">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
@@ -318,6 +490,39 @@ export default function Settings() {
               placeholder="Number to forward calls to when a caller asks for a real person"
             />
             <p className="text-xs text-gray-500 mt-1">When a caller asks to speak to someone, the AI will transfer the call to this number.</p>
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Staff (transfer by name)</label>
+            {staffMax != null && <p className="text-xs text-gray-500 mb-2">Your plan allows up to {staffMax} staff member(s).</p>}
+            {staff.map((s, i) => (
+              <div key={i} className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={s.name}
+                  onChange={(e) => updateStaff(i, 'name', e.target.value)}
+                  className="flex-1 rounded-lg border border-gray-300 px-3 py-2"
+                  placeholder="Name"
+                />
+                <input
+                  type="text"
+                  value={s.phone}
+                  onChange={(e) => updateStaff(i, 'phone', e.target.value)}
+                  className="flex-1 rounded-lg border border-gray-300 px-3 py-2"
+                  placeholder="Phone (E.164)"
+                />
+                <button type="button" onClick={() => removeStaff(i)} className="p-2 text-red-600 hover:bg-red-50 rounded-lg" title="Remove">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addStaff}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg"
+            >
+              <Plus className="w-4 h-4" /> Add staff
+            </button>
+            <p className="text-xs text-gray-500 mt-1">Callers can ask to speak to these people by name; the AI will transfer the call.</p>
           </div>
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
