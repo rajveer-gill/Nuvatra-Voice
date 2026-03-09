@@ -280,6 +280,7 @@ def add_sentence_pauses(text: str) -> str:
         return text
     return re.sub(r"([.!?])\s*", r"\1\n\n", text).strip()
 
+print("[INIT] Initializing Twilio...", flush=True)
 # Initialize Twilio (optional - only if credentials are provided)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -309,6 +310,7 @@ except ImportError:
     get_bearer_token = lambda r: None
     verify_clerk_token = lambda t: ("", None)
 
+print("[INIT] Initializing database...", flush=True)
 # Database: PostgreSQL when DATABASE_URL is set (production)
 USE_DB = False
 try:
@@ -369,6 +371,7 @@ try:
 except (ImportError, Exception) as e:
     if os.getenv("DATABASE_URL"):
         print(f"[WARN] Database init failed (using in-memory storage): {e}")
+print(f"[INIT] Database ready (USE_DB={USE_DB})", flush=True)
 
 def audit_log(
     actor_type: str,

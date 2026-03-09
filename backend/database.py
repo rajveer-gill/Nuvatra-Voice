@@ -42,7 +42,7 @@ def _get_conn():
         url = os.getenv("DATABASE_URL")
         if not url:
             return None
-        _conn = psycopg2.connect(url)
+        _conn = psycopg2.connect(url, connect_timeout=10)
     return _conn
 
 def db_ping() -> bool:
@@ -66,7 +66,8 @@ def init_db() -> bool:
         return False
     try:
         import psycopg2
-        conn = psycopg2.connect(url)
+        print("[DB] Connecting to PostgreSQL...")
+        conn = psycopg2.connect(url, connect_timeout=10)
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS appointments (
