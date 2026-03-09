@@ -287,6 +287,11 @@ export default function Settings() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
+      {message && (
+        <div className={`rounded-lg px-4 py-3 text-sm ${message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+          {message.text}
+        </div>
+      )}
       {/* AI Receptionist Identity */}
       <div className="bg-white rounded-2xl shadow-xl p-8">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
@@ -595,12 +600,6 @@ export default function Settings() {
             />
           </div>
         </div>
-
-        {message && (
-          <p className={`mt-4 text-sm ${message.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
-            {message.text}
-          </p>
-        )}
 
         <div className="mt-6 flex items-center gap-3">
           <button
