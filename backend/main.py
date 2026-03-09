@@ -143,16 +143,16 @@ async def keep_client_warm():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Fire-and-forget: pre-warm runs AFTER the server binds to the port
+    # Init DB first (in thread so it doesn't block the event loop), then pre-warm OpenAI
+    db_task = asyncio.create_task(asyncio.to_thread(_init_db_background))
     warm_task = asyncio.create_task(pre_warm_openai())
     keep_warm_task = asyncio.create_task(keep_client_warm())
     yield
-    warm_task.cancel()
-    keep_warm_task.cancel()
-    for t in (warm_task, keep_warm_task):
+    for t in (db_task, warm_task, keep_warm_task):
+        t.cancel()
         try:
             await t
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception):
             pass
 
 
@@ -310,9 +310,10 @@ except ImportError:
     get_bearer_token = lambda r: None
     verify_clerk_token = lambda t: ("", None)
 
-print("[INIT] Initializing database...", flush=True)
 # Database: PostgreSQL when DATABASE_URL is set (production)
+# Import functions eagerly (no network); init_db() is deferred to background
 USE_DB = False
+_db_imported = False
 try:
     from database import (
         init_db,
@@ -367,11 +368,21 @@ try:
         db_tenant_list_all,
         db_ping,
     )
-    USE_DB = init_db()
-except (ImportError, Exception) as e:
-    if os.getenv("DATABASE_URL"):
-        print(f"[WARN] Database init failed (using in-memory storage): {e}")
-print(f"[INIT] Database ready (USE_DB={USE_DB})", flush=True)
+    _db_imported = True
+    print("[INIT] Database module imported (connection deferred)", flush=True)
+except ImportError as e:
+    print(f"[WARN] Database module import failed: {e}", flush=True)
+
+def _init_db_background():
+    """Initialize DB connection in background thread so server starts immediately."""
+    global USE_DB
+    if not _db_imported or not os.getenv("DATABASE_URL"):
+        return
+    try:
+        USE_DB = init_db()
+        print(f"[INIT] Database ready (USE_DB={USE_DB})", flush=True)
+    except Exception as e:
+        print(f"[WARN] Database init failed (using in-memory): {e}", flush=True)
 
 def audit_log(
     actor_type: str,
