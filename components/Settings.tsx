@@ -125,6 +125,7 @@ export default function Settings() {
   const [receptionistName, setReceptionistName] = useState('')
   const [aiPhone, setAiPhone] = useState('')
   const [portalLoading, setPortalLoading] = useState(false)
+  const [billingError, setBillingError] = useState<string | null>(null)
   const [form, setForm] = useState({
     name: '',
     hours: '',
@@ -261,17 +262,18 @@ export default function Settings() {
 
   const openBillingPortal = async () => {
     setPortalLoading(true)
+    setBillingError(null)
     try {
       const { data } = await api.post<{ url: string }>('/api/create-portal-session')
       if (data?.url) {
         window.location.href = data.url
         return
       }
-      setMessage({ type: 'error', text: 'Could not open billing portal' })
+      setBillingError('Could not open billing portal')
     } catch (err: unknown) {
       const detail =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      setMessage({ type: 'error', text: detail || 'Could not open billing portal' })
+      setBillingError(detail || 'Could not open billing portal')
     } finally {
       setPortalLoading(false)
     }
@@ -443,6 +445,9 @@ export default function Settings() {
           <CreditCard className="w-4 h-4" />
           {portalLoading ? 'Opening…' : 'Manage subscription'}
         </button>
+        {billingError && (
+          <p className="mt-3 text-sm text-red-600">{billingError}</p>
+        )}
         <p className="mt-4 text-xs text-gray-500">
           To cancel your subscription, use &quot;Manage subscription&quot; above; cancellation is available in the billing portal.
         </p>
