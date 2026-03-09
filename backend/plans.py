@@ -32,16 +32,40 @@ def _normalize_plan(raw: Optional[str]) -> str:
     return "starter" if p == "free" else p
 
 
+def _is_trial_active(tenant: Optional[dict]) -> bool:
+    """Check if the tenant has an active trial."""
+    if not tenant:
+        return False
+    status = (tenant.get("subscription_status") or "").lower()
+    if status != "trialing":
+        return False
+    trial_ends_at = tenant.get("trial_ends_at")
+    if not trial_ends_at:
+        return True
+    try:
+        from datetime import datetime, timezone
+        trial_dt = datetime.fromisoformat(
+            trial_ends_at.replace("Z", "+00:00")
+        ) if isinstance(trial_ends_at, str) else trial_ends_at
+        if trial_dt.tzinfo is None:
+            trial_dt = trial_dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) < trial_dt
+    except Exception:
+        return False
+
+
 def get_plan_limits(tenant: Optional[dict]) -> dict:
-    """Return plan limits dict. Accepts tenant or None (returns starter limits)."""
+    """Return plan limits dict. Trial users get full pro-level access."""
     plan = _normalize_plan(tenant.get("plan") if tenant else None)
+    effective = "pro" if _is_trial_active(tenant) else plan
     return {
         "plan": plan,
-        "minutes_cap": PLAN_MINUTES.get(plan, 500),
-        "staff_max": PLAN_STAFF_MAX.get(plan, 1),
-        "call_log_days": PLAN_CALL_LOG_DAYS.get(plan, 30),
-        "has_reminders": PLAN_HAS_REMINDERS.get(plan, False),
-        "has_lead_capture": PLAN_HAS_LEAD_CAPTURE.get(plan, False),
-        "sms_automations_max": PLAN_SMS_AUTOMATIONS.get(plan, 0),
-        "has_export": PLAN_HAS_EXPORT.get(plan, False),
+        "minutes_cap": PLAN_MINUTES.get(effective, 500),
+        "staff_max": PLAN_STAFF_MAX.get(effective, 1),
+        "call_log_days": PLAN_CALL_LOG_DAYS.get(effective, 30),
+        "has_reminders": PLAN_HAS_REMINDERS.get(effective, False),
+        "has_lead_capture": PLAN_HAS_LEAD_CAPTURE.get(effective, False),
+        "sms_automations_max": PLAN_SMS_AUTOMATIONS.get(effective, 0),
+        "has_export": PLAN_HAS_EXPORT.get(effective, False),
+        "is_trial": _is_trial_active(tenant),
     }
