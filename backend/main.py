@@ -318,6 +318,14 @@ greeting_audio_cache = None
 got_it_audio_cache = None  # Pre-cached "Got it, one moment" message
 greeting_audio_url = None
 
+
+def add_sentence_pauses(text: str) -> str:
+    """Insert short pauses after periods, exclamation points, and question marks so sentences don't run together."""
+    if not text or not text.strip():
+        return text
+    return re.sub(r"([.!?])\s*", r"\1\n\n", text).strip()
+
+
 def generate_greeting_audio_sync():
     """Synchronously generate greeting audio on startup"""
     global greeting_audio_cache
@@ -618,13 +626,6 @@ def get_tts_speed() -> float:
         return max(0.25, min(4.0, s))
     except (TypeError, ValueError):
         return 1.0
-
-def add_sentence_pauses(text: str) -> str:
-    """Insert short pauses after periods, exclamation points, and question marks so sentences don't run together."""
-    if not text or not text.strip():
-        return text
-    # After . ! ? (optionally followed by space) insert two newlines so TTS adds a brief pause
-    return re.sub(r"([.!?])\s*", r"\1\n\n", text).strip()
 
 def get_greeting_text() -> str:
     """Greeting for phone (uses client config if set)."""
