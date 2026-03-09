@@ -359,9 +359,7 @@ def generate_greeting_audio_sync():
 try:
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     print("DEBUG: OpenAI client created successfully!")
-
-    # Generate greeting audio immediately after client creation
-    generate_greeting_audio_sync()
+    # Greeting audio is generated in lifespan via pre_warm_openai() so we don't block port binding
 except Exception as e:
     print(f"DEBUG: ERROR creating OpenAI client: {e}")
     print(f"DEBUG: Error type: {type(e)}")
