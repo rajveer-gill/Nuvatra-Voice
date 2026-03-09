@@ -618,6 +618,26 @@ def _ensure_db_ready():
     except Exception:
         pass
 
+def _clerk_fetch_user_tenant_id(clerk_user_id: str) -> Optional[str]:
+    """Call Clerk Backend API to get tenant_id from the user's public_metadata.
+    Used as a fallback when the JWT doesn't contain public_metadata."""
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if not clerk_secret:
+        return None
+    try:
+        import httpx
+        resp = httpx.get(
+            f"https://api.clerk.com/v1/users/{clerk_user_id}",
+            headers={"Authorization": f"Bearer {clerk_secret}"},
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return (data.get("public_metadata") or {}).get("tenant_id")
+    except Exception as e:
+        print(f"[Auth] Clerk user lookup failed for {clerk_user_id}: {e}")
+    return None
+
 def require_tenant(request: Request):
     """
     Dependency: multi-tenant mode requires Bearer token; single-tenant uses CLIENT_ID env.
@@ -639,6 +659,15 @@ def require_tenant(request: Request):
             db_tenant_member_add(user_id, tenant["id"])
     if not tenant and USE_DB:
         tenant = db_tenant_get_for_user(user_id)
+    if not tenant and USE_DB:
+        # JWT didn't have metadata and user isn't in tenant_members yet.
+        # Fetch tenant_id from Clerk Backend API (one-time for new invites).
+        api_tenant_id = _clerk_fetch_user_tenant_id(user_id)
+        if api_tenant_id:
+            tenant = db_tenant_get_by_id(api_tenant_id)
+            if tenant:
+                db_tenant_member_add(user_id, tenant["id"])
+                print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via Clerk API")
     if not tenant:
         audit_log("user", "auth_failure", actor_id=user_id, details={"reason": "no_tenant"}, request=request)
         raise HTTPException(status_code=403, detail="No tenant assigned to your account")
