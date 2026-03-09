@@ -268,8 +268,10 @@ export default function Settings() {
         return
       }
       setMessage({ type: 'error', text: 'Could not open billing portal' })
-    } catch {
-      setMessage({ type: 'error', text: 'Could not open billing portal' })
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setMessage({ type: 'error', text: detail || 'Could not open billing portal' })
     } finally {
       setPortalLoading(false)
     }
