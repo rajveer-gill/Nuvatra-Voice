@@ -335,11 +335,15 @@ def generate_greeting_audio_sync():
             greeting_text = get_greeting_text()
         except NameError:
             greeting_text = "Thank you for calling. How can I help you today?"
+        try:
+            tts_speed = get_tts_speed()
+        except NameError:
+            tts_speed = 1.0
         greeting_audio = client.audio.speech.create(
             model="tts-1-hd",  # HD model for best quality
             voice="fable",  # Same voice as rest of conversation
             input=add_sentence_pauses(greeting_text),
-            speed=get_tts_speed()
+            speed=tts_speed
         )
         greeting_audio_cache = greeting_audio.content
         print(f"[OK] Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
