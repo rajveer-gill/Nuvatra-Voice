@@ -1,13 +1,4 @@
-# ============================================
-# VERSION MARKER: 2025-12-08-07:10 - PINNED VERSIONS
-# If you see this, Railway is running NEW code
-# ============================================
-print("=" * 60)
-print("DEBUG: NEW CODE LOADED - Version 2025-12-08-07:10")
-print("DEBUG: Using openai==1.40.0 and httpx==0.27.0")
-print("=" * 60)
 import sys
-sys.stdout.flush()
 
 from fastapi import FastAPI, HTTPException, Request, Form, Depends
 from contextlib import asynccontextmanager
@@ -97,33 +88,44 @@ else:
 
 
 async def pre_warm_openai():
-    """Pre-warm OpenAI client and generate greeting audio"""
+    """Pre-warm OpenAI client and generate greeting audio. Runs in background so server can bind immediately."""
     global greeting_audio_cache, got_it_audio_cache
     try:
+        _ensure_openai_client()
         print("[WARM] Pre-warming OpenAI client...")
-        _ = client.chat.completions.create(
+        await asyncio.to_thread(
+            client.chat.completions.create,
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=5,
-            temperature=0
+            temperature=0,
         )
         print("[OK] OpenAI client pre-warmed successfully")
         print("[TTS] Generating greeting audio with OpenAI TTS...")
-        greeting_text = add_sentence_pauses(get_greeting_text())
-        greeting_audio = client.audio.speech.create(
+        try:
+            greeting_text = add_sentence_pauses(get_greeting_text())
+        except NameError:
+            greeting_text = "Thank you for calling. How can I help you today?"
+        try:
+            tts_speed = get_tts_speed()
+        except NameError:
+            tts_speed = 1.0
+        greeting_audio = await asyncio.to_thread(
+            client.audio.speech.create,
             model="tts-1-hd",
             voice="fable",
             input=greeting_text,
-            speed=get_tts_speed()
+            speed=tts_speed,
         )
         greeting_audio_cache = greeting_audio.content
         print(f"[OK] Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
         print("[TTS] Generating 'Got it, one moment' audio...")
-        got_it_audio = client.audio.speech.create(
+        got_it_audio = await asyncio.to_thread(
+            client.audio.speech.create,
             model="tts-1-hd",
             voice="fable",
             input=add_sentence_pauses("Got it, one moment."),
-            speed=get_tts_speed()
+            speed=tts_speed,
         )
         got_it_audio_cache = got_it_audio.content
         print(f"[OK] 'Got it' audio generated and cached ({len(got_it_audio_cache)} bytes)")
@@ -133,25 +135,25 @@ async def pre_warm_openai():
 async def keep_client_warm():
     """Background task to keep OpenAI client warm"""
     while True:
-        await asyncio.sleep(120)  # Every 2 minutes
+        await asyncio.sleep(120)
         try:
-            pre_warm_openai()
+            await pre_warm_openai()
         except Exception as e:
             print(f"[WARN] Keep-warm error (non-critical): {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Pre-warm the client
-    await pre_warm_openai()
-    # Start background task to keep it warm
-    warm_task = asyncio.create_task(keep_client_warm())
+    # Fire-and-forget: pre-warm runs AFTER the server binds to the port
+    warm_task = asyncio.create_task(pre_warm_openai())
+    keep_warm_task = asyncio.create_task(keep_client_warm())
     yield
-    # Shutdown: Cancel background task
     warm_task.cancel()
-    try:
-        await warm_task
-    except asyncio.CancelledError:
-        pass
+    keep_warm_task.cancel()
+    for t in (warm_task, keep_warm_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Nuvatra Voice API", lifespan=lifespan)
@@ -240,77 +242,7 @@ if os.getenv("DEBUG_CORS", "").strip() == "1":
         return await call_next(request)
     _debug_log_payload({"event": "startup", "allowed_origins": allowed_origins})
 
-# Initialize OpenAI
-# Debug: Check installed versions BEFORE creating client
-print("=" * 50)
-print("DEBUG: Starting OpenAI client initialization...")
-print("=" * 50)
-
-# Check which requirements.txt files exist
-import pathlib
-root_req = pathlib.Path("/app/requirements.txt")
-backend_req = pathlib.Path("/app/backend/requirements.txt")
-current_req = _backend_dir / "requirements.txt"
-print(f"DEBUG: Checking requirements.txt files:")
-print(f"  /app/requirements.txt exists: {root_req.exists()}")
-print(f"  /app/backend/requirements.txt exists: {backend_req.exists()}")
-print(f"  {current_req} exists: {current_req.exists()}")
-if root_req.exists():
-    print(f"  /app/requirements.txt content (first 5 lines):")
-    with open(root_req, 'r') as f:
-        for i, line in enumerate(f):
-            if i < 5:
-                print(f"    {line.strip()}")
-if backend_req.exists():
-    print(f"  /app/backend/requirements.txt content (first 5 lines):")
-    with open(backend_req, 'r') as f:
-        for i, line in enumerate(f):
-            if i < 5:
-                print(f"    {line.strip()}")
-print("=" * 50)
-
-try:
-    import httpx
-    import openai
-    import sys
-    import subprocess
-    print(f"DEBUG: Python version: {sys.version}")
-    print(f"DEBUG: httpx version: {httpx.__version__}")
-    print(f"DEBUG: openai version: {openai.__version__}")
-    print(f"DEBUG: httpx location: {httpx.__file__}")
-    print(f"DEBUG: openai location: {openai.__file__}")
-    
-    # Check what pip actually installed
-    try:
-        result = subprocess.run(['pip', 'list'], capture_output=True, text=True, timeout=5)
-        print("DEBUG: Installed packages (pip list):")
-        for line in result.stdout.split('\n')[:20]:  # First 20 lines
-            if 'openai' in line.lower() or 'httpx' in line.lower():
-                print(f"  {line}")
-    except Exception as e:
-        print(f"DEBUG: Could not run pip list: {e}")
-    
-    # Check httpx.Client signature
-    import inspect
-    try:
-        sig = inspect.signature(httpx.Client.__init__)
-        print(f"DEBUG: httpx.Client.__init__ signature: {sig}")
-        print(f"DEBUG: httpx.Client.__init__ parameters: {list(sig.parameters.keys())}")
-    except Exception as e:
-        print(f"DEBUG: Error inspecting httpx.Client: {e}")
-    
-    # Check if 'proxies' is in the signature
-    if hasattr(httpx.Client.__init__, '__code__'):
-        params = inspect.signature(httpx.Client.__init__).parameters
-        has_proxies = 'proxies' in params
-        print(f"DEBUG: httpx.Client.__init__ has 'proxies' parameter: {has_proxies}")
-    
-except Exception as e:
-    print(f"DEBUG: Error checking versions: {e}")
-    import traceback
-    traceback.print_exc()
-
-print("DEBUG: About to create OpenAI client...")
+print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
 
 # Cache for pre-generated greeting audio
@@ -318,56 +250,35 @@ greeting_audio_cache = None
 got_it_audio_cache = None  # Pre-cached "Got it, one moment" message
 greeting_audio_url = None
 
+# Lazy OpenAI client — created on first use so import doesn't block port binding
+_openai_client = None
+
+class _LazyOpenAIClient:
+    """Proxy that creates the real OpenAI client on first attribute access."""
+    def __getattr__(self, name):
+        global _openai_client
+        if _openai_client is None:
+            print("[INIT] Creating OpenAI client (lazy)...")
+            _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            print("[OK] OpenAI client created successfully")
+        return getattr(_openai_client, name)
+
+client = _LazyOpenAIClient()
+
+def _ensure_openai_client():
+    """Eagerly create the client if not yet initialized."""
+    global _openai_client
+    if _openai_client is None:
+        print("[INIT] Creating OpenAI client...")
+        _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        print("[OK] OpenAI client created successfully")
+
 
 def add_sentence_pauses(text: str) -> str:
     """Insert short pauses after periods, exclamation points, and question marks so sentences don't run together."""
     if not text or not text.strip():
         return text
     return re.sub(r"([.!?])\s*", r"\1\n\n", text).strip()
-
-
-def generate_greeting_audio_sync():
-    """Synchronously generate greeting audio on startup"""
-    global greeting_audio_cache
-    try:
-        print("[TTS] Generating greeting audio with OpenAI TTS (fable voice)...")
-        try:
-            greeting_text = get_greeting_text()
-        except NameError:
-            greeting_text = "Thank you for calling. How can I help you today?"
-        try:
-            tts_speed = get_tts_speed()
-        except NameError:
-            tts_speed = 1.0
-        greeting_audio = client.audio.speech.create(
-            model="tts-1-hd",  # HD model for best quality
-            voice="fable",  # Same voice as rest of conversation
-            input=add_sentence_pauses(greeting_text),
-            speed=tts_speed
-        )
-        greeting_audio_cache = greeting_audio.content
-        print(f"[OK] Greeting audio generated and cached ({len(greeting_audio_cache)} bytes)")
-        return True
-    except Exception as e:
-        print(f"[WARN] Failed to generate greeting audio on startup: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-# Try to create client with detailed error handling
-try:
-    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    print("DEBUG: OpenAI client created successfully!")
-    # Greeting audio is generated in lifespan via pre_warm_openai() so we don't block port binding
-except Exception as e:
-    print(f"DEBUG: ERROR creating OpenAI client: {e}")
-    print(f"DEBUG: Error type: {type(e)}")
-    import traceback
-    print("DEBUG: Full traceback:")
-    traceback.print_exc()
-    sys.stdout.flush()
-    raise  # Re-raise to see the error in logs
 
 # Initialize Twilio (optional - only if credentials are provided)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
