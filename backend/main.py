@@ -602,6 +602,22 @@ class TTSRequest(BaseModel):
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
     speed: Optional[float] = None  # OpenAI 0.25–4.0; if omitted uses business config
 
+def _ensure_db_ready():
+    """Block briefly to let background init_db finish if it hasn't yet."""
+    global USE_DB
+    if USE_DB or not _db_imported or not os.getenv("DATABASE_URL"):
+        return
+    import time
+    for _ in range(20):
+        if USE_DB:
+            return
+        time.sleep(0.5)
+    # Last resort: try init synchronously
+    try:
+        USE_DB = init_db()
+    except Exception:
+        pass
+
 def require_tenant(request: Request):
     """
     Dependency: multi-tenant mode requires Bearer token; single-tenant uses CLIENT_ID env.
@@ -609,17 +625,18 @@ def require_tenant(request: Request):
     """
     jwks_url = os.getenv("CLERK_JWKS_URL", "").strip()
     if not jwks_url:
-        # Single-tenant: use CLIENT_ID env; database._client_id() falls back to it
         return None
-    # Multi-tenant: require Bearer token
     token = get_bearer_token(request)
     if not token:
         audit_log("user", "auth_failure", details={"reason": "no_token"}, request=request)
         raise HTTPException(status_code=401, detail="Authorization required")
     user_id, tenant_id_from_meta = verify_clerk_token(token)
+    _ensure_db_ready()
     tenant = None
     if tenant_id_from_meta and USE_DB:
         tenant = db_tenant_get_by_id(tenant_id_from_meta)
+        if tenant and user_id:
+            db_tenant_member_add(user_id, tenant["id"])
     if not tenant and USE_DB:
         tenant = db_tenant_get_for_user(user_id)
     if not tenant:
