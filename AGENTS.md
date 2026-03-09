@@ -60,6 +60,12 @@ When a tenant is removed via the admin page, the backend:
 
 Users are **not banned** — they can be re-invited later. The dashboard page gates all tabs behind a tenant check; removed users see a "No Access" screen.
 
+### End-to-end verification
+
+For hello-world / smoke-test validation, use the production deployments rather than only local servers:
+- **Frontend**: `https://nuvatra-voice.vercel.app/`
+- **Backend**: `https://nuvatra-voice.onrender.com/` (health check at `/api/health`)
+
 ### Gotchas
 
 - The backend's `main.py` hard-crashes at import time if `OPENAI_API_KEY` is unset. Always provide at least a placeholder in `backend/.env`.
