@@ -6,6 +6,7 @@ import { useApiClient } from '@/lib/api'
 
 const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const
 const VOICE_SAMPLE_TEXT = "Hi there! Thanks for calling. How can I help you today?"
+const VOICE_SAMPLE_BASE = '/voice-samples'
 
 const SPEECH_SPEED_MIN = 0.25
 const SPEECH_SPEED_MAX = 4
@@ -143,6 +144,14 @@ export default function Settings() {
   const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
   const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
 
+  // Preload static voice samples so first play is instant
+  useEffect(() => {
+    VOICES.forEach((v) => {
+      const a = new Audio()
+      a.src = `${VOICE_SAMPLE_BASE}/${v}.mp3`
+    })
+  }, [])
+
   useEffect(() => {
     Promise.all([
       api.get('/api/business-info'),
@@ -201,24 +210,46 @@ export default function Settings() {
       audioRef.current = null
     }
     setPreviewing(v)
+
+    const cleanup = () => {
+      setPreviewing(null)
+      audioRef.current = null
+    }
+
+    const staticUrl = `${VOICE_SAMPLE_BASE}/${v}.mp3`
+    const audio = new Audio(staticUrl)
+    audio.playbackRate = speechSpeed
+    audioRef.current = audio
+
+    const fallbackToApi = async () => {
+      audioRef.current = null
+      try {
+        const res = await api.post('/api/text-to-speech', { text: VOICE_SAMPLE_TEXT, voice: v, speed: speechSpeed }, { responseType: 'blob' })
+        const url = URL.createObjectURL(res.data)
+        const apiAudio = new Audio(url)
+        audioRef.current = apiAudio
+        apiAudio.onended = () => {
+          setPreviewing(null)
+          URL.revokeObjectURL(url)
+          audioRef.current = null
+        }
+        apiAudio.onerror = () => {
+          setPreviewing(null)
+          URL.revokeObjectURL(url)
+          audioRef.current = null
+        }
+        await apiAudio.play()
+      } catch {
+        setPreviewing(null)
+      }
+    }
+
+    audio.onended = cleanup
+    audio.onerror = () => fallbackToApi()
     try {
-      const res = await api.post('/api/text-to-speech', { text: VOICE_SAMPLE_TEXT, voice: v, speed: speechSpeed }, { responseType: 'blob' })
-      const url = URL.createObjectURL(res.data)
-      const audio = new Audio(url)
-      audioRef.current = audio
-      audio.onended = () => {
-        setPreviewing(null)
-        URL.revokeObjectURL(url)
-        audioRef.current = null
-      }
-      audio.onerror = () => {
-        setPreviewing(null)
-        URL.revokeObjectURL(url)
-        audioRef.current = null
-      }
       await audio.play()
     } catch {
-      setPreviewing(null)
+      fallbackToApi()
     }
   }
 

@@ -21,7 +21,6 @@ import time
 import json
 from pathlib import Path
 import io
-import re
 from urllib.parse import quote
 import base64
 # Twilio imports (optional - only needed for phone integration)
@@ -41,6 +40,12 @@ try:
     from plans import get_plan_limits
 except ImportError:
     get_plan_limits = None  # type: ignore
+
+try:
+    from voice_preview import add_sentence_pauses
+except ImportError:
+    def add_sentence_pauses(text: str) -> str:
+        return (text or "").strip()
 
 try:
     import stripe
@@ -273,12 +278,6 @@ def _ensure_openai_client():
         _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         print("[OK] OpenAI client created successfully")
 
-
-def add_sentence_pauses(text: str) -> str:
-    """Insert short pauses after periods, exclamation points, and question marks so sentences don't run together."""
-    if not text or not text.strip():
-        return text
-    return re.sub(r"([.!?])\s*", r"\1\n\n", text).strip()
 
 print("[INIT] Initializing Twilio...", flush=True)
 # Initialize Twilio (optional - only if credentials are provided)
