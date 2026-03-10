@@ -2243,8 +2243,11 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 @app.get("/api/business-info")
-async def api_get_business_info(_: None = Depends(require_active_subscription)):
-    return get_business_info()
+async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_subscription)):
+    info = get_business_info()
+    if not info.get("phone") and tenant:
+        info["phone"] = tenant.get("twilio_phone_number") or ""
+    return info
 
 class StaffMember(BaseModel):
     name: str = ""
