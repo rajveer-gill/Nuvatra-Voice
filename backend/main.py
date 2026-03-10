@@ -535,6 +535,12 @@ def get_business_info() -> dict:
     """Get business config for current request (multi-tenant) or env CLIENT_ID (single-tenant)."""
     cfg = load_client_config()
     if cfg:
+        if not cfg.get("phone") and USE_DB:
+            cid = get_db_client_id()
+            if cid:
+                tenant = db_tenant_get_by_client_id(cid)
+                if tenant:
+                    cfg["phone"] = tenant.get("twilio_phone_number") or ""
         return cfg
     tenant_info = _default_business_info_for_tenant()
     if tenant_info:
