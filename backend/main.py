@@ -2168,7 +2168,21 @@ async def create_portal_session(tenant: Optional[dict] = Depends(require_tenant)
         raise HTTPException(status_code=403, detail="Tenant required")
     stripe_customer_id = tenant.get("stripe_customer_id")
     if not stripe_customer_id:
-        raise HTTPException(status_code=400, detail="No billing account. Subscribe to a plan first.")
+        # Trial users may not have a Stripe customer yet; create one so they can use the portal
+        secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if not secret:
+            raise HTTPException(status_code=503, detail="Stripe not configured")
+        stripe.api_key = secret
+        try:
+            cust = stripe.Customer.create(
+                metadata={"tenant_id": str(tenant.get("id")), "client_id": tenant.get("client_id", "")},
+                email=None,
+            )
+            stripe_customer_id = cust.id
+            db_tenant_update_subscription(tenant.get("id"), stripe_customer_id=stripe_customer_id)
+        except Exception as e:
+            logger.error("Stripe customer create failed for portal: %s", e)
+            raise HTTPException(status_code=500, detail="Could not create billing account")
     secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not secret:
         raise HTTPException(status_code=503, detail="Stripe not configured")
