@@ -79,7 +79,7 @@ if not logger.handlers:
 
 # #region agent log helper
 def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_id: str = "pre-fix") -> None:
-    \"\"\"Append a single NDJSON debug log line for this debug session.\"\"\"
+    """Append a single NDJSON debug log line for this debug session."""
     try:
         log_path = PROJECT_ROOT / "debug-1f01f9.log"
     except NameError:
