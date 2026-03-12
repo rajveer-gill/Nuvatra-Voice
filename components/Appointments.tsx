@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Calendar, Plus, RefreshCw, Clock, Mail, Phone, Check, X, Copy } from 'lucide-react'
+import { Calendar, Plus, RefreshCw, Clock, Mail, Phone, Check, X } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 
 export interface Appointment {
@@ -17,35 +17,27 @@ export interface Appointment {
   source?: string
 }
 
-const STATUS_OPTIONS = ['pending', 'pending_review', 'confirmed', 'accepted', 'completed', 'cancelled', 'rejected']
 const STATUS_LABELS: Record<string, string> = {
-  pending: 'Pending',
-  pending_review: 'To review',
-  confirmed: 'Confirmed',
+  pending: 'Needs response',
+  pending_review: 'Needs response',
+  confirmed: 'Accepted',
   accepted: 'Accepted',
-  completed: 'Completed',
-  cancelled: 'Cancelled',
-  rejected: 'Rejected',
+  completed: 'Accepted',
+  cancelled: 'Declined',
+  rejected: 'Declined',
 }
 const STATUS_CLASSES: Record<string, string> = {
   pending: 'bg-amber-100 text-amber-800',
   pending_review: 'bg-amber-100 text-amber-800',
-  confirmed: 'bg-blue-100 text-blue-800',
+  confirmed: 'bg-green-100 text-green-800',
   accepted: 'bg-green-100 text-green-800',
   completed: 'bg-green-100 text-green-800',
   cancelled: 'bg-gray-100 text-gray-600',
   rejected: 'bg-red-100 text-red-800',
 }
 
-function copyBlock(apt: Appointment): string {
-  return [
-    `Name: ${apt.name}`,
-    `Phone: ${apt.phone || '—'}`,
-    `Email: ${apt.email || '—'}`,
-    `Date: ${apt.date}`,
-    `Time: ${apt.time || '—'}`,
-    `Service/Reason: ${apt.reason || '—'}`,
-  ].join('\n')
+function needsResponse(status: string): boolean {
+  return status === 'pending' || status === 'pending_review'
 }
 
 export default function Appointments() {
@@ -86,7 +78,9 @@ export default function Appointments() {
   }, [api])
 
   const filtered = appointments.filter((a) => {
-    if (statusFilter !== 'all' && a.status !== statusFilter) return false
+    if (statusFilter === 'needs_response' && !needsResponse(a.status)) return false
+    if (statusFilter === 'accepted' && !['accepted', 'confirmed', 'completed'].includes(a.status)) return false
+    if (statusFilter === 'declined' && !['rejected', 'cancelled'].includes(a.status)) return false
     if (dateFrom && a.date < dateFrom) return false
     if (dateTo && a.date > dateTo) return false
     return true
@@ -118,33 +112,6 @@ export default function Appointments() {
     }
   }
 
-  const handleStatusChange = async (id: number, newStatus: string) => {
-    setUpdatingId(id)
-    try {
-      await api.patch(`/api/appointments/${id}`, { status: newStatus })
-      await fetchAppointments()
-    } catch (e) {
-      console.error('Failed to update appointment', e)
-    } finally {
-      setUpdatingId(null)
-    }
-  }
-
-  const fromReceptionist = appointments.filter(
-    (a) => (a.source === 'receptionist') && (a.status === 'pending_review' || a.status === 'pending')
-  )
-
-  const handleCopy = async (apt: Appointment) => {
-    try {
-      await navigator.clipboard.writeText(copyBlock(apt))
-      setAcceptRejectMsg({ id: apt.id, msg: 'Copied to clipboard' })
-      setTimeout(() => setAcceptRejectMsg(null), 2000)
-    } catch {
-      setAcceptRejectMsg({ id: apt.id, msg: 'Copy failed' })
-      setTimeout(() => setAcceptRejectMsg(null), 2000)
-    }
-  }
-
   const handleAccept = async (id: number) => {
     setUpdatingId(id)
     setAcceptRejectMsg(null)
@@ -168,11 +135,11 @@ export default function Appointments() {
     try {
       await api.post(`/api/appointments/${id}/reject`)
       await fetchAppointments()
-      setAcceptRejectMsg({ id, msg: "Rejected; we've asked them for other times." })
+      setAcceptRejectMsg({ id, msg: 'Declined.' })
       setTimeout(() => setAcceptRejectMsg(null), 3000)
     } catch (e) {
       console.error('Failed to reject', e)
-      setAcceptRejectMsg({ id, msg: 'Reject failed' })
+      setAcceptRejectMsg({ id, msg: 'Decline failed' })
       setTimeout(() => setAcceptRejectMsg(null), 3000)
     } finally {
       setUpdatingId(null)
@@ -225,9 +192,9 @@ export default function Appointments() {
               className="rounded border border-gray-300 px-3 py-1.5 text-sm"
             >
               <option value="all">All</option>
-              {STATUS_OPTIONS.map((s) => (
-                <option key={s} value={s}>{STATUS_LABELS[s] || s}</option>
-              ))}
+              <option value="needs_response">Needs response</option>
+              <option value="accepted">Accepted</option>
+              <option value="declined">Declined</option>
             </select>
           </div>
           <div className="flex items-center gap-2">
@@ -336,55 +303,6 @@ export default function Appointments() {
           </form>
         )}
 
-        {/* From receptionist: copy-paste for Zenoti + Accept / Reject */}
-        {fromReceptionist.length > 0 && (
-          <div className="mb-6 p-4 border border-amber-200 rounded-lg bg-amber-50/50">
-            <h3 className="text-lg font-semibold text-gray-900 mb-3">From receptionist (review for Zenoti)</h3>
-            <p className="text-sm text-gray-600 mb-4">Compare with Zenoti; copy details to paste into Zenoti, then Accept or Reject.</p>
-            <div className="space-y-4">
-              {fromReceptionist.map((apt) => (
-                <div key={apt.id} className="bg-white rounded-lg border border-gray-200 p-4 flex flex-wrap items-start gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-gray-900">{apt.name}</div>
-                    <div className="text-sm text-gray-600">{apt.date} at {apt.time || '—'} · {apt.reason || '—'}</div>
-                    <pre className="mt-2 p-2 bg-gray-50 rounded text-xs text-gray-700 whitespace-pre-wrap font-sans">
-                      {copyBlock(apt)}
-                    </pre>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleCopy(apt)}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-gray-300 bg-white text-gray-700 text-sm font-medium hover:bg-gray-50"
-                    >
-                      <Copy className="w-4 h-4" /> Copy
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleAccept(apt.id)}
-                      disabled={updatingId === apt.id}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50"
-                    >
-                      <Check className="w-4 h-4" /> Accept
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleReject(apt.id)}
-                      disabled={updatingId === apt.id}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 disabled:opacity-50"
-                    >
-                      <X className="w-4 h-4" /> Reject
-                    </button>
-                    {acceptRejectMsg?.id === apt.id && (
-                      <span className="text-sm text-gray-600">{acceptRejectMsg.msg}</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* List */}
         {filtered.length === 0 ? (
           <div className="text-center py-12 text-gray-500">
@@ -449,23 +367,14 @@ export default function Appointments() {
                       </span>
                     </td>
                     <td className="py-3 px-3">
-                      {(apt as Appointment & { source?: string }).source === 'receptionist' && (apt.status === 'pending_review' || apt.status === 'pending') ? (
+                      {needsResponse(apt.status) ? (
                         <div className="flex flex-wrap items-center gap-2">
-                          <button type="button" onClick={() => handleCopy(apt)} className="text-sm px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Copy</button>
-                          <button type="button" onClick={() => handleAccept(apt.id)} disabled={updatingId === apt.id} className="text-sm px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50">Accept</button>
-                          <button type="button" onClick={() => handleReject(apt.id)} disabled={updatingId === apt.id} className="text-sm px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">Reject</button>
+                          <button type="button" onClick={() => handleAccept(apt.id)} disabled={updatingId === apt.id} className="text-sm px-3 py-1.5 rounded font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50">Accept</button>
+                          <button type="button" onClick={() => handleReject(apt.id)} disabled={updatingId === apt.id} className="text-sm px-3 py-1.5 rounded font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">Decline</button>
+                          {acceptRejectMsg?.id === apt.id && <span className="text-xs text-gray-500">{acceptRejectMsg.msg}</span>}
                         </div>
                       ) : (
-                      <select
-                        value={apt.status}
-                        onChange={(e) => handleStatusChange(apt.id, e.target.value)}
-                        disabled={updatingId === apt.id}
-                        className="text-sm rounded border border-gray-300 py-1 px-2 disabled:opacity-50"
-                      >
-                        {STATUS_OPTIONS.map((s) => (
-                          <option key={s} value={s}>{STATUS_LABELS[s]}</option>
-                        ))}
-                      </select>
+                        <span className="text-sm text-gray-500">—</span>
                       )}
                     </td>
                   </tr>

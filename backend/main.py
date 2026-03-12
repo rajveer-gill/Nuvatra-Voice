@@ -988,9 +988,30 @@ def _save_booked_slots(slots: List[dict]) -> None:
     except Exception as e:
         print(f"Failed to save booked_slots: {e}")
 
+def _get_all_booked_slots_merged() -> List[dict]:
+    """Merge booked_slots table with appointments (accepted/pending) so AI sees all taken times."""
+    slots = _load_booked_slots()
+    if USE_DB:
+        apts = db_appointments_get_all()
+        seen = {(s.get("date"), s.get("time")) for s in slots}
+        for a in apts:
+            if not a.get("date") or not a.get("time"):
+                continue
+            if a.get("status") in ("accepted", "confirmed", "completed", "pending", "pending_review"):
+                k = (a["date"], a["time"])
+                if k not in seen:
+                    slots.append({
+                        "date": a["date"],
+                        "time": a["time"],
+                        "appointment_id": a.get("id", 0),
+                        "duration_minutes": DEFAULT_SLOT_DURATION_MINUTES,
+                    })
+                    seen.add(k)
+    return slots
+
 def get_booked_slots(date: str) -> List[dict]:
     """Return slots already booked for the given date (YYYY-MM-DD)."""
-    slots = _load_booked_slots()
+    slots = _get_all_booked_slots_merged()
     return [s for s in slots if s.get("date") == date]
 
 def _slot_overlaps(
@@ -1040,22 +1061,45 @@ def release_slot(appointment_id: int) -> None:
     slots = [s for s in slots if s.get("appointment_id") != appointment_id]
     _save_booked_slots(slots)
 
-def get_booked_slots_prompt_text(days_ahead: int = 7) -> str:
+# Cache for booked slots prompt (avoids repeated DB hits during rapid turns)
+_booked_slots_cache: dict = {}  # {client_key: (text, expires_at)}
+_BOOKED_SLOTS_CACHE_TTL_SEC = 45
+
+def get_booked_slots_prompt_text(days_ahead: int = 90) -> str:
     """Build a short line for the system prompt: already booked slots for today + days_ahead."""
     from datetime import timedelta
-    today = datetime.now().date()
+    now = datetime.now(timezone.utc)
+    client_key = get_db_client_id() or "default"
+    cache_key = f"{client_key}:{days_ahead}"
+    if cache_key in _booked_slots_cache:
+        text, expires = _booked_slots_cache[cache_key]
+        if expires > now:
+            return text
+        del _booked_slots_cache[cache_key]
+    # Single merge + group by date (was: 90x get_booked_slots = 90x DB fetches)
+    all_slots = _get_all_booked_slots_merged()
+    by_date: dict = {}
+    for s in all_slots:
+        dt = s.get("date")
+        if not dt:
+            continue
+        if dt not in by_date:
+            by_date[dt] = []
+        t = s.get("time", "")
+        if t:
+            by_date[dt].append(t)
+    today = now.date()
     parts = []
     for d in range(days_ahead):
         day = today + timedelta(days=d)
         date_str = day.isoformat()
-        slots = get_booked_slots(date_str)
-        if slots:
-            times = [s.get("time", "") for s in slots if s.get("time")]
-            if times:
-                parts.append(f"{date_str} at {', '.join(times)}")
-    if not parts:
-        return ""
-    return "Booked slots (do not double-book): " + "; ".join(parts) + ". If the caller requests any of these times, say that slot is taken and suggest another time or another stylist."
+        times = by_date.get(date_str)
+        if times:
+            parts.append(f"{date_str} at {', '.join(sorted(times))}")
+    text = ("Booked slots (do not double-book): " + "; ".join(parts) + ". ") if parts else ""
+    expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
+    _booked_slots_cache[cache_key] = (text, expires_at)
+    return text
 
 def _suggests_booking(text: str) -> bool:
     """True if the message suggests the caller wants to book/appointment/reservation."""
@@ -1189,14 +1233,9 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
     try:
         print(f"🤖 Generating response for call {call_sid}...")
         
-        # Booking context: include booked slots when conversation suggests booking
-        include_slots = any(
-            _suggests_booking(m.get("content") or "")
-            for m in call_data["conversation_history"]
-            if m.get("role") == "user"
-        )
+        # Always include booked slots so the AI knows which times are taken and avoids double-booking
         messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=include_slots)}
+            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True)}
         ]
         messages.extend(call_data["conversation_history"])
         
@@ -1461,7 +1500,10 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
         slots_text = get_booked_slots_prompt_text()
         if slots_text:
             slots_block = f"\n- {slots_text}"
-        slots_block += "\n- When the caller has confirmed a booking (you have their name, phone, date, time, and service/reason) and the slot is available, reply with EXACTLY one line: BOOKING: name|phone|email|date|time|reason (use | as separator; date YYYY-MM-DD, time HH:MM; omit optional email if unknown). Do not output BOOKING until the caller has confirmed. If a requested time is taken, suggest another time or another stylist."
+        slots_block += """
+- AVAILABILITY (be efficient—don't waste the caller's time): If they ask about availability, either (a) they give a specific day (e.g. "Friday the 15th")—check that day directly and offer open times, or (b) they don't—start broad: ask which week (this week, next week, or a specific week like "week of March 28th"). Once you know the week, narrow down: ask which day they prefer, and tell them which days in that week are already fully booked so they can pick an open day. Then offer times. Be concise.
+- If they request a taken slot: politely say it's taken, ask preference (earlier, later, or another day), suggest alternatives.
+- When they have confirmed (name, phone, date, time, service) and the slot is available, reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator; date YYYY-MM-DD, time HH:MM; omit email if unknown). Do not output BOOKING until confirmed."""
     
     base_prompt = f"""Super peppy, warm AI receptionist for {get_business_info()['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! 
 
@@ -1840,14 +1882,8 @@ async def admin_add_tenant_member(tenant_id: str, request: Request, email: str =
 @app.post("/api/conversation", response_model=ConversationResponse)
 async def handle_conversation(request: ConversationRequest, _: None = Depends(require_active_subscription)):
     try:
-        # Booking context: include booked slots in prompt when user is discussing booking
-        include_slots = _suggests_booking(request.message)
-        if request.conversation_history:
-            for m in request.conversation_history:
-                if m.get("role") == "user" and _suggests_booking(m.get("content") or ""):
-                    include_slots = True
-                    break
-        system_content = get_system_prompt(include_booked_slots=include_slots)
+        # Always include booked slots so the AI knows which times are taken and avoids double-booking
+        system_content = get_system_prompt(include_booked_slots=True)
         messages = [{"role": "system", "content": system_content}]
         if request.conversation_history:
             messages.extend(request.conversation_history)
@@ -3444,9 +3480,9 @@ async def process_recording(request: Request):
         }
         call_data["conversation_history"].append(user_message)
         
-        # Get AI response
+        # Get AI response (always include booked slots so AI avoids double-booking)
         messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang)}
+            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True)}
         ]
         messages.extend(call_data["conversation_history"])
         
