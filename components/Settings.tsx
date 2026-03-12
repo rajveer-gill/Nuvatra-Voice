@@ -60,20 +60,37 @@ function SmsAutomationsSection({
         SMS Automations
       </h2>
       <p className="text-gray-600 text-sm mb-2">
-        Auto-send a follow-up text when someone inquires but doesn&apos;t book. Use {'{business_name}'} in the template.
+        Auto-send a follow-up text when someone inquires but doesn&apos;t book, or after a call. Use {'{business_name}'} in the template.
       </p>
       <p className="text-xs text-gray-500 mb-4">Your plan allows {smsAutomationsMax} automation(s). Growth: 2, Pro: unlimited.</p>
-      {automations.map((a) => (
-        <div key={a.id} className="flex items-start gap-2 mb-3 p-3 bg-gray-50 rounded-lg">
-          <div className="flex-1">
-            <span className="text-xs font-medium text-gray-500">{a.trigger.replace(/_/g, ' ')}</span>
-            <p className="text-sm text-gray-800 mt-0.5">{a.template}</p>
-          </div>
-          <button type="button" onClick={() => handleDelete(a.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded">
-            <Trash2 className="w-4 h-4" />
-          </button>
-        </div>
-      ))}
+
+      <h3 className="text-sm font-semibold text-gray-700 mb-2">
+        Your automations {automations.length > 0 ? `(${automations.length})` : ''}
+      </h3>
+      {automations.length === 0 ? (
+        <p className="text-sm text-gray-500 mb-4 py-2">No automations yet. Add one below to get started.</p>
+      ) : (
+        <ul className="space-y-3 mb-6">
+          {automations.map((a) => (
+            <li key={a.id} className="flex items-start gap-3 p-4 bg-gray-50 rounded-lg border border-gray-100">
+              <div className="flex-1 min-w-0">
+                <span className="text-xs font-medium text-primary-600 uppercase tracking-wide">
+                  {a.trigger.replace(/_/g, ' ')}
+                </span>
+                <p className="text-sm text-gray-800 mt-1 break-words">{a.template}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleDelete(a.id)}
+                className="p-2 text-red-600 hover:bg-red-50 rounded-lg shrink-0"
+                title="Remove automation"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       {automations.length < smsAutomationsMax && (
         <div className="mt-4 space-y-2">
           <select
