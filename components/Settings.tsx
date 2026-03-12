@@ -151,6 +151,7 @@ export default function Settings() {
   const [billingError, setBillingError] = useState<string | null>(null)
   const [form, setForm] = useState({
     name: '',
+    business_type: '',
     hours: '',
     forwarding_phone: '',
     email: '',
@@ -199,6 +200,7 @@ export default function Settings() {
         setAiPhone(d.phone || '')
         setForm({
           name: d.name || '',
+          business_type: d.business_type || '',
           hours: d.hours || '',
           forwarding_phone: d.forwarding_phone || '',
           email: d.email || '',
@@ -293,6 +295,7 @@ export default function Settings() {
     try {
       await api.patch('/api/business-info', {
         name: form.name || undefined,
+        business_type: form.business_type || undefined,
         hours: form.hours || undefined,
         forwarding_phone: form.forwarding_phone || undefined,
         email: form.email || undefined,
@@ -583,6 +586,19 @@ export default function Settings() {
               className="w-full rounded-lg border border-gray-300 px-3 py-2"
               placeholder="Your Business Name"
             />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Type of business</label>
+            <input
+              type="text"
+              value={form.business_type}
+              onChange={(e) => setForm((f) => ({ ...f, business_type: e.target.value }))}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              placeholder="e.g. nail salon, HVAC company, real estate brokerage, restaurant"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              This tells the AI what kind of business you run so it doesn&apos;t assume a generic or demo industry.
+            </p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Hours</label>

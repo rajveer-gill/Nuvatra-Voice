@@ -423,6 +423,7 @@ def load_client_config(client_id: Optional[str] = None):
             "voice": data.get("voice", "fable"),
             "speed": float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0,
             "receptionist_name": data.get("receptionist_name", ""),
+            "business_type": data.get("business_type", ""),
         }
         print(f"Loaded client config: {cid} ({info['name']})")
         return info
@@ -432,25 +433,17 @@ def load_client_config(client_id: Optional[str] = None):
 
 # Business configuration: loaded per-request (multi-tenant) or at startup (single-tenant)
 _DEMO_BUSINESS_INFO = {
-        "name": "Nuvatra Demo Restaurant",
-        "hours": "Monday-Thursday: 11 AM - 9 PM, Friday-Saturday: 11 AM - 10 PM, Sunday: 12 PM - 8 PM",
-        "phone": "(925) 481-5386",
-        "forwarding_phone": os.getenv("BUSINESS_FORWARDING_PHONE", "+19259978995"),
-        "email": "info@nuvatrademo.com",
-        "address": "123 Main Street, City, State 12345",
-        "departments": ["Reservations", "Takeout", "Catering", "General"],
-        "menu_link": "https://example.com/menu",
-        "services": ["Dine-in", "Takeout", "Delivery", "Catering", "Private Events"],
-        "specials": [
-            "Happy Hour: 4 PM - 6 PM daily - 20% off appetizers",
-            "Weekend Brunch: Saturday & Sunday 11 AM - 2 PM",
-            "Family Night: Tuesday - Kids eat free with adult entree"
-        ],
-        "reservation_rules": [
-            "Reservations recommended for parties of 6 or more",
-            "Call ahead for same-day reservations",
-            "Large parties (10+) require 48-hour notice"
-        ],
+        "name": "Nuvatra Demo Business",
+        "hours": "",
+        "phone": "",
+        "forwarding_phone": os.getenv("BUSINESS_FORWARDING_PHONE", ""),
+        "email": "",
+        "address": "",
+        "departments": [],
+        "menu_link": "",
+        "services": [],
+        "specials": [],
+        "reservation_rules": [],
         "staff": [],
         "locations": [],
         "greeting": "Thank you for calling. How can I help you today?",
@@ -458,6 +451,7 @@ _DEMO_BUSINESS_INFO = {
         "voice": "fable",
         "speed": 1.0,
         "receptionist_name": "",
+        "business_type": "",
     }
 
 def _default_business_info_for_tenant() -> Optional[dict]:
@@ -497,6 +491,7 @@ def _default_business_info_for_tenant() -> Optional[dict]:
             "voice": "fable",
             "speed": 1.0,
             "receptionist_name": "",
+            "business_type": "",
         }
     except Exception:
         return None
@@ -1471,6 +1466,7 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
     menu_link = (info.get("menu_link") or "").strip()
     departments = info.get("departments") or []
     staff = info.get("staff") or []
+    business_type = (info.get("business_type") or "").strip()
 
     help_lines: List[str] = []
     if hours:
@@ -1509,7 +1505,12 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
 - When they have confirmed (name, phone, date, time, service) and the slot is available, reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator; date YYYY-MM-DD, time HH:MM; omit email if unknown). Do not output BOOKING until confirmed."""
 
     help_section = "\n".join(help_lines) if help_lines else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
-    base_prompt = f"""Super peppy, warm AI receptionist for {name}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!
+    if business_type:
+        header = f"Super peppy, warm AI receptionist for {name}, a {business_type}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like \"absolutely!\", \"wonderful!\", \"awesome!\". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
+    else:
+        header = f"Super peppy, warm AI receptionist for {name}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like \"absolutely!\", \"wonderful!\", \"awesome!\". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
+
+    base_prompt = f"""{header}
 
 You can help with:
 {help_section}{staff_block}{memory_block}{slots_block}"""
@@ -2355,6 +2356,7 @@ class BusinessInfoUpdate(BaseModel):
     voice: Optional[str] = None
     speed: Optional[float] = None
     receptionist_name: Optional[str] = None
+    business_type: Optional[str] = None
     staff: Optional[List[StaffMember]] = None
 
 @app.patch("/api/business-info")
@@ -2403,6 +2405,8 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         invalidate_voice_cache(cid)
     if update.receptionist_name is not None:
         data["receptionist_name"] = update.receptionist_name
+    if update.business_type is not None:
+        data["business_type"] = update.business_type
     if update.staff is not None:
         tenant = db_tenant_get_by_client_id(cid)
         if tenant and get_plan_limits:
