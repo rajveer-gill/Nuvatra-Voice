@@ -2052,14 +2052,15 @@ class SmsAutomationUpdate(BaseModel):
     enabled: Optional[bool] = None
 
 @app.get("/api/sms-automations")
-async def get_sms_automations(_: None = Depends(require_active_subscription)):
+async def get_sms_automations(tenant: Optional[dict] = Depends(require_active_subscription)):
     """List SMS automations. Growth/Pro only."""
     cid = get_db_client_id()
     if not cid or cid == "default":
         return {"automations": []}
-    tenant = db_tenant_get_by_client_id(cid)
-    if not tenant or not get_plan_limits or get_plan_limits(tenant).get("sms_automations_max", 0) <= 0:
-        return {"automations": []}
+    if get_plan_limits:
+        limits = get_plan_limits(tenant) if tenant else {}
+        if limits.get("sms_automations_max", 0) <= 0:
+            return {"automations": []}
     automations = db_sms_automations_get_all(cid)
     return {"automations": automations}
 

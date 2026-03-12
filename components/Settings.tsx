@@ -16,11 +16,13 @@ function SmsAutomationsSection({
   automations,
   smsAutomationsMax,
   onRefresh,
+  onAdd,
   api,
 }: {
   automations: { id: number; trigger: string; template: string; enabled: boolean }[]
   smsAutomationsMax: number
   onRefresh: () => void
+  onAdd: (a: { id: number; trigger: string; template: string; enabled: boolean }) => void
   api: ReturnType<typeof useApiClient>
 }) {
   const [newTrigger, setNewTrigger] = useState<'after_inquiry' | 'post_call'>('after_inquiry')
@@ -33,8 +35,11 @@ function SmsAutomationsSection({
     setSaving(true)
     setMsg(null)
     try {
-      await api.post('/api/sms-automations', { trigger: newTrigger, template: newTemplate.trim() })
+      const { data } = await api.post('/api/sms-automations', { trigger: newTrigger, template: newTemplate.trim() })
       setNewTemplate('')
+      if (data?.id) {
+        onAdd({ id: data.id, trigger: data.trigger || newTrigger, template: data.template || '', enabled: true })
+      }
       onRefresh()
       setMsg({ type: 'success', text: 'Automation added' })
     } catch {
@@ -518,7 +523,8 @@ export default function Settings() {
         <SmsAutomationsSection
           automations={automations}
           smsAutomationsMax={smsAutomationsMax}
-          onRefresh={() => api.get('/api/sms-automations').then((r) => setAutomations(r.data?.automations || []))}
+          onRefresh={() => api.get('/api/sms-automations').then((r) => setAutomations(r.data?.automations || [])).catch(() => {})}
+          onAdd={(a) => setAutomations((prev) => [...prev, a])}
           api={api}
         />
       )}
