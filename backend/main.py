@@ -1459,22 +1459,45 @@ Respond with just the language name, nothing else."""
     return "English"
 
 def get_system_prompt(detected_language: str = "English", caller_memory: Optional[dict] = None, include_booked_slots: bool = False):
-    # Ultra-concise prompt for fastest processing while maintaining peppy, warm tone
+    # Ultra-concise prompt for fastest processing. Works for any business type (restaurant, salon, HVAC, real estate, etc.).
     # CRITICAL: Respond ONLY in the detected language (language can change mid-conversation)
-    services_list = ', '.join(get_business_info().get('services', []))
-    specials_list = ' | '.join(get_business_info().get('specials', []))
-    reservation_info = ' | '.join(get_business_info().get('reservation_rules', []))
-    staff = get_business_info().get("staff") or []
+    info = get_business_info()
+    name = (info.get("name") or "the business").strip()
+    hours = (info.get("hours") or "").strip()
+    address = (info.get("address") or "").strip()
+    services_list = ", ".join(info.get("services") or [])
+    specials_list = " | ".join(info.get("specials") or [])
+    reservation_info = " | ".join(info.get("reservation_rules") or [])
+    menu_link = (info.get("menu_link") or "").strip()
+    departments = info.get("departments") or []
+    staff = info.get("staff") or []
+
+    help_lines: List[str] = []
+    if hours:
+        help_lines.append(f"- Hours: {hours}")
+    if address:
+        help_lines.append(f"- Location: {address}")
+    if services_list:
+        help_lines.append(f"- Services: {services_list}")
+    if specials_list:
+        help_lines.append(f"- Specials / promotions: {specials_list}")
+    if reservation_info:
+        help_lines.append(f"- Booking / appointment policies: {reservation_info}")
+    if menu_link:
+        help_lines.append(f"- More info / menu: {menu_link}")
+    if departments:
+        help_lines.append(f"- Routing to: {', '.join(departments)}")
+
     staff_block = ""
     if staff:
         staff_names = [s.get("name", "") for s in staff if s.get("name")]
         staff_block = f"\n- Staff you can transfer to: {', '.join(staff_names)}. When the caller asks to speak to one of these people by name, reply with EXACTLY: TRANSFER_TO: [Name] (use the exact name from the list). Otherwise do not use TRANSFER_TO."
     memory_block = ""
     if caller_memory and isinstance(caller_memory, dict):
-        name = caller_memory.get("name") or "there"
+        mem_name = caller_memory.get("name") or "there"
         count = caller_memory.get("call_count", 0)
         last = caller_memory.get("last_reason") or "general inquiry"
-        memory_block = f"\n- This is a REPEAT CALLER. Greet them warmly; you may say welcome back. Name if we have it: {name}. They have called {count} time(s) before; last time: {last}."
+        memory_block = f"\n- This is a REPEAT CALLER. Greet them warmly; you may say welcome back. Name if we have it: {mem_name}. They have called {count} time(s) before; last time: {last}."
     slots_block = ""
     if include_booked_slots:
         slots_text = get_booked_slots_prompt_text()
@@ -1484,22 +1507,16 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
 - AVAILABILITY (be efficient—don't waste the caller's time): If they ask about availability, either (a) they give a specific day (e.g. "Friday the 15th")—check that day directly and offer open times, or (b) they don't—start broad: ask which week (this week, next week, or a specific week like "week of March 28th"). Once you know the week, narrow down: ask which day they prefer, and tell them which days in that week are already fully booked so they can pick an open day. Then offer times. Be concise.
 - If they request a taken slot: politely say it's taken, ask preference (earlier, later, or another day), suggest alternatives.
 - When they have confirmed (name, phone, date, time, service) and the slot is available, reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator; date YYYY-MM-DD, time HH:MM; omit email if unknown). Do not output BOOKING until confirmed."""
-    
-    base_prompt = f"""Super peppy, warm AI receptionist for {get_business_info()['name']}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing! 
+
+    help_section = "\n".join(help_lines) if help_lines else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
+    base_prompt = f"""Super peppy, warm AI receptionist for {name}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!
 
 You can help with:
-- Hours: {get_business_info()['hours']}
-- Location: {get_business_info().get('address', 'N/A')}
-- Services: {services_list}
-- Specials: {specials_list}
-- Reservations: {reservation_info}
-- Menu: Available at {get_business_info().get('menu_link', 'our website')}
-- Routing to: {', '.join(get_business_info().get('departments', []))}{staff_block}{memory_block}{slots_block}"""
-    
+{help_section}{staff_block}{memory_block}{slots_block}"""
+
     if detected_language != "English":
         return f"""{base_prompt} CRITICAL INSTRUCTION: The caller is currently speaking in {detected_language}. You MUST respond ONLY in {detected_language}. Do NOT respond in English or any other language. Every word of your response must be in {detected_language}. If the caller switches languages, adapt immediately and respond in their new language."""
-    else:
-        return f"""{base_prompt} IMPORTANT: Respond in English. If the caller switches to another language, detect it and respond in that language immediately."""
+    return f"""{base_prompt} IMPORTANT: Respond in English. If the caller switches to another language, detect it and respond in that language immediately."""
 
 @app.get("/")
 async def root():
@@ -2278,6 +2295,44 @@ async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_
     if not info.get("phone") and tenant:
         info["phone"] = tenant.get("twilio_phone_number") or ""
     return info
+
+# Required and recommended fields so the AI receptionist can relay accurate info (any business type)
+SETUP_REQUIRED_FIELDS = [
+    ("name", "Business name"),
+    ("hours", "Hours of operation"),
+    ("forwarding_phone", "Forwarding phone number"),
+]
+SETUP_CONTACT_AT_LEAST_ONE = [("address", "Address"), ("phone", "Phone number")]
+
+def get_setup_status(info_override: Optional[dict] = None) -> dict:
+    """Return setup completeness. Uses info_override if provided (e.g. with tenant phone merged), else get_business_info()."""
+    info = info_override if info_override is not None else get_business_info()
+    missing: List[str] = []
+    warnings: List[str] = []
+    for key, label in SETUP_REQUIRED_FIELDS:
+        val = info.get(key)
+        if not (val and str(val).strip()):
+            missing.append(label)
+    has_contact = any(info.get(k) and str(info.get(k)).strip() for k, _ in SETUP_CONTACT_AT_LEAST_ONE)
+    if not has_contact:
+        missing.append("At least one of: " + ", ".join(l for _, l in SETUP_CONTACT_AT_LEAST_ONE))
+    services = info.get("services") or []
+    departments = info.get("departments") or []
+    if not (services or departments):
+        warnings.append("Add services or departments so the AI knows what your business offers (e.g. appointments, estimates, emergency service)")
+    return {
+        "complete": len(missing) == 0,
+        "missing": missing,
+        "warnings": warnings,
+    }
+
+@app.get("/api/setup-status")
+async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subscription)):
+    """Return which required/recommended business info fields are missing. Used for setup checklist."""
+    info = get_business_info()
+    if not info.get("phone") and tenant:
+        info = {**info, "phone": tenant.get("twilio_phone_number") or ""}
+    return get_setup_status(info_override=info)
 
 class StaffMember(BaseModel):
     name: str = ""

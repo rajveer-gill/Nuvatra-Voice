@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, Plus, Trash2, MessageSquare } from 'lucide-react'
+import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, Plus, Trash2, MessageSquare, CheckCircle2, Circle, AlertTriangle } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 
 const VOICES = ['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'] as const
@@ -143,6 +143,7 @@ export default function Settings() {
   const [staffMax, setStaffMax] = useState<number | null>(null)
   const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
   const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
+  const [setupStatus, setSetupStatus] = useState<{ complete: boolean; missing: string[]; warnings: string[] } | null>(null)
 
   // Preload static voice samples so first play is instant
   useEffect(() => {
@@ -152,12 +153,17 @@ export default function Settings() {
     })
   }, [])
 
+  const refreshSetupStatus = () => {
+    api.get('/api/setup-status').then((r) => setSetupStatus(r.data)).catch(() => setSetupStatus(null))
+  }
+
   useEffect(() => {
     Promise.all([
       api.get('/api/business-info'),
       api.get('/api/subscription').catch(() => ({ data: null })),
       api.get('/api/sms-automations').catch(() => ({ data: { automations: [] } })),
-    ]).then(([infoRes, subRes, automationsRes]) => {
+      api.get('/api/setup-status').catch(() => ({ data: null })),
+    ]).then(([infoRes, subRes, automationsRes, setupRes]) => {
         const d = infoRes.data
         setVoice(d.voice || 'fable')
         const limits = (subRes?.data as { limits?: { staff_max?: number; sms_automations_max?: number } } | null)?.limits
@@ -182,6 +188,7 @@ export default function Settings() {
           reservation_rules: Array.isArray(d.reservation_rules) ? d.reservation_rules.join('\n') : '',
         })
       setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
+      setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
       })
     .catch(() => setMessage({ type: 'error', text: 'Failed to load settings' }))
     .finally(() => setLoading(false))
@@ -284,6 +291,7 @@ export default function Settings() {
           : undefined,
       })
       setMessage({ type: 'success', text: 'Settings saved. Your AI receptionist will use this info.' })
+      refreshSetupStatus()
     } catch (e) {
       setMessage({ type: 'error', text: 'Failed to save settings' })
     } finally {
@@ -318,6 +326,10 @@ export default function Settings() {
     )
   }
 
+  const setupComplete = setupStatus?.complete ?? true
+  const missing = setupStatus?.missing ?? []
+  const warnings = setupStatus?.warnings ?? []
+
   return (
     <div className="max-w-4xl mx-auto space-y-8">
       {message && (
@@ -325,6 +337,42 @@ export default function Settings() {
           {message.text}
         </div>
       )}
+
+      {/* Setup checklist: ensure AI has correct business info before taking calls */}
+      <div className="bg-white rounded-2xl shadow-xl p-8">
+        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2">
+          {setupComplete ? <CheckCircle2 className="w-6 h-6 text-green-600" /> : <AlertTriangle className="w-6 h-6 text-amber-500" />}
+          Setup checklist
+        </h2>
+        <p className="text-gray-600 text-sm mb-4">
+          Complete these so your AI receptionist can give callers accurate info and handle bookings. Works for any business—restaurants, salons, HVAC, real estate, and more.
+        </p>
+        <ul className="space-y-2">
+          {[
+            { key: 'name', label: 'Business name', done: !missing.some((m) => m.toLowerCase().includes('business name')) },
+            { key: 'hours', label: 'Hours of operation', done: !missing.some((m) => m.toLowerCase().includes('hours')) },
+            { key: 'forwarding', label: 'Forwarding phone number', done: !missing.some((m) => m.toLowerCase().includes('forwarding')) },
+            { key: 'contact', label: 'Address or phone number', done: !missing.some((m) => m.toLowerCase().includes('least one')) },
+          ].map(({ key, label, done }) => (
+            <li key={key} className="flex items-center gap-2 text-sm">
+              {done ? <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" /> : <Circle className="w-4 h-4 text-gray-300 shrink-0" />}
+              <span className={done ? 'text-gray-700' : 'text-gray-500'}>{label}</span>
+            </li>
+          ))}
+        </ul>
+        {warnings.length > 0 && (
+          <p className="mt-3 text-amber-700 text-sm flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            {warnings[0]}
+          </p>
+        )}
+        {!setupComplete && (
+          <p className="mt-3 text-amber-700 text-sm font-medium">
+            Fill in the required fields below and save. Your AI will work better with complete business info.
+          </p>
+        )}
+      </div>
+
       {/* AI Receptionist Identity */}
       <div className="bg-white rounded-2xl shadow-xl p-8">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
@@ -492,14 +540,14 @@ export default function Settings() {
         </button>
       </div>
 
-      {/* Store Info */}
+      {/* Business info — any type: restaurant, salon, HVAC, real estate, etc. */}
       <div className="bg-white rounded-2xl shadow-xl p-8">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <Store className="w-6 h-6 text-primary-600" />
-          Store info &amp; AI customizations
+          Business info &amp; AI customizations
         </h2>
         <p className="text-gray-600 text-sm mb-6">
-          This information is used by your AI receptionist when answering calls and texts (hours, services, booking rules, etc.).
+          Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules so it can give accurate info and take bookings—for any business type (restaurant, nail salon, HVAC, real estate, etc.).
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -520,7 +568,7 @@ export default function Settings() {
               value={form.hours}
               onChange={(e) => setForm((f) => ({ ...f, hours: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2"
-              placeholder="e.g. Mon–Fri 9 AM–5 PM"
+              placeholder="e.g. Mon–Fri 9 AM–5 PM, or 24/7 for emergency"
             />
           </div>
           <div className="md:col-span-2">
@@ -588,13 +636,13 @@ export default function Settings() {
             />
           </div>
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Menu or website link</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Website or menu link (optional)</label>
             <input
               type="text"
               value={form.menu_link}
               onChange={(e) => setForm((f) => ({ ...f, menu_link: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2"
-              placeholder="https://..."
+              placeholder="https://... (menu, services, or main site)"
             />
           </div>
           <div className="md:col-span-2">
@@ -614,25 +662,26 @@ export default function Settings() {
               value={form.services}
               onChange={(e) => setForm((f) => ({ ...f, services: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
-              placeholder="Haircut&#10;Color&#10;Styling"
+              placeholder="Appointments&#10;Estimates&#10;Emergency service&#10;Consultations"
             />
+            <p className="text-xs text-gray-500 mt-1">What your business offers so the AI can answer &quot;what do you do?&quot;</p>
           </div>
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Specials / promotions (one per line)</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Specials / promotions (one per line, optional)</label>
             <textarea
               value={form.specials}
               onChange={(e) => setForm((f) => ({ ...f, specials: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
-              placeholder="Happy hour 4–6 PM&#10;Tuesday 2-for-1"
+              placeholder="Happy hour 4–6 PM&#10;First-time discount&#10;Seasonal offer"
             />
           </div>
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Reservation / booking rules (one per line)</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Booking / appointment rules (one per line)</label>
             <textarea
               value={form.reservation_rules}
               onChange={(e) => setForm((f) => ({ ...f, reservation_rules: e.target.value }))}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
-              placeholder="Reservations recommended for 6+&#10;Same-day booking by phone"
+              placeholder="Same-day booking available&#10;24h notice for cancellations&#10;Deposit required for groups"
             />
           </div>
         </div>
