@@ -77,6 +77,32 @@ if not logger.handlers:
     h.setFormatter(logging.Formatter("%(levelname)s|%(name)s|%(message)s"))
     logger.addHandler(h)
 
+# #region agent log helper
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_id: str = "pre-fix") -> None:
+    \"\"\"Append a single NDJSON debug log line for this debug session.\"\"\"
+    try:
+        log_path = PROJECT_ROOT / "debug-1f01f9.log"
+    except NameError:
+        # PROJECT_ROOT defined later; fall back to current dir
+        log_path = Path("debug-1f01f9.log")
+    try:
+        payload = {
+            "sessionId": "1f01f9",
+            "id": f"log_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+        }
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        # Never let logging break the app
+        return
+# #endregion agent log
+
 # Verify API key is loaded
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
@@ -1010,6 +1036,22 @@ def is_slot_available(
 ) -> bool:
     """True if no overlapping booking for this date+time."""
     slots = get_booked_slots(date)
+    # #region agent log
+    try:
+        _agent_log(
+            hypothesis_id="H4",
+            location="backend/main.py:is_slot_available",
+            message="Checking slot availability",
+            data={
+                "date": date,
+                "time": time,
+                "duration_minutes": duration_minutes,
+                "slots": [{"date": s.get("date"), "time": s.get("time"), "duration": s.get("duration_minutes")} for s in slots],
+            },
+        )
+    except Exception:
+        pass
+    # #endregion agent log
     for s in slots:
         d = s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES
         if _slot_overlaps(time, duration_minutes, s.get("time", ""), d):
@@ -1022,6 +1064,23 @@ def reserve_slot(
 ) -> None:
     """Record a slot as booked when creating an appointment."""
     slots = _load_booked_slots()
+    # #region agent log
+    try:
+        _agent_log(
+            hypothesis_id="H4",
+            location="backend/main.py:reserve_slot",
+            message="Reserving slot",
+            data={
+                "date": date,
+                "time": time,
+                "duration_minutes": duration_minutes,
+                "appointment_id": appointment_id,
+                "existing_slots_count": len(slots),
+            },
+        )
+    except Exception:
+        pass
+    # #endregion agent log
     slots.append({
         "date": date,
         "time": time,
@@ -1074,6 +1133,22 @@ def get_booked_slots_prompt_text(days_ahead: int = 90) -> str:
     text = ("Booked slots (do not double-book): " + "; ".join(parts) + ". ") if parts else ""
     expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
     _booked_slots_cache[cache_key] = (text, expires_at)
+    # #region agent log
+    try:
+        _agent_log(
+            hypothesis_id="H4",
+            location="backend/main.py:get_booked_slots_prompt_text",
+            message="Built booked slots prompt text",
+            data={
+                "client_key": client_key,
+                "days_ahead": days_ahead,
+                "all_slots_count": len(all_slots),
+                "text": text,
+            },
+        )
+    except Exception:
+        pass
+    # #endregion agent log
     return text
 
 def _suggests_booking(text: str) -> bool:
@@ -1112,7 +1187,29 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
     name = (booking.get("name") or "").strip()
     if not name or not date or not time:
         return None
+    # #region agent log
+    try:
+        _agent_log(
+            hypothesis_id="H4",
+            location="backend/main.py:_create_appointment_from_booking",
+            message="Attempting to create appointment from booking",
+            data={"booking": booking},
+        )
+    except Exception:
+        pass
+    # #endregion agent log
     if not is_slot_available(date, time):
+        # #region agent log
+        try:
+            _agent_log(
+                hypothesis_id="H4",
+                location="backend/main.py:_create_appointment_from_booking",
+                message="Slot NOT available when creating appointment",
+                data={"booking": booking},
+            )
+        except Exception:
+            pass
+        # #endregion agent log
         return None
     appointment_data = {
         "name": name,
