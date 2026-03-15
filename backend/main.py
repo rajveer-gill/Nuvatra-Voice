@@ -1595,11 +1595,13 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
     if include_booked_slots:
         slots_text = get_booked_slots_prompt_text()
         if slots_text:
-            slots_block = f"\n- {slots_text}"
+            slots_block = f"\n- {slots_text}\n- CRITICAL: Only treat a time as TAKEN if it appears in the booked slots list above. If the list is empty or a day has no times listed, that day is fully available—say the time is available and offer to book it."
+        else:
+            slots_block = "\n- Booked slots: none. CRITICAL: There are no booked slots, so ALL times are available. Never say a slot or day is 'taken', 'not available', or 'fully booked'—every time the caller asks for is available. Offer to book their requested time."
         slots_block += """
-- AVAILABILITY (be efficient—don't waste the caller's time): If they ask about availability, either (a) they give a specific day (e.g. "Friday the 15th")—check that day directly and offer open times, or (b) they don't—start broad: ask which week (this week, next week, or a specific week like "week of March 28th"). Once you know the week, narrow down: ask which day they prefer, and tell them which days in that week are already fully booked so they can pick an open day. Then offer times. Be concise.
-- If they request a taken slot: politely say it's taken, ask preference (earlier, later, or another day), suggest alternatives.
-- When they have confirmed (name, phone, date, time, service) and the slot is available, reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator; date YYYY-MM-DD, time HH:MM; omit email if unknown). Do not output BOOKING until confirmed."""
+- AVAILABILITY (be efficient): If they ask about availability, (a) if they give a specific day—offer open times for that day (only times listed above as booked are taken; if none listed for that day, all times are open), or (b) if they don't—ask which week then which day, then offer times. Only say a day or time is taken if it appears in the booked slots list.
+- If they request a time that IS in the booked slots list: politely say it's taken and suggest alternatives.
+- When they have confirmed (name, phone, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator; date YYYY-MM-DD, time HH:MM; omit email if unknown). Do not output BOOKING until confirmed."""
 
     help_section = "\n".join(help_lines) if help_lines else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
     if business_type:
