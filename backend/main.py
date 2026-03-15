@@ -79,11 +79,10 @@ if not logger.handlers:
 
 # #region agent log helper
 def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_id: str = "pre-fix") -> None:
-    """Append a single NDJSON debug log line for this debug session."""
+    """Append a single NDJSON debug log line; also log to stdout so Render logs show it."""
     try:
         log_path = PROJECT_ROOT / "debug-1f01f9.log"
     except NameError:
-        # PROJECT_ROOT defined later; fall back to current dir
         log_path = Path("debug-1f01f9.log")
     try:
         payload = {
@@ -96,11 +95,12 @@ def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_
             "runId": run_id,
             "hypothesisId": hypothesis_id,
         }
+        line = json.dumps(payload) + "\n"
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
+            f.write(line)
+        logger.info("[BOOKING_DEBUG] %s", line.strip())
     except Exception:
-        # Never let logging break the app
-        return
+        pass
 # #endregion agent log
 
 # Verify API key is loaded
