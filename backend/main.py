@@ -1346,7 +1346,16 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 from_number = call_data.get("to_number") if call_data else None
                 send_sms(to_number, thanks_msg, from_override=from_number)
             else:
-                ai_text = "That time slot just got booked. Would you like to try another time or another stylist?"
+                # Failed: either slot taken or missing/invalid data (name, date)
+                name_ok = bool((booking.get("name") or "").strip())
+                date_ok = bool((booking.get("date") or "").strip())
+                time_ok = bool((booking.get("time") or "").strip())
+                if not name_ok:
+                    ai_text = "I'd love to book that for you—what's your name?"
+                elif not date_ok or not time_ok:
+                    ai_text = "I need the date and time again to confirm—which day and time would you like?"
+                else:
+                    ai_text = "That time slot just got booked. Would you like to try another time or another day?"
         
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
@@ -1598,10 +1607,13 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
             slots_block = f"\n- {slots_text}\n- CRITICAL: Only treat a time as TAKEN if it appears in the booked slots list above. If the list is empty or a day has no times listed, that day is fully available—say the time is available and offer to book it."
         else:
             slots_block = "\n- Booked slots: none. CRITICAL: There are no booked slots, so ALL times are available. Never say a slot or day is 'taken', 'not available', or 'fully booked'—every time the caller asks for is available. Offer to book their requested time."
-        slots_block += """
+        today_utc = datetime.now(timezone.utc).date()
+        today_str = today_utc.isoformat()
+        tomorrow_str = (today_utc + timedelta(days=1)).isoformat()
+        slots_block += f"""
 - AVAILABILITY (be efficient): If they ask about availability, (a) if they give a specific day—offer open times for that day (only times listed above as booked are taken; if none listed for that day, all times are open), or (b) if they don't—ask which week then which day, then offer times. Only say a day or time is taken if it appears in the booked slots list.
 - If they request a time that IS in the booked slots list: politely say it's taken and suggest alternatives.
-- When they have confirmed (name, phone, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator; date YYYY-MM-DD, time HH:MM; omit email if unknown). Do not output BOOKING until confirmed."""
+- When they have confirmed (name, phone, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (3) Time as HH:MM (e.g. 13:00 for 1 PM). (4) Do not output BOOKING until you have at least name, date, and time."""
 
     help_section = "\n".join(help_lines) if help_lines else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
     if business_type:
@@ -2006,7 +2018,15 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
                 action = "schedule_appointment"
                 data = {"appointment_id": apt["id"]}
             else:
-                ai_response = "That time slot just got booked. Would you like to try another time or another stylist?"
+                name_ok = bool((booking.get("name") or "").strip())
+                date_ok = bool((booking.get("date") or "").strip())
+                time_ok = bool((booking.get("time") or "").strip())
+                if not name_ok:
+                    ai_response = "I'd love to book that for you—what's your name?"
+                elif not date_ok or not time_ok:
+                    ai_response = "I need the date and time again to confirm—which day and time would you like?"
+                else:
+                    ai_response = "That time slot just got booked. Would you like to try another time or another day?"
         
         if "schedule" in request.message.lower() or "appointment" in request.message.lower():
             action = action or "schedule_appointment"
