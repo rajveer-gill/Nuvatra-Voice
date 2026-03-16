@@ -101,7 +101,7 @@ TWILIO_ACCOUNT_SID=your_sid
 TWILIO_AUTH_TOKEN=your_token
 TWILIO_PHONE_NUMBER=+19254815386
 NGROK_URL=https://your-app.onrender.com
-CLIENT_ID=zenoti-test-store
+CLIENT_ID=demo-store
 ```
 
 ### Step 5: Deploy

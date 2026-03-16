@@ -1,4 +1,4 @@
-# Reflectionz Salon - Onboarding Checklist
+# Example Salon - Onboarding Checklist
 
 Use this checklist to collect all required information from the client.
 
@@ -50,6 +50,3 @@ Use this checklist to collect all required information from the client.
 4. Configure Twilio webhook
 5. Test live phone number
 6. Hand off to client
-
-
-

@@ -1,5 +1,7 @@
 {
-  "business_name": "Reflectionz Salon",
+  "client_id": "example-salon",
+  "plan": "pro",
+  "business_name": "Example Salon",
   "hours": "TBD - Please provide hours of operation",
   "phone": "TBD - Please provide business phone number",
   "email": "TBD - Please provide business email",
@@ -21,6 +23,3 @@
   "menu_link": "TBD - Please provide menu link or services list",
   "additional_info": "TBD - Any other important info for FAQs"
 }
-
-
-

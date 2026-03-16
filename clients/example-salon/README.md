@@ -1,10 +1,10 @@
-# Reflectionz Salon - AI Receptionist Configuration
+# Example Salon - AI Receptionist Configuration
 
 ## Client Information
 
-**Business Name:** Reflectionz Salon  
-**Industry:** Salon/Beauty Services  
-**Status:** Active Client
+**Business Name:** Example Salon  
+**Industry:** Salon / Beauty Services  
+**Status:** Template for new salon clients
 
 ## Configuration Status
 
@@ -21,8 +21,8 @@
 ## Setup Instructions
 
 1. Fill in all the information in `config.json`
-2. Update `backend/main.py` to load this client's configuration
-3. Deploy to Render/Railway with client-specific environment variables
+2. Update backend to load this client's configuration (or create tenant via admin with this client_id)
+3. Deploy with client-specific environment variables
 4. Configure Twilio webhook to point to this client's deployment
 5. Test the phone number
 
@@ -36,6 +36,3 @@ Once configuration is complete:
 ## Notes
 
 Add any client-specific notes or requirements here.
-
-
-

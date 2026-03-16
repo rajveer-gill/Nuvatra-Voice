@@ -1,5 +1,5 @@
 {
-  "client_id": "zenoti-test-store",
+  "client_id": "demo-store",
   "plan": "pro",
   "business_name": "Your Business",
   "hours": "",
@@ -18,5 +18,5 @@
   "voice": "fable",
   "speed": 1.0,
   "receptionist_name": "",
-  "additional_info": "Legacy test client; use admin to create tenants and enter business info."
+  "additional_info": "Demo/test client. Use admin to create tenants and enter business info."
 }

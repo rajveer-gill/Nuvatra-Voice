@@ -9,8 +9,8 @@ clients/
 ├── template/                # Generic template — copy for any new business
 │   ├── config.json          # Pro plan config (placeholders)
 │   └── README.md
-├── zenoti-test-store/       # Test client
-├── reflectionz-salon/
+├── demo-store/              # Demo/test client
+├── example-salon/           # Example salon onboarding
 └── [your-client]/
 ```
 
@@ -36,7 +36,7 @@ clients/
 - Services (list or menu link), specials, reservation/booking rules
 - A few FAQs. For growth/pro: departments, staff, SMS preferences.
 
-See `reflectionz-salon/onboarding-checklist.md` for a detailed checklist.
+See `example-salon/onboarding-checklist.md` for a detailed checklist.
 
 ## Config Format
 

@@ -797,7 +797,7 @@ def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> b
         try:
             msg = twilio_client.messages.create(from_=from_num, to=e164, body=body)
             sid = getattr(msg, "sid", None) or getattr(msg, "id", None)
-            print(f"[SMS] Twilio create ok sid={sid}")
+            print(f"[SMS] Twilio create ok sid={sid} (check Twilio Console > Messaging > Logs for delivery status)")
             # Record SMS usage for billing (graceful degradation)
             if USE_DB:
                 cid = get_db_client_id()
@@ -980,7 +980,7 @@ def call_log_end(call_sid: str):
                 print(f"Failed to save call log: {e}")
     del call_log_entries[call_sid]
 
-# Booked slots (Zenoti-style: avoid double-book; inject into AI prompt)
+# Booked slots (avoid double-book; inject into AI prompt)
 DEFAULT_SLOT_DURATION_MINUTES = 30
 
 def _load_booked_slots() -> List[dict]:
@@ -3092,8 +3092,12 @@ async def handle_incoming_call(request: Request):
         tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
         if tenant:
             set_request_client_id(tenant["client_id"])
+            print(f"[CALL] tenant from DB (To number matches): client_id={tenant['client_id']!r} name={tenant.get('name') or '(no name)'!r}")
         elif CLIENT_ID:
             set_request_client_id(CLIENT_ID)
+            print(f"[CALL] no tenant for To={to_number}; using CLIENT_ID env: {CLIENT_ID!r}")
+        else:
+            print(f"[CALL] no tenant for To={to_number} and no CLIENT_ID env; using default")
         # Pre-call usage check: allow overage, log for billing (Option B)
         if USE_DB and tenant and get_plan_limits:
             limits = get_plan_limits(tenant)
@@ -3110,7 +3114,7 @@ async def handle_incoming_call(request: Request):
         # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"
         client_id = tenant["client_id"] if tenant else (CLIENT_ID or "default")
-        print(f"[CALL] client_id={client_id} session started")
+        print(f"[CALL] session started client_id={client_id!r}")
         active_calls[call_sid] = {
             "session_id": session_id,
             "from_number": from_number,
