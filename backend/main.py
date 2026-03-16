@@ -3334,8 +3334,19 @@ async def process_speech(request: Request):
                 language=twilio_lang_code  # Set language dynamically for better transcription
             )
         
-        # If no input, say goodbye
-        response.say("Thanks for calling! Have a wonderful day!", voice='alice')
+        # If no input, prompt once then goodbye (same TTS voice as receptionist)
+        still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
+        response.play(still_there_url)
+        gather2 = response.gather(
+            input='speech',
+            action=f"{base_url}/api/phone/process-speech",
+            method='POST',
+            speech_timeout='auto',
+            language=twilio_lang_code
+        )
+        goodbye_text = "Thanks for calling! Have a wonderful day!"
+        goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
+        response.play(goodbye_url)
         response.hangup()
         
         return Response(content=str(response), media_type="application/xml")
@@ -3539,8 +3550,19 @@ async def respond_with_audio(request: Request):
                         language=twilio_lang_code
                     )
                 
-                # If no input, say goodbye
-                response.say("Thanks for calling! Have a wonderful day!", voice='alice')
+                # If no input, prompt once then goodbye (same TTS voice as receptionist)
+                still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
+                response.play(still_there_url)
+                gather2 = response.gather(
+                    input='speech',
+                    action=f"{base_url}/api/phone/process-speech",
+                    method='POST',
+                    speech_timeout='auto',
+                    language=twilio_lang_code
+                )
+                goodbye_text = "Thanks for calling! Have a wonderful day!"
+                goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
+                response.play(goodbye_url)
                 response.hangup()
                 
                 # Clean up status
