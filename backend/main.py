@@ -1332,17 +1332,28 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             if apt:
                 call_data["appointment_created"] = True
                 ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
-                # Send caller a text: human-like, full details, invite reply to confirm or change
+                # Ensure we have caller phone (backfill from Twilio if missing) so SMS goes out and dashboard shows it
+                if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
+                    apt["phone"] = call_data["from_number"]
+                    if USE_DB and apt.get("id"):
+                        try:
+                            db_appointments_update(apt["id"], phone=apt["phone"])
+                        except Exception:
+                            pass
+                # Send caller a text: full details (name, phone, email, date, time, service) so they can confirm or request changes before we send to store
+                phone_display = (apt.get("phone") or "").strip() or "Not provided"
+                email_display = (apt.get("email") or "").strip() or "Not provided"
                 thanks_msg = (
                     f"Hey! Your reservation is pending. Here's what we have:\n"
                     f"Name: {apt.get('name', '')}\n"
+                    f"Phone: {phone_display}\n"
+                    f"Email: {email_display}\n"
                     f"Date: {apt.get('date', '')}\n"
                     f"Time: {apt.get('time', '')}\n"
                     f"Service: {apt.get('reason', '')}\n\n"
-                    f"Does this look right? Just reply to confirm, or let us know if you need to change anything. "
-                    f"We'll text you once the business confirms!"
+                    f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!"
                 )
-                to_number = apt.get("phone") or ""
+                to_number = (apt.get("phone") or "").strip() or call_data.get("from_number") or ""
                 from_number = call_data.get("to_number") if call_data else None
                 send_sms(to_number, thanks_msg, from_override=from_number)
             else:
@@ -1613,7 +1624,7 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
         slots_block += f"""
 - AVAILABILITY (be efficient): If they ask about availability, (a) if they give a specific day—offer open times for that day (only times listed above as booked are taken; if none listed for that day, all times are open), or (b) if they don't—ask which week then which day, then offer times. Only say a day or time is taken if it appears in the booked slots list.
 - If they request a time that IS in the booked slots list: politely say it's taken and suggest alternatives.
-- When they have confirmed (name, phone, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (3) Time as HH:MM (e.g. 13:00 for 1 PM). (4) Do not output BOOKING until you have at least name, date, and time."""
+- When they have confirmed (name, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (3) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (4) Time as HH:MM (e.g. 13:00 for 1 PM). (5) Do not output BOOKING until you have at least name, date, and time."""
 
     help_section = "\n".join(help_lines) if help_lines else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
     if business_type:

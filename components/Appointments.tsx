@@ -330,16 +330,12 @@ export default function Appointments() {
                   <tr key={apt.id} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="py-3 px-3">
                       <div className="font-medium text-gray-900">{apt.name}</div>
-                      {apt.phone && (
-                        <div className="flex items-center gap-1 text-sm text-gray-500">
-                          <Phone className="w-3 h-3" /> {apt.phone}
-                        </div>
-                      )}
-                      {apt.email && (
-                        <div className="flex items-center gap-1 text-sm text-gray-500">
-                          <Mail className="w-3 h-3" /> {apt.email}
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1 text-sm text-gray-500">
+                        <Phone className="w-3 h-3" /> {apt.phone || 'Not provided'}
+                      </div>
+                      <div className="flex items-center gap-1 text-sm text-gray-500">
+                        <Mail className="w-3 h-3" /> {apt.email || 'Not provided'}
+                      </div>
                     </td>
                     <td className="py-3 px-3">
                       <div className="flex items-center gap-1">
