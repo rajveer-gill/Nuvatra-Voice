@@ -19,6 +19,7 @@ export interface Appointment {
 
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Needs response',
+  pending_customer: 'Waiting for customer to confirm',
   pending_review: 'Needs response',
   confirmed: 'Accepted',
   accepted: 'Accepted',
@@ -28,6 +29,7 @@ const STATUS_LABELS: Record<string, string> = {
 }
 const STATUS_CLASSES: Record<string, string> = {
   pending: 'bg-amber-100 text-amber-800',
+  pending_customer: 'bg-blue-100 text-blue-800',
   pending_review: 'bg-amber-100 text-amber-800',
   confirmed: 'bg-green-100 text-green-800',
   accepted: 'bg-green-100 text-green-800',
@@ -36,8 +38,13 @@ const STATUS_CLASSES: Record<string, string> = {
   rejected: 'bg-red-100 text-red-800',
 }
 
+/** Only show Accept/Decline when customer has already confirmed via text (pending_review). pending_customer = waiting for them to reply. */
+function canAcceptOrDecline(status: string): boolean {
+  return status === 'pending_review'
+}
+
 function needsResponse(status: string): boolean {
-  return status === 'pending' || status === 'pending_review'
+  return status === 'pending' || status === 'pending_review' || status === 'pending_customer'
 }
 
 export default function Appointments() {
@@ -363,7 +370,9 @@ export default function Appointments() {
                       </span>
                     </td>
                     <td className="py-3 px-3">
-                      {needsResponse(apt.status) ? (
+                      {apt.status === 'pending_customer' ? (
+                        <span className="text-sm text-gray-500">Customer must confirm by text first</span>
+                      ) : canAcceptOrDecline(apt.status) ? (
                         <div className="flex flex-wrap items-center gap-2">
                           <button type="button" onClick={() => handleAccept(apt.id)} disabled={updatingId === apt.id} className="text-sm px-3 py-1.5 rounded font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50">Accept</button>
                           <button type="button" onClick={() => handleReject(apt.id)} disabled={updatingId === apt.id} className="text-sm px-3 py-1.5 rounded font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">Decline</button>

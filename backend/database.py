@@ -713,6 +713,30 @@ def db_appointments_get_pending_by_phone(phone: str) -> Optional[dict]:
         return None
     return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
 
+def db_appointments_get_by_phone_for_sms(phone: str) -> Optional[dict]:
+    """Return most recent appointment for this phone with status pending_customer or pending_review (for SMS reply context and confirm flow)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return None
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email, phone, date, time, reason, status, source, created_at
+        FROM appointments
+        WHERE client_id = %s AND status IN ('pending_customer', 'pending_review')
+          AND (regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = %s
+               OR regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = right(%s, 10))
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (_client_id(), norm, norm))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
+
 # --- SMS Sessions ---
 def db_sms_session_get(phone: str, client_id: str) -> Optional[dict]:
     """Get SMS session for phone+client. Returns {messages, appointment_id} or None."""

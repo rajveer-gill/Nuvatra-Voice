@@ -358,6 +358,7 @@ try:
         db_sms_session_get,
         db_sms_session_upsert,
         db_appointments_get_pending_by_phone,
+        db_appointments_get_by_phone_for_sms,
         db_appointments_get_accepted_for_date,
         db_appointments_mark_reminder_sent,
         db_tenant_list_all,
@@ -757,6 +758,23 @@ def _phone_to_e164(phone: str) -> Optional[str]:
         return f"+{digits}"
     return None
 
+def _is_sms_confirmation(body: str) -> bool:
+    """True if the message looks like the customer confirming their appointment (yes, looks good, etc.)."""
+    if not body or len(body) > 80:
+        return False
+    b = body.lower().strip()
+    confirm_words = (
+        "yes", "yep", "yeah", "confirm", "confirmed", "correct", "perfect", "good", "great",
+        "ok", "okay", "looks good", "look good", "that's right", "thats right", "all good",
+        "sounds good", "sounds great", "that works", "that works for me", "approved", "confirm"
+    )
+    if b in confirm_words:
+        return True
+    for w in confirm_words:
+        if w in b and len(b) <= 50:
+            return True
+    return False
+
 def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> bool:
     """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number).
     Records usage via db_usage_increment_sms when client_id is set."""
@@ -998,7 +1016,7 @@ def _get_all_booked_slots_merged() -> List[dict]:
         for a in apts:
             if not a.get("date") or not a.get("time"):
                 continue
-            if a.get("status") in ("accepted", "confirmed", "completed", "pending", "pending_review"):
+            if a.get("status") in ("accepted", "confirmed", "completed", "pending", "pending_review", "pending_customer"):
                 k = (a["date"], a["time"])
                 if k not in seen:
                     slots.append({
@@ -1219,7 +1237,7 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
         "time": time,
         "reason": (booking.get("reason") or "").strip() or "—",
         "source": "receptionist",
-        "status": "pending_review",
+        "status": "pending_customer",
     }
     if USE_DB:
         row = db_appointments_insert(appointment_data)
@@ -1303,6 +1321,8 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
     Updates response_status when ready.
     """
     try:
+        # Keep tenant context so SMS and DB use correct client_id (async runs outside request)
+        set_request_client_id(call_data.get("client_id") or get_db_client_id())
         print(f"🤖 Generating response for call {call_sid}...")
         
         # Always include booked slots so the AI knows which times are taken and avoids double-booking
@@ -1353,9 +1373,14 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     f"Service: {apt.get('reason', '')}\n\n"
                     f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!"
                 )
-                to_number = (apt.get("phone") or "").strip() or call_data.get("from_number") or ""
+                # Prefer caller number from live call so confirmation SMS always goes to the right person
+                to_number = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
                 from_number = call_data.get("to_number") if call_data else None
-                send_sms(to_number, thanks_msg, from_override=from_number)
+                if to_number:
+                    ok = send_sms(to_number, thanks_msg, from_override=from_number)
+                    print(f"📱 Confirmation SMS to {to_number}: {'sent' if ok else 'FAILED'}")
+                else:
+                    print("📱 Confirmation SMS skipped: no caller phone (to_number empty)")
             else:
                 # Failed: either slot taken or missing/invalid data (name, date)
                 name_ok = bool((booking.get("name") or "").strip())
@@ -2860,10 +2885,19 @@ async def handle_incoming_sms(request: Request):
             total = (usage.get("voice_minutes") or 0) + (usage.get("sms_count") or 0)
             if total >= limits.get("minutes_cap", 999999):
                 audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": limits.get("minutes_cap")}, request=request)
-        apt = db_appointments_get_pending_by_phone(from_number) if USE_DB else None
+        apt = db_appointments_get_by_phone_for_sms(from_number) if USE_DB else None
         session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
         messages = (session["messages"] if session else []) if session else []
         messages.append({"role": "user", "content": body})
+        # If they have an appointment awaiting their confirmation (pending_customer) and they reply yes/looks good, promote to pending_review so store can Accept/Decline
+        if apt and apt.get("status") == "pending_customer" and _is_sms_confirmation(body):
+            if USE_DB and apt.get("id"):
+                db_appointments_update(apt["id"], status="pending_review")
+            reply = "Thanks! We've sent this to the store. We'll text you when they confirm."
+            send_sms(from_number, reply, from_override=to_number)
+            messages.append({"role": "assistant", "content": reply})
+            db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         apt_info = ""
         if apt:
             apt_info = f"The customer has a PENDING appointment: Name {apt.get('name','')}, {apt.get('date','')} at {apt.get('time','')}, service: {apt.get('reason','')}."
