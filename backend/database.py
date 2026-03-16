@@ -582,19 +582,23 @@ def db_appointments_insert(data: dict) -> dict:
     if not conn:
         raise RuntimeError("Database not available")
     cur = conn.cursor()
+    cid = (data.get("client_id") or "").strip() or _client_id()
+    print(f"[DB] db_appointments_insert client_id={cid} name={data.get('name')!r} date={data.get('date')} time={data.get('time')}")
     cur.execute("""
         INSERT INTO appointments (client_id, name, email, phone, date, time, reason, status, source)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id, created_at
     """, (
-        _client_id(), data["name"], data.get("email", ""), data.get("phone", ""),
+        cid, data["name"], data.get("email", ""), data.get("phone", ""),
         data["date"], data.get("time", ""), data.get("reason", ""),
         data.get("status", "pending"), data.get("source", "manual")
     ))
     row = cur.fetchone()
     conn.commit()
     cur.close()
-    return {"id": row[0], "created_at": row[1].isoformat() if row[1] else "", **data}
+    apt_id = row[0]
+    print(f"[DB] db_appointments_insert OK id={apt_id} client_id={cid}")
+    return {"id": apt_id, "created_at": row[1].isoformat() if row[1] else "", **data}
 
 def db_appointments_update(appointment_id: int, **kwargs) -> Optional[dict]:
     conn = _get_conn()

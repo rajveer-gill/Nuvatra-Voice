@@ -783,16 +783,21 @@ def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> b
         return False
     from_num = (from_override or TWILIO_SMS_FROM or "").strip()
     if not from_num:
-        print("SMS skipped: SMS from number missing (set TWILIO_SMS_FROM or pass from_override)")
+        print(f"[SMS] skipped: from number missing (from_override={bool(from_override)} TWILIO_SMS_FROM={'set' if TWILIO_SMS_FROM else 'unset'})")
         return False
     e164 = _phone_to_e164(to_phone or "")
     if not e164:
-        print(f"SMS skipped: invalid or short phone: {to_phone}")
+        print(f"[SMS] skipped: invalid or short phone to_phone={to_phone!r}")
         return False
+    # Console debug: from, to (masked), body length
+    to_masked = f"{e164[:6]}...{e164[-2:]}" if len(e164) >= 8 else e164
+    print(f"[SMS] send_sms from={from_num} to={to_masked} body_len={len(body)}")
     last_err = None
     for attempt in range(3):
         try:
-            twilio_client.messages.create(from_=from_num, to=e164, body=body)
+            msg = twilio_client.messages.create(from_=from_num, to=e164, body=body)
+            sid = getattr(msg, "sid", None) or getattr(msg, "id", None)
+            print(f"[SMS] Twilio create ok sid={sid}")
             # Record SMS usage for billing (graceful degradation)
             if USE_DB:
                 cid = get_db_client_id()
@@ -805,10 +810,11 @@ def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> b
             return True
         except Exception as e:
             last_err = e
+            print(f"[SMS] Twilio attempt {attempt + 1} failed: {e}")
             if attempt < 2:
                 import time
                 time.sleep(2 ** attempt)
-    print(f"SMS send failed after retries: {last_err}")
+    print(f"[SMS] send_sms FAILED after retries: {last_err}")
     return False
 
 def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
@@ -1210,8 +1216,9 @@ def parse_booking(ai_text: str) -> Optional[dict]:
             break
     return None
 
-def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
-    """Create appointment from parsed BOOKING; check slot; return appointment_data or None (slot taken)."""
+def _create_appointment_from_booking(booking: dict, client_id_override: Optional[str] = None) -> Optional[dict]:
+    """Create appointment from parsed BOOKING; check slot; return appointment_data or None (slot taken).
+    Pass client_id_override from voice flow so appointment is stored under correct tenant (async task may not have context)."""
     date = (booking.get("date") or "").strip()
     time = (booking.get("time") or "").strip()
     name = (booking.get("name") or "").strip()
@@ -1253,6 +1260,8 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
         "source": "receptionist",
         "status": "pending_customer",
     }
+    if client_id_override:
+        appointment_data["client_id"] = client_id_override
     if USE_DB:
         row = db_appointments_insert(appointment_data)
         apt_id = row["id"]
@@ -1264,7 +1273,7 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
     reserve_slot(date, time, apt_id)
     appointment_data["id"] = apt_id
     appointment_data.setdefault("created_at", datetime.now().isoformat())
-    print(f"[BOOKING] _create_appointment_from_booking OK apt_id={apt_id} name={name!r} date={date} time={time}")
+    print(f"[BOOKING] _create_appointment_from_booking OK apt_id={apt_id} client_id={appointment_data.get('client_id') or '(context)'} name={name!r} date={date} time={time}")
     return appointment_data
 
 def uses_non_latin_script(language_name: str) -> bool:
@@ -1362,11 +1371,14 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         booking = parse_booking(ai_text)
         if booking:
             from_num = call_data.get("from_number") or ""
-            print(f"[BOOKING] parsed name={booking.get('name')!r} date={booking.get('date')} time={booking.get('time')} from_number={from_num[:6]}...")
+            to_num = call_data.get("to_number") or ""
+            cid_raw = call_data.get("client_id") or ""
+            print(f"[BOOKING] parsed name={booking.get('name')!r} date={booking.get('date')} time={booking.get('time')} from_number={from_num[:10] if from_num else 'None'}... to_number={to_num[:10] if to_num else 'None'}... client_id={cid_raw or 'None'}")
             # Use caller's phone from Twilio when available (don't require asking)
             if from_num:
                 booking["phone"] = (booking.get("phone") or "").strip() or from_num
-            apt = _create_appointment_from_booking(booking)
+            cid = (call_data.get("client_id") or "").strip() or None
+            apt = _create_appointment_from_booking(booking, client_id_override=cid)
             if apt:
                 call_data["appointment_created"] = True
                 ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
@@ -1393,9 +1405,17 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 )
                 # Prefer caller number from live call so confirmation SMS always goes to the right person
                 to_number = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
-                from_number = call_data.get("to_number") if call_data else None
+                from_number = (call_data.get("to_number") or "").strip() if call_data else None
+                if not from_number and cid and USE_DB:
+                    tenant = db_tenant_get_by_client_id(cid)
+                    if tenant:
+                        from_number = (tenant.get("twilio_phone_number") or "").strip()
+                        print(f"[SMS] confirmation from_override was empty; used tenant twilio_phone_number for client_id={cid}")
+                    else:
+                        print(f"[SMS] confirmation no from_override and tenant not found for client_id={cid}")
                 if to_number:
-                    ok = send_sms(to_number, thanks_msg, from_override=from_number)
+                    print(f"[SMS] confirmation to={to_number[:12]}... from_override={from_number[:12] if from_number else 'None'}... client_id={cid}")
+                    ok = send_sms(to_number, thanks_msg, from_override=from_number or None)
                     print(f"📱 Confirmation SMS to {to_number}: {'sent' if ok else 'FAILED'}")
                 else:
                     print("📱 Confirmation SMS skipped: no caller phone (to_number empty)")
