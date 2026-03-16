@@ -1073,7 +1073,9 @@ def is_slot_available(
     for s in slots:
         d = s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES
         if _slot_overlaps(time, duration_minutes, s.get("time", ""), d):
+            print(f"[SLOT] is_slot_available date={date} time={time} -> TAKEN (overlaps {s.get('date')} {s.get('time')})")
             return False
+    print(f"[SLOT] is_slot_available date={date} time={time} -> AVAILABLE (conflicts={len(slots)})")
     return True
 
 def reserve_slot(
@@ -1106,30 +1108,40 @@ def reserve_slot(
         "duration_minutes": duration_minutes,
     })
     _save_booked_slots(slots)
+    _invalidate_booked_slots_cache()
+    print(f"[SLOT] reserve_slot date={date} time={time} appointment_id={appointment_id}")
 
 def release_slot(appointment_id: int) -> None:
     """Remove slot when appointment is rejected or cancelled."""
     slots = _load_booked_slots()
     slots = [s for s in slots if s.get("appointment_id") != appointment_id]
     _save_booked_slots(slots)
+    _invalidate_booked_slots_cache()
+    print(f"[SLOT] release_slot appointment_id={appointment_id}")
 
 # Cache for booked slots prompt (avoids repeated DB hits during rapid turns)
 _booked_slots_cache: dict = {}  # {client_key: (text, expires_at)}
-_BOOKED_SLOTS_CACHE_TTL_SEC = 45
+_BOOKED_SLOTS_CACHE_TTL_SEC = 10  # Short TTL so "available" and actual check stay in sync
 
-def get_booked_slots_prompt_text(days_ahead: int = 90) -> str:
+def _invalidate_booked_slots_cache() -> None:
+    """Clear booked slots cache so next prompt build sees current availability (e.g. after reserve/release)."""
+    _booked_slots_cache.clear()
+
+def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False) -> str:
     """Build a short line for the system prompt: already booked slots for today + days_ahead."""
     from datetime import timedelta
     now = datetime.now(timezone.utc)
     client_key = get_db_client_id() or "default"
     cache_key = f"{client_key}:{days_ahead}"
-    if cache_key in _booked_slots_cache:
+    if not skip_cache and cache_key in _booked_slots_cache:
         text, expires = _booked_slots_cache[cache_key]
         if expires > now:
+            print(f"[SLOT] prompt used cache (client={client_key}, slots_text_len={len(text)})")
             return text
         del _booked_slots_cache[cache_key]
     # Single merge + group by date (was: 90x get_booked_slots = 90x DB fetches)
     all_slots = _get_all_booked_slots_merged()
+    print(f"[SLOT] prompt built fresh (client={client_key}, skip_cache={skip_cache}, total_slots={len(all_slots)})")
     by_date: dict = {}
     for s in all_slots:
         dt = s.get("date")
@@ -1217,6 +1229,8 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
         pass
     # #endregion agent log
     if not is_slot_available(date, time):
+        _invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
+        print(f"[BOOKING] _create_appointment_from_booking FAILED slot taken name={name!r} date={date} time={time}")
         # #region agent log
         try:
             _agent_log(
@@ -1250,6 +1264,7 @@ def _create_appointment_from_booking(booking: dict) -> Optional[dict]:
     reserve_slot(date, time, apt_id)
     appointment_data["id"] = apt_id
     appointment_data.setdefault("created_at", datetime.now().isoformat())
+    print(f"[BOOKING] _create_appointment_from_booking OK apt_id={apt_id} name={name!r} date={date} time={time}")
     return appointment_data
 
 def uses_non_latin_script(language_name: str) -> bool:
@@ -1323,11 +1338,12 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
     try:
         # Keep tenant context so SMS and DB use correct client_id (async runs outside request)
         set_request_client_id(call_data.get("client_id") or get_db_client_id())
+        print(f"[CALL] generate_response_async call_sid={call_sid[:16]}... from={call_data.get('from_number','')[:10]}... client_id={call_data.get('client_id','')}")
         print(f"🤖 Generating response for call {call_sid}...")
         
-        # Always include booked slots so the AI knows which times are taken and avoids double-booking
+        # Always include booked slots (skip cache so prompt and is_slot_available see same data—avoids "available" then "booked")
         messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True)}
+            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True, skip_slots_cache=True)}
         ]
         messages.extend(call_data["conversation_history"])
         
@@ -1345,9 +1361,11 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
         if booking:
+            from_num = call_data.get("from_number") or ""
+            print(f"[BOOKING] parsed name={booking.get('name')!r} date={booking.get('date')} time={booking.get('time')} from_number={from_num[:6]}...")
             # Use caller's phone from Twilio when available (don't require asking)
-            if call_data.get("from_number"):
-                booking["phone"] = (booking.get("phone") or "").strip() or call_data["from_number"]
+            if from_num:
+                booking["phone"] = (booking.get("phone") or "").strip() or from_num
             apt = _create_appointment_from_booking(booking)
             if apt:
                 call_data["appointment_created"] = True
@@ -1386,6 +1404,8 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 name_ok = bool((booking.get("name") or "").strip())
                 date_ok = bool((booking.get("date") or "").strip())
                 time_ok = bool((booking.get("time") or "").strip())
+                reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
+                print(f"[BOOKING] create failed reason={reason} name_ok={name_ok} date_ok={date_ok} time_ok={time_ok}")
                 if not name_ok:
                     ai_text = "I'd love to book that for you—what's your name?"
                 elif not date_ok or not time_ok:
@@ -1595,7 +1615,7 @@ Respond with just the language name, nothing else."""
     # Default to English if detection fails
     return "English"
 
-def get_system_prompt(detected_language: str = "English", caller_memory: Optional[dict] = None, include_booked_slots: bool = False):
+def get_system_prompt(detected_language: str = "English", caller_memory: Optional[dict] = None, include_booked_slots: bool = False, skip_slots_cache: bool = False):
     # Ultra-concise prompt for fastest processing. Works for any business type (restaurant, salon, HVAC, real estate, etc.).
     # CRITICAL: Respond ONLY in the detected language (language can change mid-conversation)
     info = get_business_info()
@@ -1638,7 +1658,7 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
         memory_block = f"\n- This is a REPEAT CALLER. Greet them warmly; you may say welcome back. Name if we have it: {mem_name}. They have called {count} time(s) before; last time: {last}."
     slots_block = ""
     if include_booked_slots:
-        slots_text = get_booked_slots_prompt_text()
+        slots_text = get_booked_slots_prompt_text(skip_cache=skip_slots_cache)
         if slots_text:
             slots_block = f"\n- {slots_text}\n- CRITICAL: Only treat a time as TAKEN if it appears in the booked slots list above. If the list is empty or a day has no times listed, that day is fully available—say the time is available and offer to book it."
         else:
@@ -2887,6 +2907,10 @@ async def handle_incoming_sms(request: Request):
             if total >= limits.get("minutes_cap", 999999):
                 audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": limits.get("minutes_cap")}, request=request)
         apt = db_appointments_get_by_phone_for_sms(from_number) if USE_DB else None
+        if apt:
+            print(f"[SMS] inbound from={from_number[:8]}... apt_id={apt.get('id')} status={apt.get('status')} body_len={len(body)}")
+        else:
+            print(f"[SMS] inbound from={from_number[:8]}... no pending apt body_len={len(body)}")
         session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
         messages = (session["messages"] if session else []) if session else []
         messages.append({"role": "user", "content": body})
@@ -2894,6 +2918,7 @@ async def handle_incoming_sms(request: Request):
         if apt and apt.get("status") == "pending_customer" and _is_sms_confirmation(body):
             if USE_DB and apt.get("id"):
                 db_appointments_update(apt["id"], status="pending_review")
+            print(f"[SMS] customer confirmed apt_id={apt.get('id')} from={from_number[:8]}... -> status=pending_review")
             reply = "Thanks! We've sent this to the store. We'll text you when they confirm."
             send_sms(from_number, reply, from_override=to_number)
             messages.append({"role": "assistant", "content": reply})
@@ -2978,7 +3003,8 @@ async def handle_incoming_call(request: Request):
         to_number = form_data.get("To")
         
         logger.info("Incoming call: %s -> %s (CallSid: %s)", from_number, to_number, call_sid)
-        
+        print(f"[CALL] incoming from={from_number} to={to_number} call_sid={call_sid[:16]}...")
+
         # Multi-tenant: resolve tenant by To number and set request context
         tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
         if tenant:
@@ -3001,6 +3027,7 @@ async def handle_incoming_call(request: Request):
         # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"
         client_id = tenant["client_id"] if tenant else (CLIENT_ID or "default")
+        print(f"[CALL] client_id={client_id} session started")
         active_calls[call_sid] = {
             "session_id": session_id,
             "from_number": from_number,
@@ -3713,9 +3740,9 @@ async def process_recording(request: Request):
         }
         call_data["conversation_history"].append(user_message)
         
-        # Get AI response (always include booked slots so AI avoids double-booking)
+        # Get AI response (always include booked slots; skip cache so prompt and availability check match)
         messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True)}
+            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True, skip_slots_cache=True)}
         ]
         messages.extend(call_data["conversation_history"])
         
