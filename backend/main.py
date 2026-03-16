@@ -1039,19 +1039,39 @@ def get_booked_slots(date: str) -> List[dict]:
     slots = _get_all_booked_slots_merged()
     return [s for s in slots if s.get("date") == date]
 
+def _time_to_minutes(t: str) -> int:
+    """Parse time string (e.g. '10', '10:00', '10:00 AM') to minutes since midnight. Defensive against bad input."""
+    if not t:
+        return 0
+    t = (t or "").strip()
+    parts = t.replace("AM", "").replace("PM", "").strip().split(":")
+    h = 0
+    m = 0
+    try:
+        if parts:
+            h = int("".join(c for c in parts[0] if c.isdigit()) or "0")
+        if len(parts) > 1:
+            m = int("".join(c for c in parts[1] if c.isdigit()) or "0")
+    except (ValueError, TypeError):
+        pass
+    return h * 60 + m
+
+def _normalize_time_to_hhmm(t: str) -> str:
+    """Normalize time to HH:MM (e.g. '10' -> '10:00', '10:00 AM' -> '10:00')."""
+    if not t or not (t or "").strip():
+        return ""
+    mins = _time_to_minutes(t)
+    h, m = divmod(mins, 60)
+    return f"{h:02d}:{m:02d}"
+
 def _slot_overlaps(
     start_a: str, duration_a: int,
     start_b: str, duration_b: int
 ) -> bool:
-    """True if two time windows overlap. start_* is HH:MM."""
-    def to_minutes(t: str) -> int:
-        parts = t.strip().split(":")
-        h = int(parts[0]) if parts else 0
-        m = int(parts[1]) if len(parts) > 1 else 0
-        return h * 60 + m
-    a_start = to_minutes(start_a)
+    """True if two time windows overlap. start_* is HH:MM or flexible (10, 10:00, etc.)."""
+    a_start = _time_to_minutes(start_a)
     a_end = a_start + duration_a
-    b_start = to_minutes(start_b)
+    b_start = _time_to_minutes(start_b)
     b_end = b_start + duration_b
     return a_start < b_end and b_start < a_end
 
@@ -1220,7 +1240,8 @@ def _create_appointment_from_booking(booking: dict, client_id_override: Optional
     """Create appointment from parsed BOOKING; check slot; return appointment_data or None (slot taken).
     Pass client_id_override from voice flow so appointment is stored under correct tenant (async task may not have context)."""
     date = (booking.get("date") or "").strip()
-    time = (booking.get("time") or "").strip()
+    time_raw = (booking.get("time") or "").strip()
+    time = _normalize_time_to_hhmm(time_raw) or time_raw  # e.g. "10" -> "10:00"
     name = (booking.get("name") or "").strip()
     if not name or not date or not time:
         return None
@@ -1370,68 +1391,74 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
         if booking:
-            from_num = call_data.get("from_number") or ""
-            to_num = call_data.get("to_number") or ""
-            cid_raw = call_data.get("client_id") or ""
-            print(f"[BOOKING] parsed name={booking.get('name')!r} date={booking.get('date')} time={booking.get('time')} from_number={from_num[:10] if from_num else 'None'}... to_number={to_num[:10] if to_num else 'None'}... client_id={cid_raw or 'None'}")
-            # Use caller's phone from Twilio when available (don't require asking)
-            if from_num:
-                booking["phone"] = (booking.get("phone") or "").strip() or from_num
-            cid = (call_data.get("client_id") or "").strip() or None
-            apt = _create_appointment_from_booking(booking, client_id_override=cid)
-            if apt:
-                call_data["appointment_created"] = True
-                ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
-                # Ensure we have caller phone (backfill from Twilio if missing) so SMS goes out and dashboard shows it
-                if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
-                    apt["phone"] = call_data["from_number"]
-                    if USE_DB and apt.get("id"):
-                        try:
-                            db_appointments_update(apt["id"], phone=apt["phone"])
-                        except Exception:
-                            pass
-                # Send caller a text: full details (name, phone, email, date, time, service) so they can confirm or request changes before we send to store
-                phone_display = (apt.get("phone") or "").strip() or "Not provided"
-                email_display = (apt.get("email") or "").strip() or "Not provided"
-                thanks_msg = (
-                    f"Hey! Your reservation is pending. Here's what we have:\n"
-                    f"Name: {apt.get('name', '')}\n"
-                    f"Phone: {phone_display}\n"
-                    f"Email: {email_display}\n"
-                    f"Date: {apt.get('date', '')}\n"
-                    f"Time: {apt.get('time', '')}\n"
-                    f"Service: {apt.get('reason', '')}\n\n"
-                    f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!"
-                )
-                # Prefer caller number from live call so confirmation SMS always goes to the right person
-                to_number = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
-                from_number = (call_data.get("to_number") or "").strip() if call_data else None
-                if not from_number and cid and USE_DB:
-                    tenant = db_tenant_get_by_client_id(cid)
-                    if tenant:
-                        from_number = (tenant.get("twilio_phone_number") or "").strip()
-                        print(f"[SMS] confirmation from_override was empty; used tenant twilio_phone_number for client_id={cid}")
+            try:
+                from_num = call_data.get("from_number") or ""
+                to_num = call_data.get("to_number") or ""
+                cid_raw = call_data.get("client_id") or ""
+                print(f"[BOOKING] parsed name={booking.get('name')!r} date={booking.get('date')} time={booking.get('time')} from_number={from_num[:10] if from_num else 'None'}... to_number={to_num[:10] if to_num else 'None'}... client_id={cid_raw or 'None'}")
+                # Use caller's phone from Twilio when available (don't require asking)
+                if from_num:
+                    booking["phone"] = (booking.get("phone") or "").strip() or from_num
+                cid = (call_data.get("client_id") or "").strip() or None
+                apt = _create_appointment_from_booking(booking, client_id_override=cid)
+                if apt:
+                    call_data["appointment_created"] = True
+                    ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
+                    # Ensure we have caller phone (backfill from Twilio if missing) so SMS goes out and dashboard shows it
+                    if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
+                        apt["phone"] = call_data["from_number"]
+                        if USE_DB and apt.get("id"):
+                            try:
+                                db_appointments_update(apt["id"], phone=apt["phone"])
+                            except Exception:
+                                pass
+                    # Send caller a text: full details (name, phone, email, date, time, service) so they can confirm or request changes before we send to store
+                    phone_display = (apt.get("phone") or "").strip() or "Not provided"
+                    email_display = (apt.get("email") or "").strip() or "Not provided"
+                    thanks_msg = (
+                        f"Hey! Your reservation is pending. Here's what we have:\n"
+                        f"Name: {apt.get('name', '')}\n"
+                        f"Phone: {phone_display}\n"
+                        f"Email: {email_display}\n"
+                        f"Date: {apt.get('date', '')}\n"
+                        f"Time: {apt.get('time', '')}\n"
+                        f"Service: {apt.get('reason', '')}\n\n"
+                        f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!"
+                    )
+                    # Prefer caller number from live call so confirmation SMS always goes to the right person
+                    to_number = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
+                    from_number = (call_data.get("to_number") or "").strip() if call_data else None
+                    if not from_number and cid and USE_DB:
+                        tenant = db_tenant_get_by_client_id(cid)
+                        if tenant:
+                            from_number = (tenant.get("twilio_phone_number") or "").strip()
+                            print(f"[SMS] confirmation from_override was empty; used tenant twilio_phone_number for client_id={cid}")
+                        else:
+                            print(f"[SMS] confirmation no from_override and tenant not found for client_id={cid}")
+                    if to_number:
+                        print(f"[SMS] confirmation to={to_number[:12]}... from_override={from_number[:12] if from_number else 'None'}... client_id={cid}")
+                        ok = send_sms(to_number, thanks_msg, from_override=from_number or None)
+                        print(f"📱 Confirmation SMS to {to_number}: {'sent' if ok else 'FAILED'}")
                     else:
-                        print(f"[SMS] confirmation no from_override and tenant not found for client_id={cid}")
-                if to_number:
-                    print(f"[SMS] confirmation to={to_number[:12]}... from_override={from_number[:12] if from_number else 'None'}... client_id={cid}")
-                    ok = send_sms(to_number, thanks_msg, from_override=from_number or None)
-                    print(f"📱 Confirmation SMS to {to_number}: {'sent' if ok else 'FAILED'}")
+                        print("📱 Confirmation SMS skipped: no caller phone (to_number empty)")
                 else:
-                    print("📱 Confirmation SMS skipped: no caller phone (to_number empty)")
-            else:
-                # Failed: either slot taken or missing/invalid data (name, date)
-                name_ok = bool((booking.get("name") or "").strip())
-                date_ok = bool((booking.get("date") or "").strip())
-                time_ok = bool((booking.get("time") or "").strip())
-                reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
-                print(f"[BOOKING] create failed reason={reason} name_ok={name_ok} date_ok={date_ok} time_ok={time_ok}")
-                if not name_ok:
-                    ai_text = "I'd love to book that for you—what's your name?"
-                elif not date_ok or not time_ok:
-                    ai_text = "I need the date and time again to confirm—which day and time would you like?"
-                else:
-                    ai_text = "That time slot just got booked. Would you like to try another time or another day?"
+                    # Failed: either slot taken or missing/invalid data (name, date)
+                    name_ok = bool((booking.get("name") or "").strip())
+                    date_ok = bool((booking.get("date") or "").strip())
+                    time_ok = bool((booking.get("time") or "").strip())
+                    reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
+                    print(f"[BOOKING] create failed reason={reason} name_ok={name_ok} date_ok={date_ok} time_ok={time_ok}")
+                    if not name_ok:
+                        ai_text = "I'd love to book that for you—what's your name?"
+                    elif not date_ok or not time_ok:
+                        ai_text = "I need the date and time again to confirm—which day and time would you like?"
+                    else:
+                        ai_text = "That time slot just got booked. Would you like to try another time or another day?"
+            except Exception as e:
+                print(f"[BOOKING] CRASH during booking/SMS: {e}")
+                import traceback
+                traceback.print_exc()
+                ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
         
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
