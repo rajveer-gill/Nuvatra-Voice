@@ -1064,6 +1064,26 @@ def _normalize_time_to_hhmm(t: str) -> str:
     h, m = divmod(mins, 60)
     return f"{h:02d}:{m:02d}"
 
+def _hhmm_to_ampm(hhmm: str) -> str:
+    """Format HH:MM as 12-hour AM/PM (e.g. '13:00' -> '1:00 PM', '09:00' -> '9:00 AM')."""
+    if not hhmm or not (hhmm or "").strip():
+        return hhmm or ""
+    normalized = _normalize_time_to_hhmm(hhmm.strip())
+    if not normalized:
+        return hhmm
+    parts = normalized.split(":")
+    try:
+        h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        return hhmm
+    if h == 0:
+        return f"12:{m:02d} AM"
+    if h < 12:
+        return f"{h}:{m:02d} AM"
+    if h == 12:
+        return f"12:{m:02d} PM"
+    return f"{h - 12}:{m:02d} PM"
+
 def _slot_overlaps(
     start_a: str, duration_a: int,
     start_b: str, duration_b: int
@@ -1179,14 +1199,29 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
         if t:
             by_date[dt].append(t)
     today = now.date()
+    # Common business-hour times to suggest when some slots are taken (so we never suggest a taken time)
+    default_times = [f"{h:02d}:00" for h in range(9, 18)]  # 09:00–17:00
     parts = []
+    suggest_parts = []
     for d in range(days_ahead):
         day = today + timedelta(days=d)
         date_str = day.isoformat()
-        times = by_date.get(date_str)
+        times = by_date.get(date_str) or []
         if times:
-            parts.append(f"{date_str} at {', '.join(sorted(times))}")
+            # Show times in AM/PM for the AI to speak (e.g. "1:00 PM" not "13:00")
+            times_display = [_hhmm_to_ampm(t) for t in sorted(times)]
+            parts.append(f"{date_str} at {', '.join(times_display)}")
+            # Explicit list of times the AI may suggest (exclude taken); normalize for comparison
+            taken_set = {_normalize_time_to_hhmm(t.strip()) for t in times if t}
+            taken_set = {t for t in taken_set if t}
+            safe = [t for t in default_times if t not in taken_set]
+            if safe:
+                safe_display = [_hhmm_to_ampm(t) for t in safe]
+                taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]
+                suggest_parts.append(f"For {date_str} ONLY suggest these times (they are free): {', '.join(safe_display)}. Never suggest {', '.join(taken_display)}—already taken.")
     text = ("Booked slots (do not double-book): " + "; ".join(parts) + ". ") if parts else ""
+    if suggest_parts:
+        text += " " + " ".join(suggest_parts)
     expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
     _booked_slots_cache[cache_key] = (text, expires_at)
     # #region agent log
@@ -1403,7 +1438,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 apt = _create_appointment_from_booking(booking, client_id_override=cid)
                 if apt:
                     call_data["appointment_created"] = True
-                    ai_text = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
+                    ai_text = f"You're all set! We have you down for {apt['date']} at {_hhmm_to_ampm(apt.get('time', '') or '')}. The store will confirm shortly."
                     # Ensure we have caller phone (backfill from Twilio if missing) so SMS goes out and dashboard shows it
                     if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
                         apt["phone"] = call_data["from_number"]
@@ -1421,7 +1456,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         f"Phone: {phone_display}\n"
                         f"Email: {email_display}\n"
                         f"Date: {apt.get('date', '')}\n"
-                        f"Time: {apt.get('time', '')}\n"
+                        f"Time: {_hhmm_to_ampm(apt.get('time', '') or '')}\n"
                         f"Service: {apt.get('reason', '')}\n\n"
                         f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!"
                     )
@@ -1707,15 +1742,16 @@ def get_system_prompt(detected_language: str = "English", caller_memory: Optiona
     if include_booked_slots:
         slots_text = get_booked_slots_prompt_text(skip_cache=skip_slots_cache)
         if slots_text:
-            slots_block = f"\n- {slots_text}\n- CRITICAL: Only treat a time as TAKEN if it appears in the booked slots list above. If the list is empty or a day has no times listed, that day is fully available—say the time is available and offer to book it."
+            slots_block = f"\n- {slots_text}\n- CRITICAL: Times listed above (with AM/PM) are TAKEN. When the prompt says 'ONLY suggest these times' for a date, suggest ONLY those times—never suggest a time that is 'already taken' for that date. If the list is empty, all times are available."
         else:
             slots_block = "\n- Booked slots: none. CRITICAL: There are no booked slots, so ALL times are available. Never say a slot or day is 'taken', 'not available', or 'fully booked'—every time the caller asks for is available. Offer to book their requested time."
         today_utc = datetime.now(timezone.utc).date()
         today_str = today_utc.isoformat()
         tomorrow_str = (today_utc + timedelta(days=1)).isoformat()
         slots_block += f"""
-- AVAILABILITY (be efficient): If they ask about availability, (a) if they give a specific day—offer open times for that day (only times listed above as booked are taken; if none listed for that day, all times are open), or (b) if they don't—ask which week then which day, then offer times. Only say a day or time is taken if it appears in the booked slots list.
-- If they request a time that IS in the booked slots list: politely say it's taken and suggest alternatives.
+- TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
+- AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
+- If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date and time, and optionally email for confirmations.
 - When they have confirmed (name, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
 
@@ -2118,7 +2154,7 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
         if booking:
             apt = _create_appointment_from_booking(booking)
             if apt:
-                ai_response = f"You're all set! We have you down for {apt['date']} at {apt['time']}. The store will confirm shortly."
+                ai_response = f"You're all set! We have you down for {apt['date']} at {_hhmm_to_ampm(apt.get('time', '') or '')}. The store will confirm shortly."
                 action = "schedule_appointment"
                 data = {"appointment_id": apt["id"]}
             else:
@@ -2973,7 +3009,7 @@ async def handle_incoming_sms(request: Request):
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         apt_info = ""
         if apt:
-            apt_info = f"The customer has a PENDING appointment: Name {apt.get('name','')}, {apt.get('date','')} at {apt.get('time','')}, service: {apt.get('reason','')}."
+            apt_info = f"The customer has a PENDING appointment: Name {apt.get('name','')}, {apt.get('date','')} at {_hhmm_to_ampm(apt.get('time','') or '')}, service: {apt.get('reason','')}."
         else:
             apt_info = "The customer does not have a pending appointment in the system."
         business_name = get_business_info().get("name", "us")

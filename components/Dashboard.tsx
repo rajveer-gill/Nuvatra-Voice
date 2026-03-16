@@ -16,6 +16,18 @@ interface Appointment {
   created_at: string
 }
 
+/** Format HH:MM as 12-hour AM/PM (e.g. "13:00" -> "1:00 PM"). */
+function formatTime(hhmm: string | undefined): string {
+  if (!hhmm || !hhmm.trim()) return hhmm || '—'
+  const [hStr, mStr] = hhmm.trim().split(':')
+  const h = parseInt(hStr || '0', 10)
+  const m = parseInt(mStr || '0', 10)
+  if (h === 0) return `12:${String(m).padStart(2, '0')} AM`
+  if (h < 12) return `${h}:${String(m).padStart(2, '0')} AM`
+  if (h === 12) return `12:${String(m).padStart(2, '0')} PM`
+  return `${h - 12}:${String(m).padStart(2, '0')} PM`
+}
+
 interface Message {
   id: number
   caller_name: string
@@ -353,7 +365,7 @@ export default function Dashboard() {
                   <tr key={appointment.id} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="py-3 px-4">{appointment.name}</td>
                     <td className="py-3 px-4">{appointment.date}</td>
-                    <td className="py-3 px-4">{appointment.time}</td>
+                    <td className="py-3 px-4">{formatTime(appointment.time)}</td>
                     <td className="py-3 px-4">{appointment.reason}</td>
                     <td className="py-3 px-4">
                       <span
