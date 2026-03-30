@@ -167,6 +167,17 @@ def init_db() -> bool:
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tenants_twilio_phone ON tenants(twilio_phone_number)")
+        for col, typ in [
+            ("recording_sid", "TEXT"),
+            ("recording_url", "TEXT"),
+            ("recording_duration_sec", "INTEGER"),
+            ("recording_status", "TEXT"),
+            ("call_summary", "TEXT"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE call_log ADD COLUMN IF NOT EXISTS {col} {typ}")
+            except Exception:
+                pass
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sms_sessions (
                 phone TEXT NOT NULL,
@@ -1084,13 +1095,24 @@ def db_call_log_append(entry: dict) -> None:
     try:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO call_log (client_id, call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (call_sid) DO UPDATE SET end_iso = EXCLUDED.end_iso, outcome = COALESCE(EXCLUDED.outcome, call_log.outcome), duration_sec = EXCLUDED.duration_sec
+            INSERT INTO call_log (client_id, call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category,
+                recording_sid, recording_url, recording_duration_sec, recording_status, call_summary)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (call_sid) DO UPDATE SET
+                end_iso = EXCLUDED.end_iso,
+                outcome = COALESCE(EXCLUDED.outcome, call_log.outcome),
+                duration_sec = EXCLUDED.duration_sec,
+                recording_sid = COALESCE(EXCLUDED.recording_sid, call_log.recording_sid),
+                recording_url = COALESCE(EXCLUDED.recording_url, call_log.recording_url),
+                recording_duration_sec = COALESCE(EXCLUDED.recording_duration_sec, call_log.recording_duration_sec),
+                recording_status = COALESCE(EXCLUDED.recording_status, call_log.recording_status),
+                call_summary = COALESCE(EXCLUDED.call_summary, call_log.call_summary)
         """, (
             _client_id(), entry.get("call_sid"), entry.get("from_number"), entry.get("to_number"),
             entry.get("start_iso"), entry.get("end_iso"), entry.get("outcome"),
-            entry.get("duration_sec"), entry.get("category")
+            entry.get("duration_sec"), entry.get("category"),
+            entry.get("recording_sid"), entry.get("recording_url"), entry.get("recording_duration_sec"),
+            entry.get("recording_status"), entry.get("call_summary"),
         ))
         conn.commit()
         cur.close()
@@ -1104,21 +1126,128 @@ def db_call_log_load(limit: int = 5000, days: Optional[int] = None) -> List[dict
         return []
     cur = conn.cursor()
     cid = _client_id()
+    cols = """call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category, created_at,
+        recording_sid, recording_url, recording_duration_sec, recording_status, call_summary"""
     if days is not None and days > 0:
-        cur.execute("""
-            SELECT call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category, created_at
+        cur.execute(f"""
+            SELECT {cols}
             FROM call_log
             WHERE client_id = %s AND created_at >= NOW() - make_interval(days => %s::int)
             ORDER BY created_at DESC LIMIT %s
         """, (cid, days, limit))
     else:
-        cur.execute("""
-            SELECT call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category, created_at
+        cur.execute(f"""
+            SELECT {cols}
             FROM call_log WHERE client_id = %s ORDER BY created_at DESC LIMIT %s
         """, (cid, limit))
     rows = cur.fetchall()
     cur.close()
-    return [{"call_sid": r[0], "from_number": r[1], "to_number": r[2], "start_iso": r[3], "end_iso": r[4], "outcome": r[5], "duration_sec": r[6], "category": r[7], "created_at": r[8].isoformat() if len(r) > 8 and r[8] else None} for r in rows]
+    def _row(r):
+        return {
+            "call_sid": r[0], "from_number": r[1], "to_number": r[2], "start_iso": r[3], "end_iso": r[4],
+            "outcome": r[5], "duration_sec": r[6], "category": r[7],
+            "created_at": r[8].isoformat() if len(r) > 8 and r[8] else None,
+            "recording_sid": r[9] if len(r) > 9 else None,
+            "recording_url": r[10] if len(r) > 10 else None,
+            "recording_duration_sec": r[11] if len(r) > 11 else None,
+            "recording_status": r[12] if len(r) > 12 else None,
+            "call_summary": r[13] if len(r) > 13 else None,
+        }
+    return [_row(r) for r in rows]
+
+
+def db_call_log_update_recording(
+    call_sid: str,
+    client_id: str,
+    recording_sid: Optional[str] = None,
+    recording_url: Optional[str] = None,
+    recording_duration_sec: Optional[int] = None,
+    recording_status: Optional[str] = None,
+) -> bool:
+    """Upsert recording metadata. Row may not exist yet if Twilio callbacks before call_log_end."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO call_log (client_id, call_sid, recording_sid, recording_url, recording_duration_sec, recording_status)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (call_sid) DO UPDATE SET
+                recording_sid = COALESCE(EXCLUDED.recording_sid, call_log.recording_sid),
+                recording_url = COALESCE(EXCLUDED.recording_url, call_log.recording_url),
+                recording_duration_sec = COALESCE(EXCLUDED.recording_duration_sec, call_log.recording_duration_sec),
+                recording_status = COALESCE(EXCLUDED.recording_status, call_log.recording_status)
+        """, (client_id, call_sid, recording_sid, recording_url, recording_duration_sec, recording_status))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to upsert call_log recording: {e}")
+        return False
+
+
+def db_call_log_update_summary(call_sid: str, client_id: str, call_summary: str) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE call_log SET call_summary = %s WHERE call_sid = %s AND client_id = %s",
+            (call_summary, call_sid, client_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to update call_log summary: {e}")
+        return False
+
+
+def db_call_log_get_client_id_by_call_sid(call_sid: str) -> Optional[str]:
+    """Resolve tenant client_id for a call (e.g. async recording webhook)."""
+    conn = _get_conn()
+    if not conn or not call_sid:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT client_id FROM call_log WHERE call_sid = %s LIMIT 1", (call_sid,))
+        row = cur.fetchone()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] Failed to lookup call_log client_id: {e}")
+        return None
+
+
+def db_call_log_get_by_call_sid(client_id: str, call_sid: str) -> Optional[dict]:
+    """Single row for playback auth check."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT call_sid, from_number, to_number, start_iso, end_iso, outcome, duration_sec, category, created_at,
+                recording_sid, recording_url, recording_duration_sec, recording_status, call_summary
+            FROM call_log WHERE call_sid = %s AND client_id = %s LIMIT 1
+        """, (call_sid, client_id))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        return {
+            "call_sid": row[0], "from_number": row[1], "to_number": row[2], "start_iso": row[3], "end_iso": row[4],
+            "outcome": row[5], "duration_sec": row[6], "category": row[7],
+            "created_at": row[8].isoformat() if row[8] else None,
+            "recording_sid": row[9], "recording_url": row[10], "recording_duration_sec": row[11],
+            "recording_status": row[12], "call_summary": row[13],
+        }
+    except Exception as e:
+        print(f"[DB] Failed to get call_log row: {e}")
+        return None
 
 # --- Caller memory ---
 def db_caller_memory_get(phone: str) -> Optional[dict]:

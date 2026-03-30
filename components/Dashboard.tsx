@@ -61,6 +61,12 @@ interface CallLogEntry {
   outcome: string
   duration_sec?: number
   category?: string
+  recording_sid?: string | null
+  recording_url?: string | null
+  recording_duration_sec?: number | null
+  recording_status?: string | null
+  call_summary?: string | null
+  created_at?: string | null
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -307,6 +313,8 @@ export default function Dashboard() {
                       <th className="text-left py-2 px-2 font-semibold text-gray-700">Start</th>
                       <th className="text-left py-2 px-2 font-semibold text-gray-700">Duration</th>
                       <th className="text-left py-2 px-2 font-semibold text-gray-700">Outcome</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-700">Summary</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-700">Recording</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -329,6 +337,41 @@ export default function Dashboard() {
                           >
                             {call.outcome || '—'}
                           </span>
+                        </td>
+                        <td className="py-2 px-2 max-w-[200px]">
+                          {call.call_summary ? (
+                            <span className="text-gray-700 line-clamp-2" title={call.call_summary}>
+                              {call.call_summary.length > 120 ? `${call.call_summary.slice(0, 120)}…` : call.call_summary}
+                            </span>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-2">
+                          {call.recording_sid || call.recording_url ? (
+                            <button
+                              type="button"
+                              className="text-primary-600 hover:text-primary-800 text-sm font-medium underline"
+                              onClick={async () => {
+                                try {
+                                  const res = await api.get(
+                                    `/api/analytics/calls/${encodeURIComponent(call.call_sid)}/recording`,
+                                    { responseType: 'blob' }
+                                  )
+                                  const blob = new Blob([res.data], { type: 'audio/mpeg' })
+                                  const url = URL.createObjectURL(blob)
+                                  window.open(url, '_blank', 'noopener,noreferrer')
+                                  setTimeout(() => URL.revokeObjectURL(url), 120_000)
+                                } catch {
+                                  // 404 / auth — ignore
+                                }
+                              }}
+                            >
+                              Play
+                            </button>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}

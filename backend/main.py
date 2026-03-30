@@ -247,7 +247,7 @@ if os.getenv("DEBUG_CORS", "").strip() == "1":
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
 
-# Per-client cache for greeting / got-it audio (client_id -> bytes). Uses selected voice from Settings.
+# Per-client cache for greeting (key (client_id, recording_on) -> bytes) and got-it (client_id -> bytes).
 greeting_audio_cache: dict = {}
 got_it_audio_cache: dict = {}
 
@@ -298,6 +298,15 @@ elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
 PROJECT_ROOT = _backend_dir.parent
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 
+def _call_recording_enabled() -> bool:
+    return os.getenv("CALL_RECORDING_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+def _call_summary_enabled() -> bool:
+    raw = os.getenv("CALL_SUMMARY_ENABLED")
+    if raw is None or not str(raw).strip():
+        return _call_recording_enabled()
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
 # Auth: Clerk JWT verification for multi-tenant
 try:
     from auth import get_bearer_token, verify_clerk_token
@@ -324,6 +333,10 @@ try:
         db_messages_max_id,
         db_call_log_append,
         db_call_log_load,
+        db_call_log_update_recording,
+        db_call_log_update_summary,
+        db_call_log_get_client_id_by_call_sid,
+        db_call_log_get_by_call_sid,
         db_caller_memory_get,
         db_caller_memory_upsert,
         db_booked_slots_load,
@@ -555,7 +568,8 @@ def invalidate_voice_cache(client_id: Optional[str] = None) -> None:
     """Clear per-client greeting/got-it audio cache when voice or speed changes in Settings."""
     global greeting_audio_cache, got_it_audio_cache
     if client_id:
-        greeting_audio_cache.pop(client_id, None)
+        greeting_audio_cache.pop((client_id, True), None)
+        greeting_audio_cache.pop((client_id, False), None)
         got_it_audio_cache.pop(client_id, None)
     else:
         greeting_audio_cache.clear()
@@ -566,9 +580,12 @@ def get_greeting_text() -> str:
     info = get_business_info()
     raw = info.get("greeting") or "Thank you for calling. How can I help you today?"
     try:
-        return raw.format(business_name=info.get("name", "us"))
+        base = raw.format(business_name=info.get("name", "us"))
     except KeyError:
-        return raw
+        base = raw
+    if _call_recording_enabled():
+        base = f"{base.strip()} This call may be recorded for quality and training."
+    return base
 
 class ConversationRequest(BaseModel):
     message: str
@@ -817,6 +834,20 @@ def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> b
     print(f"[SMS] send_sms FAILED after retries: {last_err}")
     return False
 
+
+def _tenant_sms_from_number() -> Optional[str]:
+    """Outbound SMS From: tenant's Twilio number in DB, else business config phone (non-DB). None → send_sms uses TWILIO_SMS_FROM."""
+    if USE_DB:
+        cid = get_db_client_id()
+        if cid and cid != "default":
+            tenant = db_tenant_get_by_client_id(cid)
+            if tenant:
+                n = (tenant.get("twilio_phone_number") or "").strip()
+                if n:
+                    return n
+    phone = (get_business_info().get("phone") or "").strip()
+    return phone or None
+
 def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
     """Validate X-Twilio-Signature so only Twilio can trigger webhooks. Returns True if valid or if auth token not set (backward compat)."""
     auth_token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
@@ -934,7 +965,48 @@ def call_log_start(call_sid: str, from_number: str, to_number: str):
         "end_iso": None,
         "duration_sec": None,
         "category": None,
+        "recording_sid": None,
+        "recording_url": None,
+        "recording_duration_sec": None,
+        "recording_status": None,
+        "call_summary": None,
     }
+
+def call_log_merge_recording(call_sid: str, **kwargs) -> None:
+    """Merge recording / summary fields into in-memory call log entry."""
+    ent = call_log_entries.get(call_sid)
+    if not ent:
+        return
+    for k, v in kwargs.items():
+        if v is not None:
+            ent[k] = v
+
+def _file_call_log_merge_recording(call_sid: str, **kwargs) -> None:
+    """Best-effort merge into clients/<id>/call_log.json when not using DB."""
+    data_dir = get_client_data_dir()
+    if not data_dir:
+        return
+    path = data_dir / "call_log.json"
+    log_list: List[dict] = []
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                log_list = json.load(f)
+        except Exception:
+            return
+    for e in reversed(log_list):
+        if e.get("call_sid") == call_sid:
+            for k, v in kwargs.items():
+                if v is not None:
+                    e[k] = v
+            break
+    else:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(log_list, f, indent=2)
+    except Exception as ex:
+        print(f"Failed to merge recording into file call log: {ex}")
 
 def call_log_set_outcome(call_sid: str, outcome: str):
     """Set outcome: 'forwarded', 'answered_by_ai', 'missed', 'error', 'no-answer'."""
@@ -1422,9 +1494,27 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         
         ai_text = ai_response.choices[0].message.content
         print(f"✅ GPT response generated: {ai_text[:50]}...")
-        
+        # #region agent log
+        try:
+            _agent_log("H1", "backend/main.py:generate_response_async", "Before parse_booking", {
+                "has_booking_in_text": "BOOKING:" in (ai_text or ""),
+                "any_line_starts_with_booking": any((p or "").strip().upper().startswith("BOOKING:") for p in (ai_text or "").split("\n")),
+            }, "pre-fix")
+        except Exception:
+            pass
+        # #endregion agent log
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
+        # #region agent log
+        try:
+            _agent_log("H1", "backend/main.py:generate_response_async", "After parse_booking", {
+                "parse_booking_returned_none": booking is None,
+            }, "pre-fix")
+            # So Render logs show it too (no log file access there)
+            print(f"[DEBUG_SMS] has_booking={'BOOKING:' in (ai_text or '')} line_starts_booking={any((p or '').strip().upper().startswith('BOOKING:') for p in (ai_text or '').split(chr(10)))} parse_none={booking is None}")
+        except Exception:
+            pass
+        # #endregion agent log
         if booking:
             try:
                 from_num = call_data.get("from_number") or ""
@@ -1436,6 +1526,14 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     booking["phone"] = (booking.get("phone") or "").strip() or from_num
                 cid = (call_data.get("client_id") or "").strip() or None
                 apt = _create_appointment_from_booking(booking, client_id_override=cid)
+                # #region agent log
+                try:
+                    _agent_log("H3", "backend/main.py:generate_response_async", "After _create_appointment_from_booking", {
+                        "apt_is_none": apt is None,
+                    }, "pre-fix")
+                except Exception:
+                    pass
+                # #endregion agent log
                 if apt:
                     call_data["appointment_created"] = True
                     ai_text = f"You're all set! We have you down for {apt['date']} at {_hhmm_to_ampm(apt.get('time', '') or '')}. The store will confirm shortly."
@@ -1470,9 +1568,24 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                             print(f"[SMS] confirmation from_override was empty; used tenant twilio_phone_number for client_id={cid}")
                         else:
                             print(f"[SMS] confirmation no from_override and tenant not found for client_id={cid}")
+                    # #region agent log
+                    try:
+                        _agent_log("H2", "backend/main.py:generate_response_async", "SMS branch", {
+                            "to_number_empty": not bool(to_number),
+                            "to_number_masked": f"{to_number[:6]}...{to_number[-2:]}" if len(to_number) >= 8 else "(short)",
+                        }, "pre-fix")
+                    except Exception:
+                        pass
+                    # #endregion agent log
                     if to_number:
                         print(f"[SMS] confirmation to={to_number[:12]}... from_override={from_number[:12] if from_number else 'None'}... client_id={cid}")
                         ok = send_sms(to_number, thanks_msg, from_override=from_number or None)
+                        # #region agent log
+                        try:
+                            _agent_log("H4", "backend/main.py:generate_response_async", "After send_sms", {"sms_ok": ok}, "pre-fix")
+                        except Exception:
+                            pass
+                        # #endregion agent log
                         print(f"📱 Confirmation SMS to {to_number}: {'sent' if ok else 'FAILED'}")
                     else:
                         print("📱 Confirmation SMS skipped: no caller phone (to_number empty)")
@@ -2269,7 +2382,7 @@ async def accept_appointment(appointment_id: int, request: Request, _: None = De
     date = apt.get("date", "")
     time = apt.get("time", "")
     msg = f"Your appointment at {business_name} is confirmed for {date} at {time}. Reply if you need to change."
-    send_sms(apt.get("phone") or "", msg)
+    send_sms(apt.get("phone") or "", msg, from_override=_tenant_sms_from_number())
     return {"success": True, "appointment": apt}
 
 @app.post("/api/appointments/{appointment_id}/reject")
@@ -2287,7 +2400,7 @@ async def reject_appointment(appointment_id: int, request: Request, _: None = De
     date = apt.get("date", "")
     time = apt.get("time", "")
     msg = f"Sorry, {time} on {date} isn't available. Please reply with 2-3 alternative dates and times that work for you."
-    send_sms(apt.get("phone") or "", msg)
+    send_sms(apt.get("phone") or "", msg, from_override=_tenant_sms_from_number())
     return {"success": True, "appointment": apt}
 
 @app.post("/api/messages")
@@ -2768,7 +2881,10 @@ async def get_analytics_export(tenant: Optional[dict] = Depends(require_tenant),
     import csv
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["call_sid", "from_number", "to_number", "start_iso", "end_iso", "outcome", "duration_sec", "category", "created_at"])
+    writer.writerow([
+        "call_sid", "from_number", "to_number", "start_iso", "end_iso", "outcome", "duration_sec", "category", "created_at",
+        "recording_sid", "recording_duration_sec", "recording_status", "call_summary",
+    ])
     for e in log:
         writer.writerow([
             e.get("call_sid", ""),
@@ -2780,12 +2896,54 @@ async def get_analytics_export(tenant: Optional[dict] = Depends(require_tenant),
             e.get("duration_sec", ""),
             e.get("category", ""),
             e.get("created_at", ""),
+            e.get("recording_sid", ""),
+            e.get("recording_duration_sec", ""),
+            e.get("recording_status", ""),
+            e.get("call_summary", ""),
         ])
     return Response(
         content=buf.getvalue(),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=call_log.csv"},
     )
+
+
+def _fetch_twilio_recording_bytes(recording_url: str) -> tuple:
+    import httpx
+    r = httpx.get(
+        recording_url,
+        auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+        timeout=120.0,
+    )
+    return r.status_code, r.content
+
+
+@app.get("/api/analytics/calls/{call_sid}/recording")
+async def get_call_recording_audio(
+    call_sid: str,
+    tenant: Optional[dict] = Depends(require_tenant),
+    _: None = Depends(require_active_subscription),
+):
+    """Stream call recording (MP3) from Twilio using server-side credentials; tenant must own the call."""
+    if not tenant or not USE_DB:
+        raise HTTPException(status_code=404, detail="Recording not available")
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="Recording playback is not configured")
+    row = db_call_log_get_by_call_sid(tenant["client_id"], call_sid)
+    if not row or not row.get("recording_url"):
+        raise HTTPException(status_code=404, detail="Recording not available")
+    code, data = await asyncio.to_thread(_fetch_twilio_recording_bytes, row["recording_url"])
+    if code != 200:
+        raise HTTPException(status_code=502, detail="Could not fetch recording")
+    return Response(
+        content=data,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": f'inline; filename="{call_sid}.mp3"',
+            "Cache-Control": "private, max-age=300",
+        },
+    )
+
 
 @app.post("/api/text-to-speech")
 async def text_to_speech(request: TTSRequest, _: None = Depends(require_active_subscription)):
@@ -2847,13 +3005,75 @@ def _get_client_id_from_call(request: Request) -> str:
         return active_calls[call_sid].get("client_id") or CLIENT_ID or "default"
     return CLIENT_ID or "default"
 
+
+def _summarize_call_recording_sync(call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]) -> None:
+    """Download Twilio recording, Whisper transcribe, short GPT summary; persist call_summary."""
+    if not recording_url or not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        return
+    try:
+        cap = int(os.getenv("CALL_SUMMARY_MAX_DURATION_SEC", "1800"))
+    except ValueError:
+        cap = 1800
+    if duration_sec is not None and duration_sec > cap:
+        logger.info("[Recording] Skip summary (duration %s sec > cap %s)", duration_sec, cap)
+        return
+    if (os.getenv("TWILIO_INTELLIGENCE_SERVICE_SID") or "").strip():
+        logger.info("[Recording] TWILIO_INTELLIGENCE_SERVICE_SID is set; Phase 1 still uses OpenAI Whisper+GPT")
+    try:
+        import httpx
+        with httpx.Client(timeout=120.0) as http:
+            r = http.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+        if r.status_code != 200:
+            logger.error("[Recording] Download failed status=%s call_sid=%s", r.status_code, call_sid)
+            return
+        audio_data = r.content
+        _ensure_openai_client()
+        bio = io.BytesIO(audio_data)
+        bio.name = "recording.mp3"
+        transcript = client.audio.transcriptions.create(model="whisper-1", file=bio)
+        text = (getattr(transcript, "text", None) or "").strip()
+        if not text:
+            return
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Summarize this phone call in 2–4 clear sentences for a business owner dashboard. Mention caller intent (e.g. appointment, question, complaint) if clear. Be factual; do not invent details.",
+                },
+                {"role": "user", "content": text[:12000]},
+            ],
+            max_tokens=350,
+            temperature=0.3,
+        )
+        summary = (resp.choices[0].message.content or "").strip()
+        if not summary:
+            return
+        set_request_client_id(client_id)
+        if USE_DB:
+            db_call_log_update_summary(call_sid, client_id, summary)
+        call_log_merge_recording(call_sid, call_summary=summary)
+        if not USE_DB:
+            _file_call_log_merge_recording(call_sid, call_summary=summary)
+    except Exception:
+        logger.exception("[Recording] Summarize failed call_sid=%s", call_sid)
+
+
+async def _schedule_recording_summary(call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]) -> None:
+    try:
+        await asyncio.to_thread(_summarize_call_recording_sync, call_sid, client_id, recording_url, duration_sec)
+    except Exception:
+        logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
+
+
 @app.get("/api/phone/greeting-audio")
 async def get_greeting_audio(request: Request):
     """Serve greeting audio using the voice selected in Settings. Per-client cache."""
     global greeting_audio_cache
     client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
-    cached = greeting_audio_cache.get(client_id)
+    cache_key = (client_id, _call_recording_enabled())
+    cached = greeting_audio_cache.get(cache_key)
     if cached:
         return Response(
             content=cached,
@@ -2874,7 +3094,7 @@ async def get_greeting_audio(request: Request):
             speed=get_tts_speed()
         )
         data = greeting_audio.content
-        greeting_audio_cache[client_id] = data
+        greeting_audio_cache[cache_key] = data
         print(f"🎵 Greeting audio generated for {client_id} (voice={voice})")
         return Response(
             content=data,
@@ -2897,7 +3117,7 @@ async def get_greeting_audio(request: Request):
                 speed=1.0,
             )
             data = fallback_audio.content
-            greeting_audio_cache[client_id] = data
+            greeting_audio_cache[cache_key] = data
             return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
         except Exception as e2:
             print(f"❌ Fallback greeting audio failed: {e2}")
@@ -3128,19 +3348,25 @@ async def handle_incoming_call(request: Request):
         
         # Create TwiML response
         response = VoiceResponse()
-        
+
         # Get base URL - use the ngrok URL from environment or construct from request
-        # For ngrok, we need to use the public URL, not localhost
         base_url = os.getenv("NGROK_URL")
         if not base_url:
-            # Fallback: try to get from request, but replace localhost with ngrok domain if present
             request_url = str(request.url)
             if "ngrok" in request_url:
                 base_url = request_url.replace("/api/phone/incoming", "")
             else:
-                # Default to ngrok URL format (user should set NGROK_URL env var)
                 base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
-        
+
+        if TWILIO_AVAILABLE and VoiceResponse and _call_recording_enabled():
+            cb = f"{base_url.rstrip('/')}/api/phone/recording-complete"
+            start = response.start()
+            start.recording(
+                channels="dual",
+                recording_status_callback=cb,
+                recording_status_callback_method="POST",
+            )
+
         # Greeting audio uses voice from Settings; pass call_sid so we resolve client_id
         greeting_audio_url = f"{base_url}/api/phone/greeting-audio?call_sid={call_sid}"
         response.play(greeting_audio_url)
@@ -3186,6 +3412,72 @@ async def handle_incoming_call(request: Request):
             response.play(tts_audio_url)
             response.hangup()
             return Response(content=str(response), media_type="application/xml")
+
+
+@app.post("/api/phone/recording-complete")
+async def handle_recording_complete(request: Request):
+    """Twilio recording status callback for full-call dual-channel recording."""
+    if not TWILIO_AVAILABLE:
+        return Response(content="", status_code=200, media_type="text/plain")
+    try:
+        form_data = await request.form()
+        form_dict = dict(form_data)
+        if not _validate_twilio_webhook(request, form_dict):
+            return Response(content="Forbidden", status_code=403, media_type="text/plain")
+        call_sid = (form_data.get("CallSid") or "").strip()
+        recording_sid = (form_data.get("RecordingSid") or "").strip() or None
+        recording_url = (form_data.get("RecordingUrl") or "").strip() or None
+        recording_status = (form_data.get("RecordingStatus") or "").strip() or None
+        dur_raw = (form_data.get("RecordingDuration") or "").strip()
+        duration_sec: Optional[int] = None
+        if dur_raw:
+            try:
+                duration_sec = int(float(dur_raw))
+            except (TypeError, ValueError):
+                pass
+
+        client_id: Optional[str] = None
+        if call_sid and call_sid in active_calls:
+            client_id = active_calls[call_sid].get("client_id")
+        if not client_id and USE_DB:
+            client_id = db_call_log_get_client_id_by_call_sid(call_sid)
+        if not client_id:
+            client_id = CLIENT_ID or "default"
+        set_request_client_id(client_id)
+
+        if USE_DB:
+            db_call_log_update_recording(
+                call_sid,
+                client_id,
+                recording_sid=recording_sid,
+                recording_url=recording_url,
+                recording_duration_sec=duration_sec,
+                recording_status=recording_status,
+            )
+        call_log_merge_recording(
+            call_sid,
+            recording_sid=recording_sid,
+            recording_url=recording_url,
+            recording_duration_sec=duration_sec,
+            recording_status=recording_status,
+        )
+        if not USE_DB:
+            _file_call_log_merge_recording(
+                call_sid,
+                recording_sid=recording_sid,
+                recording_url=recording_url,
+                recording_duration_sec=duration_sec,
+                recording_status=recording_status,
+            )
+
+        st = (recording_status or "").lower()
+        if st == "completed" and recording_url and _call_summary_enabled():
+            asyncio.create_task(_schedule_recording_summary(call_sid, client_id, recording_url, duration_sec))
+        return Response(content="", status_code=200, media_type="text/plain")
+    except Exception as e:
+        logger.exception("recording-complete webhook error: %s", e)
+        return Response(content="", status_code=200, media_type="text/plain")
+
 
 @app.post("/api/phone/process-speech")
 async def process_speech(request: Request):
@@ -3375,19 +3667,35 @@ async def process_speech(request: Request):
             )
         
         # If no input, prompt once then goodbye (same TTS voice as receptionist)
-        still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
-        response.play(still_there_url)
-        gather2 = response.gather(
-            input='speech',
-            action=f"{base_url}/api/phone/process-speech",
-            method='POST',
-            speech_timeout='auto',
-            language=twilio_lang_code
-        )
-        goodbye_text = "Thanks for calling! Have a wonderful day!"
-        goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
-        response.play(goodbye_url)
-        response.hangup()
+        # #region agent log
+        try:
+            print("[DEBUG_CALL_END] process-speech building timeout/goodbye TwiML")
+            _agent_log("CRASH_END", "backend/main.py:process_speech", "Building still_there/goodbye", {"call_sid": (call_sid or "")[:16]}, "pre-fix")
+        except Exception:
+            pass
+        # #endregion agent log
+        try:
+            still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
+            response.play(still_there_url)
+            gather2 = response.gather(
+                input='speech',
+                action=f"{base_url}/api/phone/process-speech",
+                method='POST',
+                speech_timeout='auto',
+                language=twilio_lang_code
+            )
+            goodbye_text = "Thanks for calling! Have a wonderful day!"
+            goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
+            response.play(goodbye_url)
+            response.hangup()
+        except Exception as e:
+            try:
+                _agent_log("CRASH_END", "backend/main.py:process_speech", "Exception in goodbye block", {"error": str(e), "type": type(e).__name__}, "pre-fix")
+            except Exception:
+                pass
+            print(f"[DEBUG_CALL_END] process-speech goodbye block failed: {type(e).__name__}: {e}")
+            response = VoiceResponse()
+            response.hangup()
         
         return Response(content=str(response), media_type="application/xml")
     
@@ -3527,7 +3835,14 @@ async def respond_with_audio(request: Request):
         form_data = await request.form()
         call_sid = form_data.get("CallSid")
         _restore_call_context(call_sid or "")
-        
+        # base_url needed for forward_call_to_business in all branches
+        base_url = os.getenv("NGROK_URL")
+        if not base_url:
+            request_url = str(request.url)
+            if "ngrok" in request_url:
+                base_url = request_url.replace("/api/phone/respond", "")
+            else:
+                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
         if not call_sid or call_sid not in response_status:
             # Lost response status - forward to business phone if available
             response = VoiceResponse()
@@ -3547,16 +3862,6 @@ async def respond_with_audio(request: Request):
         
         status_data = response_status[call_sid]
         status = status_data.get("status", "pending")
-        
-        # Get base URL
-        base_url = os.getenv("NGROK_URL")
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/respond", "")
-            else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
-        
         response = VoiceResponse()
         
         if status == "ready":
@@ -3564,46 +3869,61 @@ async def respond_with_audio(request: Request):
             audio_url = status_data.get("audio_url")
             if audio_url:
                 response.play(audio_url)
-                
-                # After playing, set up next input gathering
-                call_data = active_calls.get(call_sid, {})
-                detected_lang = call_data.get("detected_language", "English")
-                twilio_lang_code = get_twilio_language_code(detected_lang)
-                
-                # For non-Latin scripts, use Record + Whisper
-                if uses_non_latin_script(detected_lang):
-                    record = response.record(
-                        action=f"{base_url}/api/phone/process-recording",
-                        method='POST',
-                        max_length=10,
-                        finish_on_key='#',
-                        recording_status_callback=f"{base_url}/api/phone/recording-status"
-                    )
-                    response.say("Please speak now, then press pound when done.", language='en-US')
-                else:
-                    # For Latin scripts, use Gather
-                    gather = response.gather(
+                # #region agent log
+                try:
+                    print(f"[DEBUG_CALL_END] respond status=ready building next Gather/goodbye call_sid={call_sid[:16] if call_sid else ''}")
+                    _agent_log("CRASH_END", "backend/main.py:respond", "Building still_there/goodbye", {"call_sid": (call_sid or "")[:16], "status": "ready"}, "pre-fix")
+                except Exception:
+                    pass
+                # #endregion agent log
+                try:
+                    # After playing, set up next input gathering
+                    call_data = active_calls.get(call_sid, {})
+                    detected_lang = call_data.get("detected_language", "English")
+                    twilio_lang_code = get_twilio_language_code(detected_lang)
+                    
+                    # For non-Latin scripts, use Record + Whisper
+                    if uses_non_latin_script(detected_lang):
+                        record = response.record(
+                            action=f"{base_url}/api/phone/process-recording",
+                            method='POST',
+                            max_length=10,
+                            finish_on_key='#',
+                            recording_status_callback=f"{base_url}/api/phone/recording-status"
+                        )
+                        response.say("Please speak now, then press pound when done.", language='en-US')
+                    else:
+                        # For Latin scripts, use Gather
+                        gather = response.gather(
+                            input='speech',
+                            action=f"{base_url}/api/phone/process-speech",
+                            method='POST',
+                            speech_timeout='auto',
+                            language=twilio_lang_code
+                        )
+                    
+                    # If no input, prompt once then goodbye (same TTS voice as receptionist)
+                    still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
+                    response.play(still_there_url)
+                    gather2 = response.gather(
                         input='speech',
                         action=f"{base_url}/api/phone/process-speech",
                         method='POST',
                         speech_timeout='auto',
                         language=twilio_lang_code
                     )
-                
-                # If no input, prompt once then goodbye (same TTS voice as receptionist)
-                still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
-                response.play(still_there_url)
-                gather2 = response.gather(
-                    input='speech',
-                    action=f"{base_url}/api/phone/process-speech",
-                    method='POST',
-                    speech_timeout='auto',
-                    language=twilio_lang_code
-                )
-                goodbye_text = "Thanks for calling! Have a wonderful day!"
-                goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
-                response.play(goodbye_url)
-                response.hangup()
+                    goodbye_text = "Thanks for calling! Have a wonderful day!"
+                    goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
+                    response.play(goodbye_url)
+                    response.hangup()
+                except Exception as e:
+                    try:
+                        _agent_log("CRASH_END", "backend/main.py:respond", "Exception in ready/goodbye block", {"error": str(e), "type": type(e).__name__}, "pre-fix")
+                    except Exception:
+                        pass
+                    print(f"[DEBUG_CALL_END] respond ready/goodbye block failed: {type(e).__name__}: {e}")
+                    response = VoiceResponse()
+                    response.hangup()
                 
                 # Clean up status
                 if call_sid in response_status:
@@ -3655,10 +3975,15 @@ async def respond_with_audio(request: Request):
     
     except Exception as e:
         print(f"❌ Error in respond endpoint: {e}")
+        try:
+            _agent_log("CRASH_END", "backend/main.py:respond", "Respond endpoint exception", {"error": str(e), "type": type(e).__name__}, "pre-fix")
+        except Exception:
+            pass
+        print(f"[DEBUG_CALL_END] respond endpoint exception: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        
+        base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:

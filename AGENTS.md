@@ -35,6 +35,15 @@ Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, 
 
 Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`.
 
+### Voice call recording (Twilio)
+
+- `CALL_RECORDING_ENABLED` — set to `true` on Render to start dual-channel full-call recording on inbound Twilio calls and to append a spoken disclosure to the greeting (“This call may be recorded for quality and training.”). Requires `NGROK_URL` (or equivalent public base URL) so Twilio can reach `/api/phone/recording-complete`.
+- `CALL_SUMMARY_ENABLED` — optional. If unset, defaults to the same as `CALL_RECORDING_ENABLED` (summaries on when recording is on). Set to `false` to disable post-call Whisper + GPT summaries and avoid that cost in dev.
+- `CALL_SUMMARY_MAX_DURATION_SEC` — optional cap (default `1800`); longer recordings skip summarization.
+- `TWILIO_INTELLIGENCE_SERVICE_SID` — optional; if set, logs that Intelligence is configured but Phase 1 still uses OpenAI for transcription/summary.
+
+Ensure your jurisdiction’s consent/recording rules are satisfied; the disclosure is part of the generated greeting audio when recording is enabled.
+
 ### Linting
 
 `npm run lint` (runs `next lint`). Requires `.eslintrc.json` in the project root (already committed with `next/core-web-vitals` preset). Pre-existing warnings exist in the codebase.
