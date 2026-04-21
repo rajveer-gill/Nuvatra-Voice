@@ -28,14 +28,32 @@ export default function PrivacyPage() {
               <p>We use third-party services for authentication (Clerk), communications (Twilio), payments (Stripe), and AI (OpenAI). Their respective privacy policies apply to data they process. We do not sell your personal information to third parties.</p>
             </section>
             <section>
-              <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">5. Contact</h2>
+              <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">5. SMS and Your Choices</h2>
+              <p>
+                If you text or receive texts from a business using Nuvatra Voice, we process your phone number,
+                message content, and related metadata to deliver the service (e.g. appointment updates and replies).
+                Message and data rates may apply according to your carrier.
+              </p>
+              <p className="mt-2">
+                Mobile phone numbers and SMS consent are never shared with third parties or affiliates for marketing
+                purposes. Message frequency varies based on your interactions with our service.
+              </p>
+              <p className="mt-2">
+                You may opt out of further SMS from that business&apos;s number by replying <strong>STOP</strong>.
+                We record that preference so our systems do not send further messages to your number for that business
+                until you reply <strong>START</strong> to resubscribe. For help with SMS, reply <strong>HELP</strong> or
+                contact us at{' '}
+                <a href="mailto:info@nuvatrahq.com" className="text-blue-600 hover:underline">info@nuvatrahq.com</a>.
+                Additional terms for SMS are in our{' '}
+                <Link href="/terms" className="text-blue-600 hover:underline">Terms of Service</Link>.
+              </p>
+            </section>
+            <section>
+              <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">6. Contact</h2>
               <p>For privacy-related questions or requests, contact us at <a href="mailto:info@nuvatrahq.com" className="text-blue-600 hover:underline">info@nuvatrahq.com</a>.</p>
             </section>
           </div>
 
-          <p className="mt-12 text-sm text-gray-500">
-            This is a placeholder. Have your legal counsel review and customize this policy before production use.
-          </p>
           <div className="mt-8">
             <Link href="/" className="text-blue-600 hover:underline">← Back to home</Link>
           </div>
