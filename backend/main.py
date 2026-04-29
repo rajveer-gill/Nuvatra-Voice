@@ -19,6 +19,7 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 import hmac
+import secrets
 import math
 import time
 import json
@@ -1879,10 +1880,28 @@ async def health():
     return {"status": "ok", "database": db_ok}
 
 
+def _sentry_debug_allowed(request: Request) -> bool:
+    """Do not expose a public crash endpoint in production. Opt-in via env or shared secret header."""
+    if (os.getenv("ENABLE_SENTRY_DEBUG_ROUTE") or "").strip().lower() in ("1", "true", "yes"):
+        return True
+    secret = (os.getenv("SENTRY_DEBUG_SECRET") or "").strip()
+    if secret:
+        got = (request.headers.get("X-Sentry-Debug-Secret") or "").strip()
+        if not got:
+            return False
+        try:
+            return secrets.compare_digest(secret, got)
+        except Exception:
+            return False
+    return False
+
+
 @app.get("/sentry-debug")
-async def trigger_sentry_error():
-    division_by_zero = 1 / 0
-    return {"ok": division_by_zero}
+async def trigger_sentry_error(request: Request):
+    if not _sentry_debug_allowed(request):
+        raise HTTPException(status_code=404, detail="Not Found")
+    _ = 1 / 0  # intentional test error for Sentry when route is enabled
+
 
 def _verify_cron_secret(request: Request) -> bool:
     """Constant-time comparison of X-Cron-Secret. Returns True if valid."""
