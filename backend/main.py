@@ -10,6 +10,9 @@ from typing import Optional, List, Literal
 import uuid
 import logging
 import openai
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 
 logger = logging.getLogger("nuvatra")
 import os
@@ -54,6 +57,11 @@ except ImportError:
     stripe = None
     STRIPE_AVAILABLE = False
 
+from prompts.receptionist import build_system_prompt
+from settings import get_settings
+from security.webhooks import validate_twilio_webhook as validate_twilio_signature, verify_stripe_event
+from security.redaction import mask_phone_e164
+
 # Load .env from backend directory (where this script is located)
 # Get the directory where this script is located
 _this_file = Path(__file__).resolve()
@@ -76,6 +84,13 @@ if not logger.handlers:
     h = logging.StreamHandler(sys.stderr)
     h.setFormatter(logging.Formatter("%(levelname)s|%(name)s|%(message)s"))
     logger.addHandler(h)
+
+sentry_sdk.init(
+    dsn=os.environ.get("SENTRY_DSN"),
+    environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+    traces_sample_rate=1.0,
+    integrations=[StarletteIntegration(), FastApiIntegration()],
+)
 
 # #region agent log helper
 def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_id: str = "pre-fix") -> None:
@@ -160,21 +175,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Nuvatra Voice API", lifespan=lifespan)
 
-# CORS middleware
-# CORS configuration - allow localhost and production frontends
-allowed_origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://nuvatrasite.netlify.app",
-    "https://nuvatra-voice.vercel.app",
-    "https://nuvatrahq.com",
-]
-# Add production frontend URL if set
-frontend_url = os.getenv("FRONTEND_URL")
-if frontend_url:
-    u = frontend_url.rstrip("/")
-    if u not in allowed_origins:
-        allowed_origins.append(u)
+# CORS middleware (origins from settings + env)
+try:
+    allowed_origins = get_settings().cors_origins()
+except Exception:
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://nuvatrasite.netlify.app",
+        "https://nuvatra-voice.vercel.app",
+        "https://nuvatrahq.com",
+    ]
+    frontend_url = os.getenv("FRONTEND_URL")
+    if frontend_url:
+        u = frontend_url.rstrip("/")
+        if u not in allowed_origins:
+            allowed_origins.append(u)
 
 app.add_middleware(
     CORSMiddleware,
@@ -370,6 +386,9 @@ try:
         db_audit_append,
         db_sms_session_get,
         db_sms_session_upsert,
+        db_sms_opt_out_is_blocked,
+        db_sms_opt_out_set,
+        db_sms_opt_out_clear,
         db_appointments_get_pending_by_phone,
         db_appointments_get_by_phone_for_sms,
         db_appointments_get_accepted_for_date,
@@ -792,9 +811,32 @@ def _is_sms_confirmation(body: str) -> bool:
             return True
     return False
 
-def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> bool:
+
+def _sms_compliance_keyword(body: str) -> Optional[str]:
+    """Parse CTIA-style keywords from inbound SMS body. Returns 'stop' | 'start' | 'help' or None."""
+    words = (body or "").strip().upper().split()
+    if not words:
+        return None
+    first = words[0].rstrip(".!")
+    if first in ("STOP", "END", "CANCEL", "UNSUBSCRIBE", "QUIT", "STOPALL"):
+        return "stop"
+    if first in ("START", "UNSTOP"):
+        return "start"
+    if first in ("HELP", "INFO"):
+        return "help"
+    return None
+
+
+def send_sms(
+    to_phone: str,
+    body: str,
+    from_override: Optional[str] = None,
+    *,
+    force: bool = False,
+) -> bool:
     """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number).
-    Records usage via db_usage_increment_sms when client_id is set."""
+    Records usage via db_usage_increment_sms when client_id is set.
+    If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only)."""
     if not TWILIO_AVAILABLE or not twilio_client:
         print("SMS skipped: Twilio not configured")
         return False
@@ -806,8 +848,15 @@ def send_sms(to_phone: str, body: str, from_override: Optional[str] = None) -> b
     if not e164:
         print(f"[SMS] skipped: invalid or short phone to_phone={to_phone!r}")
         return False
+    if USE_DB and not force:
+        cid = get_db_client_id()
+        if cid and cid != "default":
+            if db_sms_opt_out_is_blocked(e164, cid):
+                to_masked = mask_phone_e164(e164)
+                print(f"[SMS] skipped: recipient opted out (client={cid[:12]}...) to={to_masked}")
+                return False
     # Console debug: from, to (masked), body length
-    to_masked = f"{e164[:6]}...{e164[-2:]}" if len(e164) >= 8 else e164
+    to_masked = mask_phone_e164(e164)
     print(f"[SMS] send_sms from={from_num} to={to_masked} body_len={len(body)}")
     last_err = None
     for attempt in range(3):
@@ -849,23 +898,13 @@ def _tenant_sms_from_number() -> Optional[str]:
     return phone or None
 
 def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
-    """Validate X-Twilio-Signature so only Twilio can trigger webhooks. Returns True if valid or if auth token not set (backward compat)."""
-    auth_token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
-    if not auth_token:
-        return True
-    if not TWILIO_AVAILABLE or not RequestValidator:
-        return True
-    sig = request.headers.get("X-Twilio-Signature", "")
-    if not sig:
-        return False
-    url = str(request.url)
-    params = dict(form_data) if hasattr(form_data, "keys") else {k: v for k, v in form_data.items()}
-    try:
-        validator = RequestValidator(auth_token)
-        return validator.validate(url, params, sig)
-    except Exception as e:
-        print(f"Twilio signature validation error: {e}")
-        return False
+    """Validate X-Twilio-Signature so only Twilio can trigger webhooks."""
+    return validate_twilio_signature(
+        request,
+        form_data,
+        auth_token=os.getenv("TWILIO_AUTH_TOKEN"),
+        twilio_available=TWILIO_AVAILABLE,
+    )
 
 def get_client_data_dir() -> Optional[Path]:
     """Return Path to client data directory (for call_log, caller_memory). None if no client_id."""
@@ -1810,78 +1849,24 @@ Respond with just the language name, nothing else."""
     # Default to English if detection fails
     return "English"
 
-def get_system_prompt(detected_language: str = "English", caller_memory: Optional[dict] = None, include_booked_slots: bool = False, skip_slots_cache: bool = False):
-    # Ultra-concise prompt for fastest processing. Works for any business type (restaurant, salon, HVAC, real estate, etc.).
-    # CRITICAL: Respond ONLY in the detected language (language can change mid-conversation)
+def get_system_prompt(
+    detected_language: str = "English",
+    caller_memory: Optional[dict] = None,
+    include_booked_slots: bool = False,
+    skip_slots_cache: bool = False,
+):
+    """Compose GPT system prompt for voice; slot lines come from live booking state."""
     info = get_business_info()
-    name = (info.get("name") or "the business").strip()
-    hours = (info.get("hours") or "").strip()
-    address = (info.get("address") or "").strip()
-    services_list = ", ".join(info.get("services") or [])
-    specials_list = " | ".join(info.get("specials") or [])
-    reservation_info = " | ".join(info.get("reservation_rules") or [])
-    menu_link = (info.get("menu_link") or "").strip()
-    departments = info.get("departments") or []
-    staff = info.get("staff") or []
-    business_type = (info.get("business_type") or "").strip()
-
-    help_lines: List[str] = []
-    if hours:
-        help_lines.append(f"- Hours: {hours}")
-    if address:
-        help_lines.append(f"- Location: {address}")
-    if services_list:
-        help_lines.append(f"- Services: {services_list}")
-    if specials_list:
-        help_lines.append(f"- Specials / promotions: {specials_list}")
-    if reservation_info:
-        help_lines.append(f"- Booking / appointment policies: {reservation_info}")
-    if menu_link:
-        help_lines.append(f"- More info / menu: {menu_link}")
-    if departments:
-        help_lines.append(f"- Routing to: {', '.join(departments)}")
-
-    staff_block = ""
-    if staff:
-        staff_names = [s.get("name", "") for s in staff if s.get("name")]
-        staff_block = f"\n- Staff you can transfer to: {', '.join(staff_names)}. When the caller asks to speak to one of these people by name, reply with EXACTLY: TRANSFER_TO: [Name] (use the exact name from the list). Otherwise do not use TRANSFER_TO."
-    memory_block = ""
-    if caller_memory and isinstance(caller_memory, dict):
-        mem_name = caller_memory.get("name") or "there"
-        count = caller_memory.get("call_count", 0)
-        last = caller_memory.get("last_reason") or "general inquiry"
-        memory_block = f"\n- This is a REPEAT CALLER. Greet them warmly; you may say welcome back. Name if we have it: {mem_name}. They have called {count} time(s) before; last time: {last}."
-    slots_block = ""
+    booked_text = None
     if include_booked_slots:
-        slots_text = get_booked_slots_prompt_text(skip_cache=skip_slots_cache)
-        if slots_text:
-            slots_block = f"\n- {slots_text}\n- CRITICAL: Times listed above (with AM/PM) are TAKEN. When the prompt says 'ONLY suggest these times' for a date, suggest ONLY those times—never suggest a time that is 'already taken' for that date. If the list is empty, all times are available."
-        else:
-            slots_block = "\n- Booked slots: none. CRITICAL: There are no booked slots, so ALL times are available. Never say a slot or day is 'taken', 'not available', or 'fully booked'—every time the caller asks for is available. Offer to book their requested time."
-        today_utc = datetime.now(timezone.utc).date()
-        today_str = today_utc.isoformat()
-        tomorrow_str = (today_utc + timedelta(days=1)).isoformat()
-        slots_block += f"""
-- TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
-- AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
-- If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
-- CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date and time, and optionally email for confirmations.
-- When they have confirmed (name, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
-
-    help_section = "\n".join(help_lines) if help_lines else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
-    if business_type:
-        header = f"Super peppy, warm AI receptionist for {name}, a {business_type}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like \"absolutely!\", \"wonderful!\", \"awesome!\". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
-    else:
-        header = f"Super peppy, warm AI receptionist for {name}! Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like \"absolutely!\", \"wonderful!\", \"awesome!\". Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
-
-    base_prompt = f"""{header}
-
-You can help with:
-{help_section}{staff_block}{memory_block}{slots_block}"""
-
-    if detected_language != "English":
-        return f"""{base_prompt} CRITICAL INSTRUCTION: The caller is currently speaking in {detected_language}. You MUST respond ONLY in {detected_language}. Do NOT respond in English or any other language. Every word of your response must be in {detected_language}. If the caller switches languages, adapt immediately and respond in their new language."""
-    return f"""{base_prompt} IMPORTANT: Respond in English. If the caller switches to another language, detect it and respond in that language immediately."""
+        booked_text = get_booked_slots_prompt_text(skip_cache=skip_slots_cache)
+    return build_system_prompt(
+        business_info=info,
+        detected_language=detected_language,
+        caller_memory=caller_memory,
+        include_booked_slots=include_booked_slots,
+        booked_slots_prompt_text=booked_text,
+    )
 
 @app.get("/")
 async def root():
@@ -1892,6 +1877,12 @@ async def health():
     """Health check for load balancers and monitoring. Returns 200 with status and DB reachability."""
     db_ok = "ok" if (USE_DB and db_ping()) else ("error" if USE_DB else "n/a")
     return {"status": "ok", "database": db_ok}
+
+
+@app.get("/sentry-debug")
+async def trigger_sentry_error():
+    division_by_zero = 1 / 0
+    return {"ok": division_by_zero}
 
 def _verify_cron_secret(request: Request) -> bool:
     """Constant-time comparison of X-Cron-Secret. Returns True if valid."""
@@ -2614,14 +2605,11 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig = request.headers.get("stripe-signature", "")
     secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
-    if not secret:
-        raise HTTPException(status_code=503, detail="Webhook secret not configured")
-    try:
-        event = stripe.Webhook.construct_event(payload, sig, secret)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.SignatureVerificationError as e:
-        raise HTTPException(status_code=400, detail="Invalid signature")
+    event, verr = verify_stripe_event(payload, sig, webhook_secret=secret, stripe_module=stripe)
+    if verr:
+        code = 503 if verr == "Webhook secret not configured" else 400
+        raise HTTPException(status_code=code, detail=verr)
+    assert event is not None
     if not USE_DB:
         return {"received": True}
     # Handle events
@@ -3201,6 +3189,36 @@ async def handle_incoming_sms(request: Request):
         if not tenant:
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         set_request_client_id(tenant["client_id"])
+        kw = _sms_compliance_keyword(body)
+        if kw:
+            cid = tenant["client_id"]
+            if kw == "stop":
+                db_sms_opt_out_set(from_number, cid)
+                send_sms(
+                    from_number,
+                    "You've opted out and won't get more texts from this number. Reply START to get messages again. Msg and data rates may apply.",
+                    from_override=to_number,
+                    force=True,
+                )
+            elif kw == "start":
+                db_sms_opt_out_clear(from_number, cid)
+                send_sms(
+                    from_number,
+                    "You're subscribed again to texts from this number. Msg and data rates may apply. Reply STOP to opt out.",
+                    from_override=to_number,
+                    force=True,
+                )
+            elif kw == "help":
+                send_sms(
+                    from_number,
+                    "Nuvatra Voice: texts for appointments and replies from this business. Msg and data rates may apply. Reply STOP to opt out. Help: info@nuvatrahq.com",
+                    from_override=to_number,
+                    force=True,
+                )
+            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        if USE_DB and db_sms_opt_out_is_blocked(from_number, tenant["client_id"]):
+            print(f"[SMS] inbound ignored (recipient opted out) from={from_number[:8]}...")
+            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         # Pre-SMS usage check: allow overage, log for billing (Option B)
         if get_plan_limits:
             limits = get_plan_limits(tenant)

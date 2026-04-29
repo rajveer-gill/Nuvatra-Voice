@@ -189,6 +189,15 @@ def init_db() -> bool:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS sms_opt_out (
+                phone TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (phone, client_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sms_opt_out_client ON sms_opt_out(client_id)")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS audit_events (
                 id BIGSERIAL PRIMARY KEY,
                 occurred_at TIMESTAMPTZ DEFAULT NOW(),
@@ -792,6 +801,69 @@ def db_sms_session_upsert(phone: str, client_id: str, messages: list, appointmen
     """, (norm, client_id, json.dumps(messages), appointment_id))
     conn.commit()
     cur.close()
+
+
+def db_sms_opt_out_is_blocked(phone: str, client_id: str) -> bool:
+    """True if this customer has opted out of SMS for this tenant (digits-only phone key)."""
+    conn = _get_conn()
+    if not conn or not client_id:
+        return False
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM sms_opt_out WHERE phone = %s AND client_id = %s LIMIT 1",
+            (norm, client_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
+    except Exception as e:
+        print(f"[DB] sms_opt_out check failed: {e}")
+        return False
+
+
+def db_sms_opt_out_set(phone: str, client_id: str) -> None:
+    """Record SMS opt-out for phone + tenant."""
+    conn = _get_conn()
+    if not conn or not client_id:
+        return
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO sms_opt_out (phone, client_id) VALUES (%s, %s)
+            ON CONFLICT (phone, client_id) DO NOTHING
+            """,
+            (norm, client_id),
+        )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"[DB] sms_opt_out set failed: {e}")
+
+
+def db_sms_opt_out_clear(phone: str, client_id: str) -> None:
+    """Remove SMS opt-out (START / resubscribe)."""
+    conn = _get_conn()
+    if not conn or not client_id:
+        return
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sms_opt_out WHERE phone = %s AND client_id = %s", (norm, client_id))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"[DB] sms_opt_out clear failed: {e}")
+
 
 # --- Messages ---
 def db_messages_get_all() -> List[dict]:

@@ -3,6 +3,13 @@
 import { useState, useEffect } from 'react'
 import { Calendar, Plus, RefreshCw, Clock, Mail, Phone, Check, X } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
+import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
+import {
+  STATUS_CLASSES,
+  STATUS_LABELS,
+  canAcceptOrDecline,
+  needsResponse,
+} from '@/components/appointments/appointmentStatus'
 
 export interface Appointment {
   id: number
@@ -15,48 +22,6 @@ export interface Appointment {
   status: string
   created_at: string
   source?: string
-}
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: 'Needs response',
-  pending_customer: 'Waiting for customer to confirm',
-  pending_review: 'Needs response',
-  confirmed: 'Accepted',
-  accepted: 'Accepted',
-  completed: 'Accepted',
-  cancelled: 'Declined',
-  rejected: 'Declined',
-}
-const STATUS_CLASSES: Record<string, string> = {
-  pending: 'bg-amber-100 text-amber-800',
-  pending_customer: 'bg-blue-100 text-blue-800',
-  pending_review: 'bg-amber-100 text-amber-800',
-  confirmed: 'bg-green-100 text-green-800',
-  accepted: 'bg-green-100 text-green-800',
-  completed: 'bg-green-100 text-green-800',
-  cancelled: 'bg-gray-100 text-gray-600',
-  rejected: 'bg-red-100 text-red-800',
-}
-
-/** Only show Accept/Decline when customer has already confirmed via text (pending_review). pending_customer = waiting for them to reply. */
-function canAcceptOrDecline(status: string): boolean {
-  return status === 'pending_review'
-}
-
-function needsResponse(status: string): boolean {
-  return status === 'pending' || status === 'pending_review' || status === 'pending_customer'
-}
-
-/** Format HH:MM as 12-hour AM/PM (e.g. "13:00" -> "1:00 PM"). */
-function formatTime(hhmm: string | undefined): string {
-  if (!hhmm || !hhmm.trim()) return hhmm || '—'
-  const [hStr, mStr] = hhmm.trim().split(':')
-  const h = parseInt(hStr || '0', 10)
-  const m = parseInt(mStr || '0', 10)
-  if (h === 0) return `12:${String(m).padStart(2, '0')} AM`
-  if (h < 12) return `${h}:${String(m).padStart(2, '0')} AM`
-  if (h === 12) return `12:${String(m).padStart(2, '0')} PM`
-  return `${h - 12}:${String(m).padStart(2, '0')} PM`
 }
 
 export default function Appointments() {
@@ -363,7 +328,7 @@ export default function Appointments() {
                       </div>
                       <div className="flex items-center gap-1 text-sm text-gray-600">
                         <Clock className="w-3 h-3" />
-                        {formatTime(apt.time)}
+                        {formatTimeHhmmToAmPm(apt.time)}
                       </div>
                     </td>
                     <td className="py-3 px-3 text-gray-700 max-w-xs truncate" title={apt.reason}>

@@ -6,6 +6,9 @@ import { useMemo } from 'react'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+/** Base URL for constructing absolute links (same as axios baseURL). */
+export { API_URL }
+
 /**
  * Returns an axios instance that automatically adds the Clerk auth token to requests.
  * Use this for all API calls that require tenant-scoped data.
@@ -29,5 +32,3 @@ export function useApiClient(): AxiosInstance {
   }, [getToken])
   return client
 }
-
-export { API_URL }
