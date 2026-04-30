@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test'
 test.describe('Appointments', () => {
   test('home page loads', async ({ page }) => {
     await page.goto('/')
-    await expect(page).toHaveTitle(/Nuvatra/i)
+    await expect(page).toHaveTitle(/Call Surge/i)
   })
 
   test('dashboard redirects to sign-in when not authenticated', async ({ page }) => {
@@ -13,7 +13,7 @@ test.describe('Appointments', () => {
     const url = page.url()
     const hasSignIn = url.includes('sign-in') || url.includes('clerk')
     const hasDashboard = url.includes('dashboard')
-    const hasAccess = await page.getByText(/No Access|Loading|Nuvatra Voice/i).isVisible().catch(() => false)
+    const hasAccess = await page.getByText(/No Access|Loading|Call Surge/i).isVisible().catch(() => false)
     expect(hasSignIn || hasDashboard || hasAccess).toBeTruthy()
   })
 

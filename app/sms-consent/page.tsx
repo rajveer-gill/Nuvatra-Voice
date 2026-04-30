@@ -19,7 +19,7 @@ export default function SmsConsentPage() {
                   aria-label="SMS opt-in consent checkbox"
                 />
                 <label htmlFor="sms-opt-in" className="text-gray-700 leading-relaxed">
-                  I agree to receive SMS notifications and updates from Nuvatra Voice. Msg &amp; data rates may
+                  I agree to receive SMS notifications and updates from Call Surge. Msg &amp; data rates may
                   apply. Message frequency varies based on your interactions with our service. Reply STOP to opt out
                   at any time.
                 </label>
@@ -30,23 +30,23 @@ export default function SmsConsentPage() {
               <p>
                 Privacy Policy:{' '}
                 <a
-                  href="https://nuvatrahq.com/privacy"
+                  href="https://call-surge.com/privacy"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-blue-600 hover:underline"
                 >
-                  nuvatrahq.com/privacy
+                  call-surge.com/privacy
                 </a>
               </p>
               <p className="mt-2">
                 Terms of Service:{' '}
                 <a
-                  href="https://nuvatrahq.com/terms"
+                  href="https://call-surge.com/terms"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-blue-600 hover:underline"
                 >
-                  nuvatrahq.com/terms
+                  call-surge.com/terms
                 </a>
               </p>
             </section>

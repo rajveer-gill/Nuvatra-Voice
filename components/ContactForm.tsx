@@ -27,7 +27,7 @@ export default function ContactForm() {
       setEmail('')
       setMessage('')
     } catch (err) {
-      const subject = encodeURIComponent(`Contact from ${name} - Nuvatra Website`)
+      const subject = encodeURIComponent(`Contact from ${name} - Call Surge`)
       const body = encodeURIComponent(`Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`)
       window.location.href = `mailto:info@nuvatrahq.com?subject=${subject}&body=${body}`
       setStatus('idle')

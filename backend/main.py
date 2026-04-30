@@ -174,7 +174,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Nuvatra Voice API", lifespan=lifespan)
+app = FastAPI(title="Call Surge API", lifespan=lifespan)
 
 # CORS middleware (origins from settings + env)
 try:
@@ -186,6 +186,7 @@ except Exception:
         "https://nuvatrasite.netlify.app",
         "https://nuvatra-voice.vercel.app",
         "https://nuvatrahq.com",
+        "https://call-surge.com",
     ]
     frontend_url = os.getenv("FRONTEND_URL")
     if frontend_url:
@@ -1871,7 +1872,7 @@ def get_system_prompt(
 
 @app.get("/")
 async def root():
-    return {"message": "Nuvatra Voice API", "status": "running"}
+    return {"message": "Call Surge API", "status": "running"}
 
 @app.get("/api/health")
 async def health():
@@ -2119,7 +2120,7 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
                     json={
                         "email_address": req.email,
                         "public_metadata": {"tenant_id": tenant["id"]},
-                        "redirect_url": os.getenv("FRONTEND_URL", "https://nuvatrahq.com") + "/",
+                        "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/",
                     },
                     timeout=10.0,
                 )
@@ -3230,7 +3231,7 @@ async def handle_incoming_sms(request: Request):
             elif kw == "help":
                 send_sms(
                     from_number,
-                    "Nuvatra Voice: texts for appointments and replies from this business. Msg and data rates may apply. Reply STOP to opt out. Help: info@nuvatrahq.com",
+                    "Call Surge: texts for appointments and replies from this business. Msg and data rates may apply. Reply STOP to opt out. Help: info@nuvatrahq.com",
                     from_override=to_number,
                     force=True,
                 )
@@ -4349,7 +4350,7 @@ async def get_active_calls():
 if __name__ == "__main__":
     import uvicorn
     print("\n" + "="*50)
-    print("Starting Nuvatra Voice Backend Server")
+    print("Starting Call Surge Backend Server")
     print("="*50)
     print(f"Server will run on: http://0.0.0.0:8000")
     print(f"Local access: http://localhost:8000")

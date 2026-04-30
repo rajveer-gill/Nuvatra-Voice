@@ -41,6 +41,7 @@ class Settings(BaseSettings):
             "https://nuvatrasite.netlify.app",
             "https://nuvatra-voice.vercel.app",
             "https://nuvatrahq.com",
+            "https://call-surge.com",
         ]
         if self.frontend_url:
             u = self.frontend_url.rstrip("/")

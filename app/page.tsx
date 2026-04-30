@@ -1,146 +1,314 @@
 import Link from 'next/link'
 import Image from 'next/image'
-import { Rocket, Lightbulb, Shield, TrendingUp } from 'lucide-react'
+import {
+  ArrowRight,
+  BarChart3,
+  CalendarClock,
+  Headphones,
+  MessageSquare,
+  PhoneIncoming,
+  ShieldCheck,
+  Sparkles,
+  Zap,
+} from 'lucide-react'
 import MarketingNav from '@/components/MarketingNav'
 import ContactForm from '@/components/ContactForm'
+import { FeaturesDashboardCTA, HeroPrimaryCTA } from '@/components/call-surge/LandingCTAs'
 
 export default function HomePage() {
   return (
     <>
       <MarketingNav />
-      <main>
+      <main className="bg-zinc-950 text-zinc-100">
         {/* Hero */}
-        <section id="home" className="pt-24 pb-20 px-4 bg-gradient-to-br from-[#1a1a2e] via-[#16213e] to-[#0f3460] text-white text-center">
-          <div className="max-w-3xl mx-auto">
-            <h1 className="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">
-              Innovative AI Solutions
-            </h1>
-            <p className="text-xl text-white/90 mb-8 font-light">
-              Transforming businesses with cutting-edge artificial intelligence technology
+        <section
+          id="hero"
+          className="relative min-h-[100dvh] overflow-hidden pt-24 pb-20 px-4 md:pt-28"
+        >
+          <div className="pointer-events-none absolute inset-0 bg-call-surge-mesh" aria-hidden />
+          <div
+            className="pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[min(140%,900px)] -translate-x-1/2 rounded-full bg-gradient-to-b from-cyan-500/25 via-indigo-600/15 to-transparent blur-3xl"
+            aria-hidden
+          />
+          <div className="relative mx-auto max-w-5xl text-center">
+            <p className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-medium uppercase tracking-[0.2em] text-cyan-300/90 md:text-sm">
+              <Sparkles className="h-3.5 w-3.5 md:h-4 md:w-4" aria-hidden />
+              AI voice receptionist
             </p>
-            <Link href="#products" className="inline-block px-10 py-4 rounded-full bg-gradient-to-r from-blue-600 to-blue-500 text-white font-semibold shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition">
-              Explore Our Products
-            </Link>
+            <h1 className="font-display text-4xl font-semibold leading-[1.08] tracking-tight text-white md:text-6xl lg:text-7xl">
+              Turn every ring into{' '}
+              <span className="bg-gradient-to-r from-cyan-300 via-white to-violet-300 bg-clip-text text-transparent">
+                revenue
+              </span>
+              .
+            </h1>
+            <p className="mx-auto mt-6 max-w-2xl text-lg text-zinc-400 md:text-xl md:leading-relaxed">
+              Call Surge answers calls and texts like your best front desk—24/7—so leads book, buyers get answers,
+              and nothing slips through.
+            </p>
+            <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
+              <HeroPrimaryCTA />
+              <Link
+                href="/#contact"
+                className="inline-flex items-center justify-center rounded-full border border-white/15 bg-white/5 px-8 py-4 text-base font-semibold text-white transition hover:bg-white/10"
+              >
+                Talk to us
+              </Link>
+            </div>
+            <p className="mt-6 text-sm text-zinc-500">Invite-only access. Sign in with your organization.</p>
           </div>
         </section>
 
-        {/* Products */}
-        <section id="products" className="py-20 px-4 bg-gray-50">
-          <div className="max-w-6xl mx-auto">
-            <h2 className="text-3xl font-bold text-center text-gray-900 mb-12">Our Products</h2>
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-              {/* Grubify */}
-              <div className="bg-white rounded-2xl p-8 shadow-lg text-center hover:shadow-xl hover:-translate-y-2 transition">
-                <div className="h-28 flex items-center justify-center mb-6">
-                  <div className="w-24 h-24 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center text-white text-4xl font-bold">G</div>
-                </div>
-                <h3 className="text-xl font-semibold mb-3">Grubify</h3>
-                <p className="text-gray-600 mb-4">
-                  Intelligent food ordering and restaurant management platform powered by AI.
-                </p>
-                <a href="https://grubify.ai" target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold hover:underline">
-                  Visit Grubify.ai →
-                </a>
+        {/* Metrics strip */}
+        <section className="border-y border-white/10 bg-zinc-900/40 py-10 px-4 backdrop-blur-sm">
+          <div className="mx-auto grid max-w-5xl grid-cols-2 gap-8 md:grid-cols-4 md:gap-4">
+            {[
+              { label: 'Missed calls recovered', value: 'Always-on' },
+              { label: 'SMS + voice', value: 'Unified' },
+              { label: 'Bookings', value: 'Calendar-ready' },
+              { label: 'Your brand', value: 'On every call' },
+            ].map((item) => (
+              <div key={item.label} className="text-center md:text-left">
+                <p className="font-display text-2xl font-semibold text-white md:text-3xl">{item.value}</p>
+                <p className="mt-1 text-sm text-zinc-500">{item.label}</p>
               </div>
+            ))}
+          </div>
+        </section>
 
-              {/* RepsRight */}
-              <div className="bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl p-8 shadow-lg text-center hover:shadow-xl hover:-translate-y-2 transition text-white">
-                <div className="h-28 flex items-center justify-center mb-6">
-                  <Image src="/assets/repsright-logo.png" alt="RepsRight" width={120} height={90} className="object-contain" />
-                </div>
-                <h3 className="text-xl font-semibold mb-3">RepsRight</h3>
-                <p className="text-white/90 mb-4">
-                  Your AI-powered fitness companion with personalized workout plans and real-time form analysis.
-                </p>
-                <a href="https://apps.apple.com/us/app/repsright/id6754855530" target="_blank" rel="noopener noreferrer" className="text-white font-semibold hover:underline">
-                  Download on App Store →
-                </a>
-              </div>
-
-              {/* Nuvatra Voice */}
-              <div className="bg-white rounded-2xl p-8 shadow-lg text-center hover:shadow-xl hover:-translate-y-2 transition">
-                <div className="h-28 flex items-center justify-center mb-6 rounded-xl bg-black">
-                  <Image src="/assets/nuvatra-voice-logo.png" alt="Nuvatra Voice" width={100} height={100} className="object-contain" />
-                </div>
-                <h3 className="text-xl font-semibold mb-3">Nuvatra Voice</h3>
-                <p className="text-gray-600 mb-4">
-                  AI-powered receptionist that handles your calls 24/7. Never miss a call again.
-                </p>
-                <Link href="/dashboard" className="text-blue-600 font-semibold hover:underline">
-                  Log in to Nuvatra Voice →
-                </Link>
-              </div>
+        {/* Outcomes */}
+        <section id="outcomes" className="scroll-mt-24 px-4 py-24 md:py-32">
+          <div className="mx-auto max-w-6xl">
+            <div className="mx-auto max-w-2xl text-center">
+              <h2 className="font-display text-3xl font-semibold tracking-tight text-white md:text-4xl">
+                From missed rings to booked meetings
+              </h2>
+              <p className="mt-4 text-lg text-zinc-400">
+                Your phones stop being a bottleneck. Call Surge qualifies intent, captures details, and routes what
+                matters—automatically.
+              </p>
             </div>
+            <div className="mt-16 grid gap-6 md:grid-cols-3">
+              {[
+                {
+                  icon: PhoneIncoming,
+                  title: 'Never ghost a lead',
+                  body: 'Instant pickup with natural, on-brand dialog—so first impressions feel human, not robotic.',
+                },
+                {
+                  icon: CalendarClock,
+                  title: 'Fill the calendar',
+                  body: 'Appointment flows that sync with how you work, reducing back-and-forth and no-shows.',
+                },
+                {
+                  icon: MessageSquare,
+                  title: 'SMS that stays compliant',
+                  body: 'Continue conversations over text with consent-aware messaging and clear opt-out paths.',
+                },
+              ].map(({ icon: Icon, title, body }) => (
+                <div
+                  key={title}
+                  className="group rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.07] to-transparent p-8 transition hover:border-cyan-500/30 hover:shadow-lg hover:shadow-cyan-500/5"
+                >
+                  <div className="mb-5 inline-flex rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-3 text-cyan-300">
+                    <Icon className="h-6 w-6" aria-hidden />
+                  </div>
+                  <h3 className="font-display text-xl font-semibold text-white">{title}</h3>
+                  <p className="mt-3 leading-relaxed text-zinc-400">{body}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* How it works */}
+        <section id="how" className="scroll-mt-24 border-t border-white/10 bg-zinc-900/30 px-4 py-24 md:py-32">
+          <div className="mx-auto max-w-6xl">
+            <h2 className="font-display text-center text-3xl font-semibold tracking-tight text-white md:text-4xl">
+              How it works
+            </h2>
+            <p className="mx-auto mt-4 max-w-xl text-center text-lg text-zinc-400">
+              Live in days—not quarters. We layer intelligence on your existing number and workflows.
+            </p>
+            <ol className="mt-16 grid gap-8 md:grid-cols-2 lg:grid-cols-4">
+              {[
+                { step: '01', title: 'Connect', desc: 'Link your business context, hours, and services.' },
+                { step: '02', title: 'Configure', desc: 'Tune voice, SMS, routing, and escalation rules.' },
+                { step: '03', title: 'Launch', desc: 'Point traffic at Call Surge—calls and texts flow in.' },
+                { step: '04', title: 'Optimize', desc: 'Review transcripts, outcomes, and funnel metrics.' },
+              ].map((item, i) => (
+                <li
+                  key={item.step}
+                  className="relative rounded-2xl border border-white/10 bg-zinc-950/80 p-6 pt-10"
+                >
+                  <span className="font-display absolute left-6 top-4 text-sm font-bold text-cyan-400/80">
+                    {item.step}
+                  </span>
+                  <h3 className="font-display text-lg font-semibold text-white">{item.title}</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-zinc-400">{item.desc}</p>
+                  {i < 3 && (
+                    <div
+                      className="absolute -right-4 top-1/2 hidden h-px w-8 -translate-y-1/2 bg-gradient-to-r from-cyan-500/50 to-transparent lg:block"
+                      aria-hidden
+                    />
+                  )}
+                </li>
+              ))}
+            </ol>
           </div>
         </section>
 
         {/* Features */}
-        <section className="py-20 px-4 bg-white">
-          <div className="max-w-6xl mx-auto">
-            <h2 className="text-3xl font-bold text-center text-gray-900 mb-12">Why Choose Nuvatra</h2>
-            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-8 text-center">
+        <section id="features" className="scroll-mt-24 px-4 py-24 md:py-32">
+          <div className="mx-auto max-w-6xl">
+            <div className="flex flex-col items-start justify-between gap-6 md:flex-row md:items-end">
               <div>
-                <div className="inline-flex p-3 rounded-xl bg-blue-100 text-blue-600 mb-4"><Rocket size={32} /></div>
-                <h3 className="text-lg font-semibold mb-2">Innovation First</h3>
-                <p className="text-gray-600">Cutting-edge AI technology that pushes boundaries</p>
+                <h2 className="font-display text-3xl font-semibold tracking-tight text-white md:text-4xl">
+                  Built for operators who care about quality
+                </h2>
+                <p className="mt-4 max-w-xl text-lg text-zinc-400">
+                  Enterprise-grade reliability with a consumer-grade experience—because your callers deserve both.
+                </p>
               </div>
-              <div>
-                <div className="inline-flex p-3 rounded-xl bg-amber-100 text-amber-600 mb-4"><Lightbulb size={32} /></div>
-                <h3 className="text-lg font-semibold mb-2">Smart Solutions</h3>
-                <p className="text-gray-600">Intelligent automation that simplifies complex tasks</p>
-              </div>
-              <div>
-                <div className="inline-flex p-3 rounded-xl bg-green-100 text-green-600 mb-4"><Shield size={32} /></div>
-                <h3 className="text-lg font-semibold mb-2">Reliable & Secure</h3>
-                <p className="text-gray-600">Enterprise-grade security and reliability you can trust</p>
-              </div>
-              <div>
-                <div className="inline-flex p-3 rounded-xl bg-purple-100 text-purple-600 mb-4"><TrendingUp size={32} /></div>
-                <h3 className="text-lg font-semibold mb-2">Scalable Growth</h3>
-                <p className="text-gray-600">Solutions that grow with your business needs</p>
-              </div>
+              <FeaturesDashboardCTA />
+            </div>
+            <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {[
+                {
+                  icon: Headphones,
+                  title: '24/7 coverage',
+                  desc: 'Always-on answering with consistent scripts and smart handoff.',
+                },
+                {
+                  icon: Zap,
+                  title: 'Low latency',
+                  desc: 'Responsive dialog that keeps callers engaged—not on hold.',
+                },
+                {
+                  icon: BarChart3,
+                  title: 'Visibility',
+                  desc: 'Logs and signals so you know what drove outcomes.',
+                },
+                {
+                  icon: ShieldCheck,
+                  title: 'Security-minded',
+                  desc: 'Auth via Clerk, tenant-scoped data, and disciplined API access.',
+                },
+                {
+                  icon: CalendarClock,
+                  title: 'Scheduling',
+                  desc: 'Appointments that reflect your real availability and rules.',
+                },
+                {
+                  icon: MessageSquare,
+                  title: 'Omnichannel',
+                  desc: 'Voice and SMS in one coherent thread for your team.',
+                },
+              ].map(({ icon: Icon, title, desc }) => (
+                <div
+                  key={title}
+                  className="flex gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-6 transition hover:bg-white/[0.06]"
+                >
+                  <Icon className="h-6 w-6 shrink-0 text-cyan-400" aria-hidden />
+                  <div>
+                    <h3 className="font-display font-semibold text-white">{title}</h3>
+                    <p className="mt-1 text-sm text-zinc-400">{desc}</p>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </section>
 
+        {/* Trust strip */}
+        <section className="border-y border-white/10 px-4 py-16">
+          <div className="mx-auto max-w-4xl text-center">
+            <p className="text-sm font-medium uppercase tracking-[0.25em] text-zinc-500">Trusted operations</p>
+            <p className="mt-4 font-display text-2xl font-semibold text-white md:text-3xl">
+              Designed for teams who cannot afford a dropped call.
+            </p>
+            <p className="mx-auto mt-4 max-w-2xl text-zinc-400">
+              Whether you run one location or many, Call Surge scales with your front-office ambition—without scaling
+              chaos.
+            </p>
+          </div>
+        </section>
+
         {/* Contact */}
-        <section id="contact" className="py-20 px-4 bg-gray-50">
-          <div className="max-w-4xl mx-auto">
-            <h2 className="text-3xl font-bold text-center text-gray-900 mb-4">Get In Touch</h2>
-            <p className="text-center text-gray-600 mb-12">Have questions? We&apos;d love to hear from you.</p>
-            <div className="grid md:grid-cols-2 gap-12 items-start">
-              <div>
-                <div className="mb-6">
-                  <h3 className="font-semibold text-gray-900 mb-2">Email</h3>
-                  <a href="mailto:info@nuvatrahq.com" className="text-blue-600 hover:underline">info@nuvatrahq.com</a>
+        <section id="contact" className="scroll-mt-24 px-4 pb-12 pt-8 md:pb-20">
+          <div className="mx-auto grid max-w-6xl gap-12 lg:grid-cols-2 lg:gap-16">
+            <div>
+              <h2 className="font-display text-3xl font-semibold tracking-tight text-white md:text-4xl">
+                Let&apos;s talk
+              </h2>
+              <p className="mt-4 text-lg text-zinc-400">
+                Tell us about your call volume, locations, and goals—we&apos;ll follow up fast.
+              </p>
+              <div className="mt-10 space-y-6 text-zinc-300">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Email</p>
+                  <a href="mailto:info@nuvatrahq.com" className="mt-1 inline-block text-cyan-400 hover:text-cyan-300">
+                    info@nuvatrahq.com
+                  </a>
                 </div>
                 <div>
-                  <h3 className="font-semibold text-gray-900 mb-2">Website</h3>
-                  <a href="https://nuvatrahq.com" className="text-blue-600 hover:underline">nuvatrahq.com</a>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Company</p>
+                  <a
+                    href="https://nuvatrahq.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-1 inline-flex items-center gap-1 text-cyan-400 hover:text-cyan-300"
+                  >
+                    Nuvatra HQ
+                    <ArrowRight className="h-4 w-4" />
+                  </a>
                 </div>
               </div>
-              <div className="bg-white p-8 rounded-xl shadow-lg">
-                <ContactForm />
-              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white p-8 shadow-2xl shadow-black/40">
+              <ContactForm />
             </div>
           </div>
         </section>
 
         {/* Footer */}
-        <footer className="bg-black text-white py-12 px-4">
-          <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
-            <div className="flex items-center gap-2">
-              <Image src="/assets/nuvatra-logo.svg" alt="Nuvatra" width={35} height={35} className="invert" />
-              <span className="font-semibold tracking-wider">NUVATRA</span>
+        <footer className="border-t border-white/10 bg-black/40 px-4 py-12">
+          <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-8 md:flex-row">
+            <div className="flex items-center gap-3">
+              <Image src="/assets/call-surge-mark.svg" alt="Call Surge" width={36} height={36} />
+              <span className="font-display text-lg font-semibold text-white">Call Surge</span>
             </div>
-            <div className="flex flex-wrap justify-center gap-6 md:gap-8">
-              <Link href="/#home" className="text-white/80 hover:text-white">Home</Link>
-              <Link href="/#products" className="text-white/80 hover:text-white">Products</Link>
-              <Link href="/#contact" className="text-white/80 hover:text-white">Contact</Link>
-              <Link href="/terms" className="text-white/80 hover:text-white">Terms of Service</Link>
-              <Link href="/privacy" className="text-white/80 hover:text-white">Privacy Policy</Link>
+            <nav className="flex flex-wrap justify-center gap-x-8 gap-y-3 text-sm text-zinc-400">
+              <Link href="/#hero" className="transition hover:text-white">
+                Home
+              </Link>
+              <Link href="/#features" className="transition hover:text-white">
+                Features
+              </Link>
+              <Link href="/#contact" className="transition hover:text-white">
+                Contact
+              </Link>
+              <Link href="/terms" className="transition hover:text-white">
+                Terms
+              </Link>
+              <Link href="/privacy" className="transition hover:text-white">
+                Privacy
+              </Link>
+            </nav>
+            <div className="text-center text-sm text-zinc-500 md:text-right">
+              <p>
+                A product of{' '}
+                <a
+                  href="https://nuvatrahq.com"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-zinc-400 underline-offset-4 hover:text-white hover:underline"
+                >
+                  Nuvatra
+                </a>
+              </p>
+              <p className="mt-1">&copy; {new Date().getFullYear()} Call Surge. All rights reserved.</p>
             </div>
-            <p className="text-white/70 text-sm">&copy; {new Date().getFullYear()} Nuvatra. All rights reserved.</p>
           </div>
         </footer>
       </main>

@@ -6,36 +6,87 @@ import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/nextjs'
 
 export default function MarketingNav() {
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 bg-black py-4 px-4 shadow-lg">
-      <div className="max-w-6xl mx-auto flex justify-between items-center">
-        <Link href="/" className="flex items-center gap-2">
-          <Image src="/assets/nuvatra-logo.svg" alt="Nuvatra" width={40} height={40} className="invert" />
-          <span className="text-white text-xl font-semibold tracking-wider">NUVATRA</span>
+    <nav className="fixed top-0 left-0 right-0 z-50 border-b border-white/10 bg-zinc-950/80 backdrop-blur-xl supports-[backdrop-filter]:bg-zinc-950/60">
+      <div className="max-w-6xl mx-auto flex h-16 items-center justify-between px-4 md:px-6">
+        <Link href="/" className="flex items-center gap-2.5 group">
+          <Image
+            src="/assets/call-surge-mark.svg"
+            alt=""
+            width={40}
+            height={40}
+            className="h-10 w-10 transition-transform duration-300 group-hover:scale-[1.02]"
+            aria-hidden
+          />
+          <span className="font-display text-lg font-semibold tracking-tight text-white md:text-xl">
+            Call Surge
+          </span>
         </Link>
-        <ul className="flex items-center gap-8">
-          <li><Link href="/#home" className="text-white/90 hover:text-white font-medium transition">Home</Link></li>
-          <li><Link href="/#products" className="text-white/90 hover:text-white font-medium transition">Products</Link></li>
-          <li><Link href="/#contact" className="text-white/90 hover:text-white font-medium transition">Contact</Link></li>
+        <ul className="flex items-center gap-5 md:gap-8">
+          <li className="hidden sm:block">
+            <Link
+              href="/#outcomes"
+              className="text-sm font-medium text-zinc-400 transition-colors hover:text-white"
+            >
+              Outcomes
+            </Link>
+          </li>
+          <li className="hidden md:block">
+            <Link
+              href="/#how"
+              className="text-sm font-medium text-zinc-400 transition-colors hover:text-white"
+            >
+              How it works
+            </Link>
+          </li>
+          <li className="hidden md:block">
+            <Link
+              href="/#features"
+              className="text-sm font-medium text-zinc-400 transition-colors hover:text-white"
+            >
+              Features
+            </Link>
+          </li>
+          <li className="hidden sm:block">
+            <Link
+              href="/#contact"
+              className="text-sm font-medium text-zinc-400 transition-colors hover:text-white"
+            >
+              Contact
+            </Link>
+          </li>
           <li>
             <SignedOut>
-              <div className="flex items-center gap-3">
-                <Link href="/#contact" className="text-white/90 hover:text-white font-medium">
-                  Contact us
-                </Link>
+              <div className="flex items-center gap-2 md:gap-3">
                 <SignInButton mode="modal">
-                  <button className="px-4 py-2 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition">
-                    Log in
+                  <button
+                    type="button"
+                    className="rounded-full border border-white/20 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
+                  >
+                    Sign in
                   </button>
                 </SignInButton>
-                <span className="text-white/60 text-sm">(by invite)</span>
+                <SignInButton mode="modal">
+                  <button
+                    type="button"
+                    className="rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:brightness-110"
+                  >
+                    Get started
+                  </button>
+                </SignInButton>
               </div>
             </SignedOut>
             <SignedIn>
-              <div className="flex items-center gap-3">
-                <Link href="/admin" className="text-white/90 hover:text-white font-medium text-sm">
+              <div className="flex items-center gap-2 md:gap-3">
+                <Link
+                  href="/admin"
+                  className="hidden text-sm font-medium text-zinc-400 transition hover:text-white sm:inline"
+                >
                   Admin
                 </Link>
-                <Link href="/dashboard" className="px-4 py-2 rounded-full bg-blue-600 text-white font-semibold hover:bg-blue-700 transition">
+                <Link
+                  href="/dashboard"
+                  className="rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:brightness-110"
+                >
                   Dashboard
                 </Link>
                 <UserButton afterSignOutUrl="/" />

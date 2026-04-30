@@ -13,11 +13,11 @@ export default function TermsPage() {
           <div className="prose prose-gray max-w-none space-y-6 text-gray-700">
             <section>
               <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">1. Acceptance of Terms</h2>
-              <p>By accessing or using Nuvatra Voice and related services (&quot;Service&quot;), you agree to be bound by these Terms of Service. If you do not agree, do not use the Service.</p>
+              <p>By accessing or using Call Surge and related services (&quot;Service&quot;), you agree to be bound by these Terms of Service. If you do not agree, do not use the Service.</p>
             </section>
             <section>
               <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">2. Description of Service</h2>
-              <p>Nuvatra Voice provides an AI-powered voice and SMS receptionist for businesses. The Service includes call handling, appointment booking, SMS conversations, and a client dashboard. Features and availability may vary by plan.</p>
+              <p>Call Surge provides an AI-powered voice and SMS receptionist for businesses. The Service includes call handling, appointment booking, SMS conversations, and a client dashboard. Features and availability may vary by plan.</p>
             </section>
             <section>
               <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">3. Use of the Service</h2>
@@ -30,7 +30,7 @@ export default function TermsPage() {
             <section>
               <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">5. SMS Messaging</h2>
               <p>
-                Nuvatra Voice sends SMS messages on behalf of businesses using the Service. Message types include
+                Call Surge sends SMS messages on behalf of businesses using the Service. Message types include
                 appointment confirmations, booking reminders, and conversational replies to customers who initiated
                 contact by calling or texting the business. Message frequency varies based on customer interactions.
                 Message and data rates may apply.

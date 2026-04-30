@@ -66,7 +66,7 @@ export function PlanPicker({
     <div className="max-w-3xl mx-auto text-center">
       <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-2">Choose a plan</h1>
       <p className="text-gray-600 mb-8">
-        Your free trial has ended. Select a plan to continue using Nuvatra Voice.
+        Your free trial has ended. Select a plan to continue using Call Surge.
       </p>
       {subscription?.trial_ends_at && (
         <p className="text-sm text-gray-500 mb-6">

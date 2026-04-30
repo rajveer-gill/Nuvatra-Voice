@@ -30,7 +30,7 @@ export default function PrivacyPage() {
             <section>
               <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">5. SMS and Your Choices</h2>
               <p>
-                If you text or receive texts from a business using Nuvatra Voice, we process your phone number,
+                If you text or receive texts from a business using Call Surge, we process your phone number,
                 message content, and related metadata to deliver the service (e.g. appointment updates and replies).
                 Message and data rates may apply according to your carrier.
               </p>

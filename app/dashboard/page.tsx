@@ -135,7 +135,7 @@ export default function DashboardPage() {
       <main className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 flex items-center justify-center">
         <div className="container mx-auto px-4 py-8">
           <header className="flex justify-between items-center mb-8">
-            <Link href="/" className="text-gray-600 hover:text-gray-900 text-sm">← nuvatrahq.com</Link>
+            <Link href="/" className="text-gray-600 hover:text-gray-900 text-sm">← Call Surge</Link>
             <UserButton afterSignOutUrl="/" />
           </header>
           <PlanPicker subscription={subscription} onSubscribed={fetchSubscription} api={api} />
@@ -149,9 +149,9 @@ export default function DashboardPage() {
       <div className="container mx-auto px-4 py-8">
         <header className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-8">
           <div className="flex items-center gap-4">
-            <Link href="/" className="text-gray-600 hover:text-gray-900 text-sm">← nuvatrahq.com</Link>
+            <Link href="/" className="text-gray-600 hover:text-gray-900 text-sm">← Call Surge</Link>
             <h1 className="text-2xl sm:text-4xl font-bold text-gray-900">
-              Nuvatra Voice
+              Call Surge
             </h1>
           </div>
           <div className="flex items-center gap-2">

@@ -18,17 +18,26 @@
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
-    rgb(var(--background-start-rgb));
+  background: #030712;
 }
 
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+
+  .bg-call-surge-mesh {
+    background-color: #030712;
+    background-image:
+      radial-gradient(ellipse 85% 55% at 50% -25%, rgba(34, 211, 238, 0.14), transparent 55%),
+      radial-gradient(ellipse 55% 45% at 100% 5%, rgba(99, 102, 241, 0.12), transparent 50%),
+      radial-gradient(ellipse 45% 35% at 0% 90%, rgba(168, 85, 247, 0.07), transparent 45%);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bg-call-surge-mesh {
+      background-image: none;
+    }
   }
 }
 
