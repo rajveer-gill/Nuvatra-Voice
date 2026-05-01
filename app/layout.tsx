@@ -33,14 +33,14 @@ export const metadata: Metadata = {
     title: 'Call Surge — AI voice receptionist for modern businesses',
     description:
       'Call Surge answers calls and texts like your best front desk—24/7—so leads book, buyers get answers, and nothing slips through.',
-    images: [{ url: '/assets/call-surge-mark.svg', width: 512, height: 512, alt: 'Call Surge' }],
+    images: [{ url: '/og-image.png', width: 1200, height: 630, alt: 'Call Surge — AI voice receptionist' }],
   },
   twitter: {
     card: 'summary_large_image',
     title: 'Call Surge — AI voice receptionist',
     description:
       'AI voice + SMS receptionist for teams who cannot afford a dropped call. Invite-only access.',
-    images: ['/assets/call-surge-mark.svg'],
+    images: ['/og-image.png'],
   },
 }
 
