@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^6.38.1",
-    "@emailjs/browser": "^4.4.1",
     "@sentry/nextjs": "^10.50.0",
     "axios": "^1.6.0",
     "lucide-react": "^0.294.0",

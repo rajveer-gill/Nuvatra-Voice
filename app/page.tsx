@@ -21,10 +21,7 @@ export default function HomePage() {
       <MarketingNav />
       <main className="bg-zinc-950 text-zinc-100">
         {/* Hero */}
-        <section
-          id="hero"
-          className="relative min-h-[100dvh] overflow-hidden pt-24 pb-20 px-4 md:pt-28"
-        >
+        <section id="hero" className="relative overflow-hidden pt-24 pb-16 px-4 md:pt-28 md:pb-24">
           <div className="pointer-events-none absolute inset-0 bg-call-surge-mesh" aria-hidden />
           <div
             className="pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[min(140%,900px)] -translate-x-1/2 rounded-full bg-gradient-to-b from-cyan-500/25 via-indigo-600/15 to-transparent blur-3xl"
@@ -115,6 +112,16 @@ export default function HomePage() {
                   </div>
                   <h3 className="font-display text-xl font-semibold text-white">{title}</h3>
                   <p className="mt-3 leading-relaxed text-zinc-400">{body}</p>
+                  {title === 'SMS that stays compliant' && (
+                    <p className="mt-4 text-sm">
+                      <Link
+                        href="/sms-consent"
+                        className="font-medium text-cyan-400 underline-offset-4 hover:text-cyan-300 hover:underline"
+                      >
+                        SMS consent &amp; opt-out policy
+                      </Link>
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -234,6 +241,33 @@ export default function HomePage() {
           </div>
         </section>
 
+        {/* Compliance / trust (conversion moment) */}
+        <section className="border-t border-white/10 bg-zinc-950/80 px-4 py-10">
+          <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-center gap-x-6 gap-y-3 text-center text-sm text-zinc-400">
+            <span>Clerk authentication</span>
+            <span className="hidden text-zinc-600 sm:inline" aria-hidden>
+              ·
+            </span>
+            <span>Tenant-scoped data</span>
+            <span className="hidden text-zinc-600 sm:inline" aria-hidden>
+              ·
+            </span>
+            <Link href="/sms-consent" className="text-cyan-400 transition hover:text-cyan-300">
+              TCPA-aware SMS
+            </Link>
+            <span className="hidden text-zinc-600 sm:inline" aria-hidden>
+              ·
+            </span>
+            <span>Twilio-backed voice &amp; SMS</span>
+            <span className="hidden text-zinc-600 sm:inline" aria-hidden>
+              ·
+            </span>
+            <Link href="/privacy" className="text-cyan-400 transition hover:text-cyan-300">
+              Privacy
+            </Link>
+          </div>
+        </section>
+
         {/* Contact */}
         <section id="contact" className="scroll-mt-24 px-4 pb-12 pt-8 md:pb-20">
           <div className="mx-auto grid max-w-6xl gap-12 lg:grid-cols-2 lg:gap-16">
@@ -293,6 +327,9 @@ export default function HomePage() {
               </Link>
               <Link href="/privacy" className="transition hover:text-white">
                 Privacy
+              </Link>
+              <Link href="/sms-consent" className="transition hover:text-white">
+                SMS consent
               </Link>
             </nav>
             <div className="text-center text-sm text-zinc-500 md:text-right">

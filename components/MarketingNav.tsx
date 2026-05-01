@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import Image from 'next/image'
-import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/nextjs'
+import { SignedIn, SignedOut, UserButton } from '@clerk/nextjs'
 
 export default function MarketingNav() {
   return (
@@ -57,22 +57,18 @@ export default function MarketingNav() {
           <li>
             <SignedOut>
               <div className="flex items-center gap-2 md:gap-3">
-                <SignInButton mode="modal">
-                  <button
-                    type="button"
-                    className="rounded-full border border-white/20 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
-                  >
-                    Sign in
-                  </button>
-                </SignInButton>
-                <SignInButton mode="modal">
-                  <button
-                    type="button"
-                    className="rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:brightness-110"
-                  >
-                    Get started
-                  </button>
-                </SignInButton>
+                <Link
+                  href="/dashboard"
+                  className="rounded-full border border-white/20 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  href="/dashboard"
+                  className="rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:brightness-110"
+                >
+                  Get started
+                </Link>
               </div>
             </SignedOut>
             <SignedIn>

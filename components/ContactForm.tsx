@@ -1,74 +1,106 @@
 'use client'
 
 import { useState } from 'react'
-import emailjs from '@emailjs/browser'
-
-const EMAILJS_PUBLIC_KEY = 'HLs4shQc-2XbmccpA'
-const EMAILJS_SERVICE_ID = 'service_hnnkg0a'
-const EMAILJS_TEMPLATE_ID = 'template_9dmddia'
 
 export default function ContactForm() {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [message, setMessage] = useState('')
   const [status, setStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle')
+  const [errorDetail, setErrorDetail] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setStatus('sending')
-    const time = new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'long' })
+    setErrorDetail(null)
     try {
-      emailjs.init(EMAILJS_PUBLIC_KEY)
-      await emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, {
-        name, email, message, time, reply_to: email
+      const res = await fetch('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, message }),
       })
-      setStatus('success')
-      setName('')
-      setEmail('')
-      setMessage('')
-    } catch (err) {
-      const subject = encodeURIComponent(`Contact from ${name} - Call Surge`)
-      const body = encodeURIComponent(`Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`)
-      window.location.href = `mailto:info@nuvatrahq.com?subject=${subject}&body=${body}`
-      setStatus('idle')
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+
+      if (res.ok && data.ok) {
+        setStatus('success')
+        setName('')
+        setEmail('')
+        setMessage('')
+        return
+      }
+
+      if (res.status === 503 && data.error === 'email_not_configured') {
+        setStatus('error')
+        setErrorDetail(
+          'Contact delivery is not configured on this server yet. Please email info@nuvatrahq.com directly.'
+        )
+        return
+      }
+
+      setStatus('error')
+      setErrorDetail('Could not send your message. Try email at info@nuvatrahq.com.')
+    } catch {
+      setStatus('error')
+      setErrorDetail('Network error. Email us at info@nuvatrahq.com.')
     }
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+    <form
+      onSubmit={handleSubmit}
+      method="post"
+      className="flex flex-col gap-4"
+      noValidate
+    >
       <input
         type="text"
+        name="name"
+        autoComplete="name"
         placeholder="Your Name"
         value={name}
         onChange={(e) => setName(e.target.value)}
         required
-        className="px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+        className="rounded-lg border-2 border-zinc-200 px-4 py-3 text-zinc-900 placeholder:text-zinc-400 focus:border-cyan-500 focus:outline-none"
       />
       <input
         type="email"
+        name="email"
+        autoComplete="email"
         placeholder="Your Email"
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         required
-        className="px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+        className="rounded-lg border-2 border-zinc-200 px-4 py-3 text-zinc-900 placeholder:text-zinc-400 focus:border-cyan-500 focus:outline-none"
       />
       <textarea
+        name="message"
         placeholder="Your Message"
         rows={5}
         value={message}
         onChange={(e) => setMessage(e.target.value)}
         required
-        className="px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none resize-none"
+        className="resize-none rounded-lg border-2 border-zinc-200 px-4 py-3 text-zinc-900 placeholder:text-zinc-400 focus:border-cyan-500 focus:outline-none"
       />
       <button
         type="submit"
         disabled={status === 'sending'}
-        className="px-8 py-3 rounded-full bg-gradient-to-r from-blue-600 to-blue-500 text-white font-semibold hover:shadow-lg hover:-translate-y-0.5 transition disabled:opacity-70"
+        className="rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-8 py-3 font-semibold text-white transition hover:brightness-110 disabled:opacity-70"
       >
         {status === 'sending' ? 'Sending...' : 'Send Message'}
       </button>
-      {status === 'success' && <p className="text-green-600 text-sm">Message sent! We&apos;ll get back to you soon.</p>}
-      {status === 'error' && <p className="text-red-600 text-sm">Failed to send. Email us at info@nuvatrahq.com</p>}
+      {status === 'success' && (
+        <p className="text-sm text-emerald-700">Message sent! We&apos;ll get back to you soon.</p>
+      )}
+      {status === 'error' && errorDetail && <p className="text-sm text-red-600">{errorDetail}</p>}
+      {status === 'error' && !errorDetail && (
+        <p className="text-sm text-red-600">Something went wrong. Email us at info@nuvatrahq.com</p>
+      )}
+      <p className="text-xs text-zinc-500">
+        Prefer email?{' '}
+        <a href="mailto:info@nuvatrahq.com" className="text-cyan-700 underline-offset-2 hover:underline">
+          info@nuvatrahq.com
+        </a>
+      </p>
     </form>
   )
 }
