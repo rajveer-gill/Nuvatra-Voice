@@ -17,6 +17,16 @@ const syne = Syne({
 
 const siteUrl = 'https://www.call-surge.com'
 
+/** Prefer Clerk’s fallback redirect env vars; legacy AFTER_SIGN_* still supported until hosts migrate. */
+const clerkSignInFallbackRedirectUrl =
+  process.env.NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL ||
+  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL ||
+  '/dashboard'
+const clerkSignUpFallbackRedirectUrl =
+  process.env.NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL ||
+  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL ||
+  '/dashboard'
+
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: 'Call Surge — AI voice receptionist for modern businesses',
@@ -50,7 +60,10 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <ClerkProvider>
+    <ClerkProvider
+      signInFallbackRedirectUrl={clerkSignInFallbackRedirectUrl}
+      signUpFallbackRedirectUrl={clerkSignUpFallbackRedirectUrl}
+    >
       <html lang="en" className={`${dmSans.variable} ${syne.variable}`}>
         <body className="min-h-dvh font-sans antialiased">{children}</body>
       </html>

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useApiClient } from '@/lib/api'
+import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 
 interface Tenant {
   id: string
@@ -63,7 +63,7 @@ export default function AdminPage() {
     setSessionError(null)
     setAdminAllowed(null)
     try {
-      const res = await api.get<{ is_admin: boolean }>('/api/admin/session')
+      const res = await api.get<{ is_admin: boolean }>('/api/admin/session', sameOriginApiConfig())
       if (res.data.is_admin) {
         setAdminAllowed(true)
       } else {

@@ -5,7 +5,7 @@ import Image from 'next/image'
 import { Menu, X } from 'lucide-react'
 import { SignedIn, SignedOut, UserButton } from '@clerk/nextjs'
 import { useEffect, useId, useState } from 'react'
-import { useApiClient } from '@/lib/api'
+import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 
 const navLinks = [
   { href: '/#outcomes', label: 'Outcomes' },
@@ -26,7 +26,7 @@ function AdminNavLink({
   useEffect(() => {
     let cancelled = false
     api
-      .get<{ is_admin: boolean }>('/api/admin/session')
+      .get<{ is_admin: boolean }>('/api/admin/session', sameOriginApiConfig())
       .then((res) => {
         if (!cancelled && res.data?.is_admin) setVisible(true)
       })

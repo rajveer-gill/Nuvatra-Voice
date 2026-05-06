@@ -5,7 +5,7 @@ import { UserButton } from '@clerk/nextjs'
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useApiClient } from '@/lib/api'
+import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { PlanPicker } from '@/components/PlanPicker'
 
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
@@ -109,7 +109,7 @@ export default function DashboardPage() {
         })
     }
 
-    api.get<{ is_admin: boolean }>('/api/admin/session')
+    api.get<{ is_admin: boolean }>('/api/admin/session', sameOriginApiConfig())
       .then((sessionRes) => {
         if (cancelled) return
         if (sessionRes.data.is_admin) {

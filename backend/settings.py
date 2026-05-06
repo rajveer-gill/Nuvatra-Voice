@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import List, Optional
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,12 +43,30 @@ class Settings(BaseSettings):
             "https://nuvatra-voice.vercel.app",
             "https://nuvatrahq.com",
             "https://call-surge.com",
+            "https://www.call-surge.com",
         ]
+        seen = list(origins)
+
+        def add(url: str) -> None:
+            u = url.rstrip("/")
+            if u not in seen:
+                seen.append(u)
+
         if self.frontend_url:
             u = self.frontend_url.rstrip("/")
-            if u not in origins:
-                origins.append(u)
-        return origins
+            add(u)
+            try:
+                p = urlparse(u)
+                host = (p.hostname or "").lower()
+                if host:
+                    scheme = p.scheme or "https"
+                    if host.startswith("www."):
+                        add(f"{scheme}://{host[4:]}")
+                    else:
+                        add(f"{scheme}://www.{host}")
+            except Exception:
+                pass
+        return seen
 
 
 @lru_cache

@@ -187,12 +187,30 @@ except Exception:
         "https://nuvatra-voice.vercel.app",
         "https://nuvatrahq.com",
         "https://call-surge.com",
+        "https://www.call-surge.com",
     ]
     frontend_url = os.getenv("FRONTEND_URL")
     if frontend_url:
         u = frontend_url.rstrip("/")
         if u not in allowed_origins:
             allowed_origins.append(u)
+        try:
+            from urllib.parse import urlparse as _urlparse
+
+            p = _urlparse(u)
+            host = (p.hostname or "").lower()
+            if host:
+                scheme = p.scheme or "https"
+                if host.startswith("www."):
+                    apex = f"{scheme}://{host[4:]}"
+                    if apex not in allowed_origins:
+                        allowed_origins.append(apex)
+                else:
+                    www = f"{scheme}://www.{host}"
+                    if www not in allowed_origins:
+                        allowed_origins.append(www)
+        except Exception:
+            pass
 
 app.add_middleware(
     CORSMiddleware,
