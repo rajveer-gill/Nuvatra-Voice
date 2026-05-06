@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { ClerkProvider } from '@clerk/nextjs'
 import { DM_Sans, Syne } from 'next/font/google'
+import { MotionProvider } from '@/components/motion/MotionProvider'
 import './globals.css'
 
 const dmSans = DM_Sans({
@@ -65,7 +66,9 @@ export default function RootLayout({
       signUpFallbackRedirectUrl={clerkSignUpFallbackRedirectUrl}
     >
       <html lang="en" className={`${dmSans.variable} ${syne.variable}`}>
-        <body className="min-h-dvh font-sans antialiased">{children}</body>
+        <body className="min-h-dvh font-sans antialiased">
+          <MotionProvider>{children}</MotionProvider>
+        </body>
       </html>
     </ClerkProvider>
   )

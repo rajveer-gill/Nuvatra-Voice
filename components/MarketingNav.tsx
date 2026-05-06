@@ -5,6 +5,7 @@ import Image from 'next/image'
 import { Menu, X } from 'lucide-react'
 import { SignedIn, SignedOut, UserButton } from '@clerk/nextjs'
 import { useEffect, useId, useState } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 
 const navLinks = [
@@ -46,6 +47,7 @@ function AdminNavLink({
 export default function MarketingNav() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const menuId = useId()
+  const reduceMotion = useReducedMotion()
 
   useEffect(() => {
     if (!mobileOpen) return
@@ -150,45 +152,60 @@ export default function MarketingNav() {
         </div>
       </div>
 
-      {mobileOpen && (
-        <div
-          id={menuId}
-          className="fixed inset-x-0 bottom-0 top-16 z-[60] sm:hidden"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Site navigation"
-        >
-          <button
-            type="button"
-            className="absolute inset-0 z-0 bg-black/70"
-            aria-label="Close menu"
-            onClick={() => setMobileOpen(false)}
-          />
-          <div className="relative z-10 max-h-[calc(100dvh-4rem)] overflow-y-auto border-b border-white/10 bg-zinc-950 px-4 py-6 shadow-xl">
-            <ul className="flex flex-col gap-1">
-              {navLinks.map(({ href, label }) => (
-                <li key={href}>
-                  <Link
-                    href={href}
-                    className="block rounded-lg px-3 py-3 text-base font-medium text-zinc-200 transition hover:bg-white/5 hover:text-white"
-                    onClick={() => setMobileOpen(false)}
-                  >
-                    {label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-            <SignedIn>
-              <div className="mt-4 border-t border-white/10 pt-4 sm:hidden">
-                <AdminNavLink
-                  className="block rounded-lg px-3 py-3 text-base font-medium text-zinc-200 transition hover:bg-white/5 hover:text-white"
-                  onNavigate={() => setMobileOpen(false)}
-                />
-              </div>
-            </SignedIn>
-          </div>
-        </div>
-      )}
+      <AnimatePresence>
+        {mobileOpen && (
+          <motion.div
+            id={menuId}
+            className="fixed inset-x-0 bottom-0 top-16 z-[60] sm:hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Site navigation"
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: reduceMotion ? 0 : 0.2 }}
+          >
+            <motion.button
+              type="button"
+              className="absolute inset-0 z-0 bg-black/70"
+              aria-label="Close menu"
+              onClick={() => setMobileOpen(false)}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.2 }}
+            />
+            <motion.div
+              className="relative z-10 ml-auto flex h-[calc(100dvh-4rem)] max-h-[calc(100dvh-4rem)] w-[min(100%,20rem)] flex-col overflow-y-auto border-l border-white/10 bg-zinc-950 px-4 py-6 shadow-2xl"
+              initial={reduceMotion ? false : { x: '100%' }}
+              animate={{ x: 0 }}
+              exit={reduceMotion ? undefined : { x: '100%' }}
+              transition={{ type: 'tween', duration: reduceMotion ? 0 : 0.28, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <ul className="flex flex-col gap-1">
+                {navLinks.map(({ href, label }) => (
+                  <li key={href}>
+                    <Link
+                      href={href}
+                      className="block rounded-lg px-3 py-3 text-base font-medium text-zinc-200 motion-safe-transition hover:bg-white/5 hover:text-white"
+                      onClick={() => setMobileOpen(false)}
+                    >
+                      {label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+              <SignedIn>
+                <div className="mt-4 border-t border-white/10 pt-4 sm:hidden">
+                  <AdminNavLink
+                    className="block rounded-lg px-3 py-3 text-base font-medium text-zinc-200 motion-safe-transition hover:bg-white/5 hover:text-white"
+                    onNavigate={() => setMobileOpen(false)}
+                  />
+                </div>
+              </SignedIn>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </nav>
   )
 }

@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import Image from 'next/image'
+import { AuthMainFade } from '@/components/AuthMainFade'
 
 export default function AuthShell({
   children,
@@ -20,7 +21,9 @@ export default function AuthShell({
           <Image src="/assets/call-surge-mark.svg" alt="" width={36} height={36} className="h-9 w-9" />
           <span className="font-display text-base font-semibold text-white">Call Surge</span>
         </Link>
-        <main aria-labelledby={headingId}>{children}</main>
+        <AuthMainFade>
+          <main aria-labelledby={headingId}>{children}</main>
+        </AuthMainFade>
       </div>
     </div>
   )

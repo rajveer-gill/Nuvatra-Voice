@@ -2,11 +2,13 @@
 
 import dynamic from 'next/dynamic'
 import { UserButton } from '@clerk/nextjs'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { PlanPicker } from '@/components/PlanPicker'
+import { AppChrome } from '@/components/layout/AppChrome'
 
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
 const Appointments = dynamic(() => import('@/components/Appointments'), { ssr: false })
@@ -25,10 +27,23 @@ export type SubscriptionState = {
 export default function DashboardPage() {
   const router = useRouter()
   const api = useApiClient()
+  const reduceMotion = useReducedMotion()
   const [activeTab, setActiveTab] = useState<'dashboard' | 'appointments' | 'leads' | 'settings'>('appointments')
   const [access, setAccess] = useState<'loading' | 'granted' | 'denied' | 'subscription_required'>('loading')
   const [deniedKind, setDeniedKind] = useState<'no_membership' | 'verification_failed'>('no_membership')
   const [subscription, setSubscription] = useState<SubscriptionState | null>(null)
+
+  const tabs = useMemo(() => {
+    const base: { id: typeof activeTab; label: string }[] = [
+      { id: 'appointments', label: 'Appointments' },
+      { id: 'dashboard', label: 'Dashboard' },
+    ]
+    if (subscription?.limits?.has_lead_capture) {
+      base.push({ id: 'leads', label: 'Leads' })
+    }
+    base.push({ id: 'settings', label: 'Settings' })
+    return base
+  }, [subscription?.limits?.has_lead_capture])
 
   const applySubscriptionError = useCallback((err: { response?: { status?: number } }) => {
     const status = err.response?.status
@@ -127,150 +142,190 @@ export default function DashboardPage() {
     return () => { cancelled = true }
   }, [api, router, applySubscriptionError])
 
+  useEffect(() => {
+    if (!subscription?.limits?.has_lead_capture && activeTab === 'leads') {
+      setActiveTab('appointments')
+    }
+  }, [subscription?.limits?.has_lead_capture, activeTab])
+
+  const panelTransition = reduceMotion ? { duration: 0 } : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const }
+
   if (access === 'loading') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mb-4" />
-          <p className="text-gray-600">Loading...</p>
+      <AppChrome>
+        <div className="flex min-h-screen items-center justify-center px-4">
+          <div className="text-center">
+            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-cyan-400/30 border-t-cyan-400" />
+            <p className="text-sm text-zinc-400">Loading your workspace…</p>
+          </div>
         </div>
-      </div>
+      </AppChrome>
     )
   }
 
   if (access === 'denied') {
     return (
-      <main className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 flex items-center justify-center">
-        <div className="text-center max-w-md px-6">
-          <div className="bg-white rounded-2xl shadow-lg p-8">
-            <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg className="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <h2 className="text-xl font-semibold text-gray-900 mb-2">
-              {deniedKind === 'verification_failed' ? 'Could not verify access' : 'No Access'}
-            </h2>
-            <p className="text-gray-600 mb-6">
-              {deniedKind === 'verification_failed'
-                ? 'We could not confirm your account with the server. Check your connection and try again.'
-                : 'Your account is not linked to an active business. Access is granted when your administrator creates your business and sends you an invite. If you were invited, open the link from that email. If your access was removed, contact your administrator.'}
-            </p>
-            <div className="flex flex-wrap items-center justify-center gap-4">
-              {deniedKind === 'verification_failed' && (
-                <button
-                  type="button"
-                  onClick={() => window.location.reload()}
-                  className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:opacity-90"
-                >
-                  Try again
-                </button>
-              )}
-              <Link href="/" className="text-blue-600 hover:underline text-sm">← Back to home</Link>
-              <UserButton afterSignOutUrl="/" />
-            </div>
+      <AppChrome>
+        <main className="flex min-h-screen items-center justify-center px-4 py-12">
+          <div className="w-full max-w-md">
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.35 }}
+              className="rounded-2xl border border-white/10 bg-zinc-900/90 p-8 shadow-2xl shadow-black/40 backdrop-blur-sm"
+            >
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-500/15">
+                <svg className="h-6 w-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h2 className="font-display text-center text-xl font-semibold text-white">
+                {deniedKind === 'verification_failed' ? 'Could not verify access' : 'No Access'}
+              </h2>
+              <p className="mt-3 text-center text-sm leading-relaxed text-zinc-400">
+                {deniedKind === 'verification_failed'
+                  ? 'We could not confirm your account with the server. Check your connection and try again.'
+                  : 'Your account is not linked to an active business. Access is granted when your administrator creates your business and sends you an invite. If you were invited, open the link from that email. If your access was removed, contact your administrator.'}
+              </p>
+              <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
+                {deniedKind === 'verification_failed' && (
+                  <button
+                    type="button"
+                    onClick={() => window.location.reload()}
+                    className="rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 motion-safe-transition hover:brightness-110"
+                  >
+                    Try again
+                  </button>
+                )}
+                <Link href="/" className="text-sm text-cyan-400 motion-safe-transition hover:text-cyan-300">
+                  ← Back to home
+                </Link>
+                <UserButton afterSignOutUrl="/" />
+              </div>
+            </motion.div>
           </div>
-        </div>
-      </main>
+        </main>
+      </AppChrome>
     )
   }
 
   if (access === 'subscription_required') {
     return (
-      <main className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 flex items-center justify-center">
-        <div className="container mx-auto px-4 py-8">
-          <header className="flex justify-between items-center mb-8">
-            <Link href="/" className="text-gray-600 hover:text-gray-900 text-sm">← Call Surge</Link>
+      <AppChrome>
+        <main className="min-h-screen px-4 py-8">
+          <header className="mx-auto mb-8 flex max-w-3xl items-center justify-between">
+            <Link href="/" className="text-sm text-zinc-400 motion-safe-transition hover:text-white">
+              ← Call Surge
+            </Link>
             <UserButton afterSignOutUrl="/" />
           </header>
-          <PlanPicker subscription={subscription} onSubscribed={fetchSubscription} api={api} />
-        </div>
-      </main>
+          <div className="mx-auto max-w-3xl rounded-2xl border border-white/10 bg-white p-6 shadow-2xl shadow-black/50 md:p-10">
+            <PlanPicker subscription={subscription} onSubscribed={fetchSubscription} api={api} />
+          </div>
+        </main>
+      </AppChrome>
     )
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
-      <div className="container mx-auto px-4 py-8">
-        <header className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-8">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-gray-600 hover:text-gray-900 text-sm">← Call Surge</Link>
-            <h1 className="text-2xl sm:text-4xl font-bold text-gray-900">
-              Call Surge
-            </h1>
-          </div>
-          <div className="flex items-center gap-2">
+    <AppChrome>
+      <main className="min-h-screen px-4 py-8 md:px-6">
+        <div className="mx-auto max-w-6xl">
+          <header className="mb-8 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-6">
+              <Link href="/" className="text-sm text-zinc-400 motion-safe-transition hover:text-white">
+                ← Call Surge
+              </Link>
+              <div>
+                <h1 className="font-display text-2xl font-semibold tracking-tight text-white sm:text-4xl">Call Surge</h1>
+                <p className="mt-1 text-sm text-zinc-500">AI-Powered Voice Receptionist</p>
+              </div>
+            </div>
             <UserButton afterSignOutUrl="/" />
-          </div>
-        </header>
-        <p className="text-gray-600 text-lg mb-6">AI-Powered Voice Receptionist</p>
+          </header>
 
-        {subscription?.subscription_status === 'trialing' && subscription?.trial_ends_at && (
-          <div className="max-w-6xl mx-auto mb-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-center text-amber-800 text-sm">
-            Your free trial ends on {new Date(subscription.trial_ends_at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}.
-            {Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) > 0 && (
-              <> {Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24))} days left.</>
-            )}
-          </div>
-        )}
+          {subscription?.subscription_status === 'trialing' && subscription?.trial_ends_at && (
+            <div className="mb-6 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-center text-sm text-amber-100">
+              Your free trial ends on{' '}
+              {new Date(subscription.trial_ends_at).toLocaleDateString(undefined, {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+              })}
+              .
+              {Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) > 0 && (
+                <>
+                  {' '}
+                  {Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24))} days
+                  left.
+                </>
+              )}
+            </div>
+          )}
 
-        <div className="max-w-6xl mx-auto">
-          <div className="flex justify-center mb-6 flex-wrap gap-2">
-            <button
-              onClick={() => setActiveTab('appointments')}
-              className={`px-6 py-2 rounded-lg font-medium transition-all ${
-                activeTab === 'appointments'
-                  ? 'bg-primary-600 text-white shadow-lg'
-                  : 'bg-white text-gray-700 hover:bg-gray-100'
-              }`}
-            >
-              Appointments
-            </button>
-            <button
-              onClick={() => setActiveTab('dashboard')}
-              className={`px-6 py-2 rounded-lg font-medium transition-all ${
-                activeTab === 'dashboard'
-                  ? 'bg-primary-600 text-white shadow-lg'
-                  : 'bg-white text-gray-700 hover:bg-gray-100'
-              }`}
-            >
-              Dashboard
-            </button>
-            {subscription?.limits?.has_lead_capture && (
+          <div
+            className="relative mb-8 inline-flex w-full flex-wrap justify-center gap-1 rounded-full border border-white/10 bg-zinc-900/70 p-1.5 backdrop-blur-md"
+            role="tablist"
+            aria-label="Dashboard sections"
+          >
+            {tabs.map((tab) => (
               <button
-                onClick={() => setActiveTab('leads')}
-                className={`px-6 py-2 rounded-lg font-medium transition-all ${
-                  activeTab === 'leads'
-                    ? 'bg-primary-600 text-white shadow-lg'
-                    : 'bg-white text-gray-700 hover:bg-gray-100'
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`relative rounded-full px-5 py-2.5 text-sm font-medium motion-safe-transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 ${
+                  activeTab === tab.id ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                Leads
+                {activeTab === tab.id &&
+                  (reduceMotion ? (
+                    <span
+                      className="absolute inset-0 rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 shadow-lg shadow-cyan-500/15"
+                      aria-hidden
+                    />
+                  ) : (
+                    <motion.span
+                      layoutId="dashboard-tab-pill"
+                      className="absolute inset-0 rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 shadow-lg shadow-cyan-500/15"
+                      transition={{ type: 'spring', stiffness: 400, damping: 34 }}
+                      aria-hidden
+                    />
+                  ))}
+                <span className="relative z-10">{tab.label}</span>
               </button>
-            )}
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`px-6 py-2 rounded-lg font-medium transition-all ${
-                activeTab === 'settings'
-                  ? 'bg-primary-600 text-white shadow-lg'
-                  : 'bg-white text-gray-700 hover:bg-gray-100'
-              }`}
-            >
-              Settings
-            </button>
+            ))}
           </div>
 
-          {activeTab === 'appointments' && <Appointments />}
-          {activeTab === 'leads' && <Leads />}
-          {activeTab === 'dashboard' && <Dashboard />}
-          {activeTab === 'settings' && <Settings />}
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              role="tabpanel"
+              initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
+              transition={panelTransition}
+            >
+              {activeTab === 'appointments' && <Appointments />}
+              {activeTab === 'leads' && <Leads />}
+              {activeTab === 'dashboard' && <Dashboard />}
+              {activeTab === 'settings' && <Settings />}
+            </motion.div>
+          </AnimatePresence>
+
+          <footer className="mt-12 border-t border-white/10 pt-6 text-center text-sm text-zinc-500">
+            <Link href="/terms" className="motion-safe-transition hover:text-zinc-300">
+              Terms of Service
+            </Link>
+            <span className="mx-2">·</span>
+            <Link href="/privacy" className="motion-safe-transition hover:text-zinc-300">
+              Privacy Policy
+            </Link>
+          </footer>
         </div>
-        <footer className="max-w-6xl mx-auto mt-12 pt-6 border-t border-gray-200 text-center text-sm text-gray-500">
-          <Link href="/terms" className="hover:text-gray-700">Terms of Service</Link>
-          <span className="mx-2">·</span>
-          <Link href="/privacy" className="hover:text-gray-700">Privacy Policy</Link>
-        </footer>
-      </div>
-    </main>
+      </main>
+    </AppChrome>
   )
 }
