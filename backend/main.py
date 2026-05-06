@@ -134,8 +134,14 @@ else:
     print(f"API Key loaded successfully (length: {len(api_key)})")
 
 
+_openai_pre_warm_disabled = False
+
+
 async def pre_warm_openai():
     """Pre-warm OpenAI client. Greeting/got-it audio are generated per-client on first call (uses selected voice)."""
+    global _openai_pre_warm_disabled
+    if _openai_pre_warm_disabled:
+        return
     try:
         _ensure_openai_client()
         print("[WARM] Pre-warming OpenAI client...")
@@ -148,6 +154,20 @@ async def pre_warm_openai():
         )
         print("[OK] OpenAI client pre-warmed successfully")
     except Exception as e:
+        msg = str(e).lower()
+        code = getattr(e, "status_code", None)
+        if (
+            code == 429
+            or "insufficient_quota" in msg
+            or ("429" in msg and "quota" in msg)
+            or "rate_limit_exceeded" in msg
+        ):
+            _openai_pre_warm_disabled = True
+            print(
+                "[INFO] OpenAI pre-warm stopped: quota or billing limit (429). "
+                "Resolve billing at platform.openai.com; keep-warm calls will skip until redeploy."
+            )
+            return
         print(f"[WARN] Pre-warm warning (non-critical): {e}")
 
 async def keep_client_warm():

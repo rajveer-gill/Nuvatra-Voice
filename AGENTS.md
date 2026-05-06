@@ -37,6 +37,10 @@ Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KE
 
 Also set **`NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in`** and **`NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up`** so Clerk uses the embedded routes (`app/sign-in`, `app/sign-up`) instead of only the hosted Account Portal. In **Clerk Dashboard → Paths**, align application paths with those URLs.
 
+For post-login redirects, prefer **`NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL`** and **`NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL`** (see `.env.local.example`). Remove legacy **`NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL`** / **`NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL`** from Vercel once migrated—Clerk still reads those deprecated env names and may warn in the browser console until they are deleted.
+
+After pushing git changes, trigger a **Vercel redeploy** if Production did not pick up the latest commit (dashboard relies on the Next.js **`/api/admin/session`** proxy and **`sameOriginApiConfig`** in `lib/api.ts`).
+
 Optional but common for Call Surge production: `NEXT_PUBLIC_CLERK_JS_URL` (CDN fallback if the Clerk Frontend API subdomain is unhealthy—see below).
 
 ### Sign-in / sign-up (email, password, Google, Facebook, Microsoft)
