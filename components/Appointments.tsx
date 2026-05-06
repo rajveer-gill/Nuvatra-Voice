@@ -173,7 +173,7 @@ export default function Appointments() {
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="cs-field-compact min-w-[11rem]"
             >
               <option value="all">All</option>
               <option value="needs_response">Needs response</option>
@@ -187,7 +187,7 @@ export default function Appointments() {
               type="date"
               value={dateFrom}
               onChange={(e) => setDateFrom(e.target.value)}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="cs-field-compact min-w-[11rem]"
             />
           </div>
           <div className="flex items-center gap-2">
@@ -196,7 +196,7 @@ export default function Appointments() {
               type="date"
               value={dateTo}
               onChange={(e) => setDateTo(e.target.value)}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="cs-field-compact min-w-[11rem]"
             />
           </div>
         </div>
@@ -212,7 +212,7 @@ export default function Appointments() {
                   type="text"
                   value={form.name}
                   onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  className="w-full rounded border border-gray-300 px-3 py-2"
+                  className="cs-field w-full"
                   placeholder="Client name"
                   required
                 />
@@ -223,7 +223,7 @@ export default function Appointments() {
                   type="tel"
                   value={form.phone}
                   onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                  className="w-full rounded border border-gray-300 px-3 py-2"
+                  className="cs-field w-full"
                   placeholder="(555) 123-4567"
                 />
               </div>
@@ -233,7 +233,7 @@ export default function Appointments() {
                   type="email"
                   value={form.email}
                   onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                  className="w-full rounded border border-gray-300 px-3 py-2"
+                  className="cs-field w-full"
                   placeholder="client@example.com"
                 />
               </div>
@@ -243,7 +243,7 @@ export default function Appointments() {
                   type="date"
                   value={form.date}
                   onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
-                  className="w-full rounded border border-gray-300 px-3 py-2"
+                  className="cs-field w-full"
                   required
                 />
               </div>
@@ -253,7 +253,7 @@ export default function Appointments() {
                   type="time"
                   value={form.time}
                   onChange={(e) => setForm((f) => ({ ...f, time: e.target.value }))}
-                  className="w-full rounded border border-gray-300 px-3 py-2"
+                  className="cs-field w-full"
                   required
                 />
               </div>
@@ -263,7 +263,7 @@ export default function Appointments() {
                   type="text"
                   value={form.reason}
                   onChange={(e) => setForm((f) => ({ ...f, reason: e.target.value }))}
-                  className="w-full rounded border border-gray-300 px-3 py-2"
+                  className="cs-field w-full"
                   placeholder="e.g. Haircut, Color"
                 />
               </div>

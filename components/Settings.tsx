@@ -291,7 +291,7 @@ export default function Settings() {
                 type="text"
                 value={receptionistName}
                 onChange={(e) => setReceptionistName(e.target.value)}
-                className="flex-1 rounded-lg border border-gray-300 px-3 py-2"
+                className="cs-field flex-1 min-w-0"
                 placeholder="Give your AI receptionist a name"
               />
               <button
@@ -313,7 +313,7 @@ export default function Settings() {
               type="text"
               value={aiPhone}
               readOnly
-              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-gray-500 cursor-not-allowed"
+              className="w-full cursor-not-allowed rounded-lg border border-gray-400 bg-gray-100 px-3 py-2 text-gray-800"
             />
             <p className="text-xs text-gray-500 mt-1">This is your AI receptionist&apos;s phone number. Contact your administrator to change it.</p>
             <p className="text-xs text-gray-500 mt-1">Calls and texts work when your number&apos;s Voice and Messaging webhooks are set in Twilio. If calls or texts aren&apos;t working, contact your administrator.</p>
@@ -355,7 +355,7 @@ export default function Settings() {
                     setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, v)))
                   }
                 }}
-                className="w-20 rounded-lg border border-gray-300 px-2 py-1.5 text-sm text-right tabular-nums"
+                className="cs-field-compact w-20 text-right tabular-nums"
               />
             </div>
           </div>
@@ -461,7 +461,7 @@ export default function Settings() {
               type="text"
               value={form.name}
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="Your Business Name"
             />
           </div>
@@ -471,7 +471,7 @@ export default function Settings() {
               type="text"
               value={form.business_type}
               onChange={(e) => setForm((f) => ({ ...f, business_type: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="e.g. nail salon, HVAC company, real estate brokerage, restaurant"
             />
             <p className="text-xs text-gray-500 mt-1">
@@ -484,7 +484,7 @@ export default function Settings() {
               type="text"
               value={form.hours}
               onChange={(e) => setForm((f) => ({ ...f, hours: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="e.g. Mon–Fri 9 AM–5 PM, or 24/7 for emergency"
             />
           </div>
@@ -494,7 +494,7 @@ export default function Settings() {
               type="text"
               value={form.forwarding_phone}
               onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="Number to forward calls to when a caller asks for a real person"
             />
             <p className="text-xs text-gray-500 mt-1">When a caller asks to speak to someone, the AI will transfer the call to this number.</p>
@@ -508,14 +508,14 @@ export default function Settings() {
                   type="text"
                   value={s.name}
                   onChange={(e) => updateStaff(i, 'name', e.target.value)}
-                  className="flex-1 rounded-lg border border-gray-300 px-3 py-2"
+                  className="cs-field flex-1 min-w-0"
                   placeholder="Name"
                 />
                 <input
                   type="text"
                   value={s.phone}
                   onChange={(e) => updateStaff(i, 'phone', e.target.value)}
-                  className="flex-1 rounded-lg border border-gray-300 px-3 py-2"
+                  className="cs-field flex-1 min-w-0"
                   placeholder="Phone (E.164)"
                 />
                 <button type="button" onClick={() => removeStaff(i)} className="p-2 text-red-600 hover:bg-red-50 rounded-lg" title="Remove">
@@ -538,7 +538,7 @@ export default function Settings() {
               type="email"
               value={form.email}
               onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="info@yourbusiness.com"
             />
           </div>
@@ -548,7 +548,7 @@ export default function Settings() {
               type="text"
               value={form.address}
               onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="123 Main St, City, State"
             />
           </div>
@@ -558,7 +558,7 @@ export default function Settings() {
               type="text"
               value={form.menu_link}
               onChange={(e) => setForm((f) => ({ ...f, menu_link: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="https://... (menu, services, or main site)"
             />
           </div>
@@ -568,7 +568,7 @@ export default function Settings() {
               type="text"
               value={form.greeting}
               onChange={(e) => setForm((f) => ({ ...f, greeting: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              className="cs-field w-full"
               placeholder="Thank you for calling {business_name}. How can I help?"
             />
             <p className="text-xs text-gray-500 mt-1">Use {'{business_name}'} for your business name.</p>
@@ -578,7 +578,7 @@ export default function Settings() {
             <textarea
               value={form.services}
               onChange={(e) => setForm((f) => ({ ...f, services: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
+              className="cs-field w-full min-h-[80px]"
               placeholder="Appointments&#10;Estimates&#10;Emergency service&#10;Consultations"
             />
             <p className="text-xs text-gray-500 mt-1">What your business offers so the AI can answer &quot;what do you do?&quot;</p>
@@ -588,7 +588,7 @@ export default function Settings() {
             <textarea
               value={form.specials}
               onChange={(e) => setForm((f) => ({ ...f, specials: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
+              className="cs-field w-full min-h-[80px]"
               placeholder="Happy hour 4–6 PM&#10;First-time discount&#10;Seasonal offer"
             />
           </div>
@@ -597,7 +597,7 @@ export default function Settings() {
             <textarea
               value={form.reservation_rules}
               onChange={(e) => setForm((f) => ({ ...f, reservation_rules: e.target.value }))}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 min-h-[80px]"
+              className="cs-field w-full min-h-[80px]"
               placeholder="Same-day booking available&#10;24h notice for cancellations&#10;Deposit required for groups"
             />
           </div>

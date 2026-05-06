@@ -73,6 +73,28 @@ body {
   }
 }
 
+/* Readable form controls on white dashboard cards (placeholder + value contrast) */
+@layer components {
+  .cs-field {
+    @apply rounded-lg border border-gray-500 bg-white px-3 py-2 text-sm font-normal text-gray-900 antialiased;
+    @apply placeholder:text-gray-600;
+    @apply focus:border-primary-600 focus:outline-none focus:ring-2 focus:ring-primary-500/35;
+    color-scheme: light;
+  }
+  .cs-field-compact {
+    @apply rounded-lg border border-gray-500 bg-white px-3 py-1.5 text-sm font-normal text-gray-900 antialiased;
+    @apply focus:border-primary-600 focus:outline-none focus:ring-2 focus:ring-primary-500/35;
+    color-scheme: light;
+  }
+  select.cs-field,
+  select.cs-field-compact {
+    @apply text-gray-900;
+  }
+  textarea.cs-field {
+    @apply placeholder:text-gray-600;
+  }
+}
+
 
 
 

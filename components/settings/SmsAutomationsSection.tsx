@@ -93,7 +93,7 @@ export function SmsAutomationsSection({
           <select
             value={newTrigger}
             onChange={(e) => setNewTrigger(e.target.value as 'after_inquiry' | 'post_call')}
-            className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+            className="cs-field-compact min-w-[12rem]"
           >
             <option value="after_inquiry">After inquiry (no booking)</option>
             <option value="post_call">Post call</option>
@@ -103,7 +103,7 @@ export function SmsAutomationsSection({
             value={newTemplate}
             onChange={(e) => setNewTemplate(e.target.value)}
             placeholder="e.g. Thanks for reaching out! Here's our menu: {business_name}"
-            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+            className="cs-field w-full text-sm"
           />
           <button
             type="button"

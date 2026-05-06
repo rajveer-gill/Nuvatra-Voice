@@ -95,7 +95,7 @@ export default function ContactForm() {
   }
 
   const inputRing =
-    'rounded-lg border-2 border-zinc-200 px-4 py-3 text-zinc-900 placeholder:text-zinc-400 focus:border-cyan-500'
+    'rounded-lg border-2 border-zinc-400 px-4 py-3 text-zinc-900 placeholder:text-zinc-600 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30'
 
   return (
     <form onSubmit={handleSubmit} method="post" className="flex flex-col gap-4">
