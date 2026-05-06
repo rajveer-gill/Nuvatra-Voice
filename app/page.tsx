@@ -52,7 +52,9 @@ export default function HomePage() {
                 Talk to us
               </Link>
             </div>
-            <p className="mt-6 text-sm text-zinc-500">Invite-only access. Sign in with your organization.</p>
+            <p className="mt-6 text-sm text-zinc-500">
+              Sign in with email and password, Google, Facebook, or Microsoft — then open your dashboard.
+            </p>
           </div>
         </section>
 

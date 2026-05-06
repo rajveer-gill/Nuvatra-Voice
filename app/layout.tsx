@@ -15,7 +15,7 @@ const syne = Syne({
   display: 'swap',
 })
 
-const siteUrl = 'https://call-surge.com'
+const siteUrl = 'https://www.call-surge.com'
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -39,7 +39,7 @@ export const metadata: Metadata = {
     card: 'summary_large_image',
     title: 'Call Surge — AI voice receptionist',
     description:
-      'AI voice + SMS receptionist for teams who cannot afford a dropped call. Invite-only access.',
+      'AI voice + SMS receptionist for teams who cannot afford a dropped call.',
     images: ['/og-image.png'],
   },
 }

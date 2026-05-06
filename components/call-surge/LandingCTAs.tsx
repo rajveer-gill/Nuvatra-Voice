@@ -1,11 +1,11 @@
 import Link from 'next/link'
 import { ArrowRight } from 'lucide-react'
 
-/** Dashboard route triggers Clerk when unauthenticated (hosted sign-in). Avoids SignIn modal on marketing shell. */
+/** Primary CTA — sign-up (email, password, OAuth) on `/sign-up`. */
 export function HeroPrimaryCTA() {
   return (
     <Link
-      href="/dashboard"
+      href="/sign-up"
       className="group inline-flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 px-8 py-4 text-base font-semibold text-white shadow-xl shadow-cyan-500/25 transition hover:brightness-110 hover:gap-3"
     >
       Get started

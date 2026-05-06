@@ -35,6 +35,38 @@ Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, 
 
 Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`.
 
+Also set **`NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in`** and **`NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up`** so Clerk uses the embedded routes (`app/sign-in`, `app/sign-up`) instead of only the hosted Account Portal. In **Clerk Dashboard → Paths**, align application paths with those URLs.
+
+Optional but common for Call Surge production: `NEXT_PUBLIC_CLERK_JS_URL` (CDN fallback if the Clerk Frontend API subdomain is unhealthy—see below).
+
+### Sign-in / sign-up (email, password, Google, Facebook, Microsoft)
+
+The app embeds Clerk **`<SignIn />`** and **`<SignUp />`** on `/sign-in` and `/sign-up` with a dark theme (`@clerk/themes`). Which methods appear is controlled entirely in **Clerk Dashboard** (not in code):
+
+1. **User & Authentication** → enable **Email address** (and **Password** if you want username/password).
+2. **User & Authentication** → **Social connections**: turn on **Google**, **Facebook**, **Microsoft** (and complete each provider’s OAuth setup — Clerk shows redirect URIs to paste into Google Cloud Console, Meta for Developers, Microsoft Entra ID).
+3. **Production** OAuth apps must use **your own** client IDs/secrets (Clerk’s dev credentials are not for production).
+
+If the instance remains **invite-only**, new sign-ups may still be restricted by Clerk settings even though the UI lists social and password options—align product policy with Dashboard configuration.
+
+### Clerk Frontend API subdomain (`clerk.<domain>`) — fix 503 / `failed_to_load_clerk_js`
+
+The browser loads `@clerk/clerk-js` from your **Clerk Frontend API host** (e.g. `https://clerk.call-surge.com/npm/@clerk/clerk-js@…/dist/clerk.browser.js`). If that host returns **503** or fails DNS/TLS, Clerk’s SDK will not initialize (`failed_to_load_clerk_js`). A **temporary** mitigation is `NEXT_PUBLIC_CLERK_JS_URL` pointing at a public **jsDelivr** URL for the same major `clerk-js` version; the **durable** fix is to restore Clerk’s own hostname.
+
+Do this in order (human steps—cannot be done from git alone):
+
+1. **Clerk Dashboard** → **Domains** (production instance): open [Domains](https://dashboard.clerk.com/~/domains). Find the **Frontend API** / DNS section and note every record Clerk expects (usually a **CNAME** for `clerk` → Clerk’s target). Use **exact** names and targets—do not invent values.
+
+2. **DNS provider** (where `call-surge.com` is hosted): add or correct those records. If you use **Cloudflare**, set the Frontend API / `clerk` record to **DNS only** (grey cloud), **not** proxied—Clerk’s validation and TLS issuance break when the hostname is orange-clouded to a generic edge IP. Clerk documents this under production troubleshooting (“DNS records not propagating with Cloudflare”).
+
+3. **Wait** for propagation and for Clerk’s dashboard to show the domain / Frontend API as **verified** (can take minutes to hours).
+
+4. **Verify** before removing the CDN workaround: in a browser or with `curl -I`, request the Clerk JS URL on **`https://clerk.call-surge.com/.../clerk.browser.js`** and confirm **HTTP 200** (not 503).
+
+5. **Vercel**: remove **`NEXT_PUBLIC_CLERK_JS_URL`** from Production (and Preview if set), **Redeploy**, then reload `https://www.call-surge.com` and confirm the console no longer needs the jsDelivr URL and Clerk still loads.
+
+6. If TLS never completes, check **CAA records** on the apex domain—Clerk needs Let’s Encrypt or Google Trust Services allowed (see Clerk production deployment troubleshooting).
+
 ### Voice call recording (Twilio)
 
 - `CALL_RECORDING_ENABLED` — set to `true` on Render to start dual-channel full-call recording on inbound Twilio calls and to append a spoken disclosure to the greeting (“This call may be recorded for quality and training.”). Requires `NGROK_URL` (or equivalent public base URL) so Twilio can reach `/api/phone/recording-complete`.
@@ -79,7 +111,7 @@ For hello-world / smoke-test validation, use the production deployments rather t
 
 - The backend's `main.py` hard-crashes at import time if `OPENAI_API_KEY` is unset. Always provide at least a placeholder in `backend/.env`.
 - Clerk validates publishable key format strictly. An invalid format key (e.g., `pk_test_placeholder`) causes 500 errors on every page. Either use real keys or remove them entirely for keyless mode.
-- The Clerk instance is configured for **invite-only** sign-up. There is no public "Sign up" option. Autonomous agents cannot create accounts — a human must log in via the Desktop pane with an existing Clerk account to test authenticated flows (dashboard, admin).
+- Sign-up options (email/password and OAuth) depend on **Clerk Dashboard** settings. The marketing site links to **`/sign-up`** and **`/sign-in`**. If invite-only or restricted sign-up is enabled in Clerk, behavior follows those rules.
 - The frontend dev server may fail to bind port 3000 after restarts due to zombie node processes. Use port 3001 as fallback: `npx next dev --hostname 0.0.0.0 --port 3001 --turbo`.
 - Backend pip packages install to `~/.local/` (user install). This is on the Python import path but scripts go to `~/.local/bin/` which may not be on `$PATH`.
 - Render uses Python 3.13; `psycopg2-binary` must be `>=2.9.10` for compatibility (older versions fail with `undefined symbol: _PyInterpreterState_Get`).
