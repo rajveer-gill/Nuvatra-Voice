@@ -33,7 +33,7 @@ See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `n
 
 Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_JWKS_URL`, `ADMIN_CLERK_USER_IDS`, `FRONTEND_URL`.
 
-Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`.
+Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`. Set **`ADMIN_CLERK_USER_IDS`** on Vercel too (same comma-separated Clerk user IDs as the backend) so server layouts route platform admins to `/admin` and everyone else to `/dashboard`; when omitted, the client still checks `/api/admin/session`.
 
 Also set **`NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in`** and **`NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up`** so Clerk uses the embedded routes (`app/sign-in`, `app/sign-up`) instead of only the hosted Account Portal. In **Clerk Dashboard → Paths**, align application paths with those URLs.
 

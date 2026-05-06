@@ -5,6 +5,7 @@ import Image from 'next/image'
 import { Menu, X } from 'lucide-react'
 import { SignedIn, SignedOut, UserButton } from '@clerk/nextjs'
 import { useEffect, useId, useState } from 'react'
+import { useApiClient } from '@/lib/api'
 
 const navLinks = [
   { href: '/#outcomes', label: 'Outcomes' },
@@ -12,6 +13,35 @@ const navLinks = [
   { href: '/#features', label: 'Features' },
   { href: '/#contact', label: 'Contact' },
 ] as const
+
+function AdminNavLink({
+  className,
+  onNavigate,
+}: {
+  className: string
+  onNavigate?: () => void
+}) {
+  const api = useApiClient()
+  const [visible, setVisible] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    api
+      .get<{ is_admin: boolean }>('/api/admin/session')
+      .then((res) => {
+        if (!cancelled && res.data?.is_admin) setVisible(true)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [api])
+  if (!visible) return null
+  return (
+    <Link href="/admin" className={className} onClick={onNavigate}>
+      Admin
+    </Link>
+  )
+}
 
 export default function MarketingNav() {
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -85,12 +115,7 @@ export default function MarketingNav() {
             </SignedOut>
             <SignedIn>
               <div className="flex items-center gap-1.5 sm:gap-2 md:gap-3">
-                <Link
-                  href="/admin"
-                  className="hidden text-sm font-medium text-zinc-400 transition hover:text-white sm:inline"
-                >
-                  Admin
-                </Link>
+                <AdminNavLink className="hidden text-sm font-medium text-zinc-400 transition hover:text-white sm:inline" />
                 <Link
                   href="/dashboard"
                   className="rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:brightness-110 sm:px-4 sm:text-sm"
@@ -155,13 +180,10 @@ export default function MarketingNav() {
             </ul>
             <SignedIn>
               <div className="mt-4 border-t border-white/10 pt-4 sm:hidden">
-                <Link
-                  href="/admin"
+                <AdminNavLink
                   className="block rounded-lg px-3 py-3 text-base font-medium text-zinc-200 transition hover:bg-white/5 hover:text-white"
-                  onClick={() => setMobileOpen(false)}
-                >
-                  Admin
-                </Link>
+                  onNavigate={() => setMobileOpen(false)}
+                />
               </div>
             </SignedIn>
           </div>

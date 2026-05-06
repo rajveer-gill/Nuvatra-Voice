@@ -1,8 +1,9 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { useApiClient } from '@/lib/api'
 
 interface Tenant {
@@ -18,8 +19,10 @@ interface Tenant {
 }
 
 export default function AdminPage() {
+  const router = useRouter()
   const { isLoaded, isSignedIn } = useAuth()
   const api = useApiClient()
+  const [adminAllowed, setAdminAllowed] = useState<boolean | null>(null)
   const [tenants, setTenants] = useState<Tenant[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -35,8 +38,9 @@ export default function AdminPage() {
   const [exempting, setExempting] = useState<string | null>(null)
   const [exemptAction, setExemptAction] = useState<Record<string, string>>({})
   const [exemptUntilDate, setExemptUntilDate] = useState<Record<string, string>>({})
+  const [sessionError, setSessionError] = useState<string | null>(null)
 
-  const fetchTenants = async () => {
+  const fetchTenants = useCallback(async () => {
     try {
       const res = await api.get('/api/admin/tenants')
       setTenants(res.data.tenants || [])
@@ -53,13 +57,34 @@ export default function AdminPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [api])
+
+  const verifyAdminSession = useCallback(async () => {
+    setSessionError(null)
+    setAdminAllowed(null)
+    try {
+      const res = await api.get<{ is_admin: boolean }>('/api/admin/session')
+      if (res.data.is_admin) {
+        setAdminAllowed(true)
+      } else {
+        setAdminAllowed(false)
+        router.replace('/dashboard')
+      }
+    } catch {
+      setSessionError('Could not verify admin access. Check your connection and try again.')
+      setAdminAllowed(false)
+    }
+  }, [api, router])
 
   useEffect(() => {
-    if (isLoaded) {
-      fetchTenants()
-    }
-  }, [isLoaded, api])
+    if (!isLoaded || !isSignedIn) return
+    void verifyAdminSession()
+  }, [isLoaded, isSignedIn, verifyAdminSession])
+
+  useEffect(() => {
+    if (adminAllowed !== true) return
+    fetchTenants()
+  }, [adminAllowed, fetchTenants])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -144,7 +169,31 @@ export default function AdminPage() {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-8">
         <p className="text-gray-600 mb-4">You must be signed in to access the admin panel.</p>
-        <Link href="/dashboard" className="text-blue-600 hover:underline">Go to Dashboard</Link>
+        <Link href="/" className="text-blue-600 hover:underline">Back to home</Link>
+      </div>
+    )
+  }
+
+  if (sessionError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center p-8 gap-4">
+        <p className="text-gray-700 text-center max-w-md">{sessionError}</p>
+        <button
+          type="button"
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
+          onClick={() => void verifyAdminSession()}
+        >
+          Retry
+        </button>
+        <Link href="/" className="text-blue-600 hover:underline text-sm">Back to home</Link>
+      </div>
+    )
+  }
+
+  if (adminAllowed !== true) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600" />
       </div>
     )
   }
@@ -154,7 +203,7 @@ export default function AdminPage() {
       <div className="max-w-4xl mx-auto">
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-2xl font-bold text-gray-900">Admin – Add Client</h1>
-          <Link href="/dashboard" className="text-gray-600 hover:text-gray-900 text-sm">← Dashboard</Link>
+          <Link href="/" className="text-gray-600 hover:text-gray-900 text-sm">← Home</Link>
         </div>
 
         {error && (

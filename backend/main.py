@@ -2030,6 +2030,21 @@ class AdminCreateTenantRequest(BaseModel):
     email: str
     plan: Optional[str] = "starter"
 
+@app.get("/api/admin/session")
+async def admin_session(request: Request):
+    """True if the bearer token user id is in ADMIN_CLERK_USER_IDS. No tenant required."""
+    token = get_bearer_token(request)
+    if not token:
+        return {"is_admin": False}
+    try:
+        user_id, _ = verify_clerk_token(token)
+    except HTTPException:
+        return {"is_admin": False}
+    admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+    if not admin_ids:
+        return {"is_admin": False}
+    return {"is_admin": user_id in admin_ids}
+
 @app.get("/api/debug/cors")
 async def debug_cors():
     """No-auth endpoint to verify CORS config on deployed backend. e.g. curl https://your-api/api/debug/cors"""

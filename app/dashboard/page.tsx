@@ -2,8 +2,9 @@
 
 import dynamic from 'next/dynamic'
 import { UserButton } from '@clerk/nextjs'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { useApiClient } from '@/lib/api'
 import { PlanPicker } from '@/components/PlanPicker'
 
@@ -22,10 +23,22 @@ export type SubscriptionState = {
 }
 
 export default function DashboardPage() {
+  const router = useRouter()
   const api = useApiClient()
   const [activeTab, setActiveTab] = useState<'dashboard' | 'appointments' | 'leads' | 'settings'>('appointments')
   const [access, setAccess] = useState<'loading' | 'granted' | 'denied' | 'subscription_required'>('loading')
+  const [deniedKind, setDeniedKind] = useState<'no_membership' | 'verification_failed'>('no_membership')
   const [subscription, setSubscription] = useState<SubscriptionState | null>(null)
+
+  const applySubscriptionError = useCallback((err: { response?: { status?: number } }) => {
+    const status = err.response?.status
+    if (status === 401 || status === 403) {
+      setDeniedKind('no_membership')
+    } else {
+      setDeniedKind('verification_failed')
+    }
+    setAccess('denied')
+  }, [])
 
   const fetchSubscription = () => {
     api.get<SubscriptionState>('/api/subscription')
@@ -37,9 +50,7 @@ export default function DashboardPage() {
         }
         setSubscription(res.data)
       })
-      .catch((err: { response?: { status?: number } }) => {
-        setAccess(err.response?.status === 401 || err.response?.status === 403 ? 'denied' : 'granted')
-      })
+      .catch(applySubscriptionError)
   }
 
   useEffect(() => {
@@ -47,53 +58,74 @@ export default function DashboardPage() {
     const POLL_DELAY_MS = 1500
     const MAX_POLL_ATTEMPTS = 5
 
-    api.get<SubscriptionState>('/api/subscription')
-      .then((res) => {
-        if (cancelled) return
-        if (res.data.can_use_app) {
-          setAccess('granted')
+    const loadSubscription = () => {
+      api.get<SubscriptionState>('/api/subscription')
+        .then((res) => {
+          if (cancelled) return
+          if (res.data.can_use_app) {
+            setAccess('granted')
+            setSubscription(res.data)
+            return
+          }
           setSubscription(res.data)
+          const hasSessionId = typeof window !== 'undefined' && window.location.search.includes('session_id')
+          if (hasSessionId) {
+            let attempts = 0
+            const poll = () => {
+              if (cancelled || attempts >= MAX_POLL_ATTEMPTS) {
+                if (!cancelled) setAccess('subscription_required')
+                return
+              }
+              attempts += 1
+              api.get<SubscriptionState>('/api/subscription')
+                .then((r) => {
+                  if (cancelled) return
+                  if (r.data.can_use_app) {
+                    setAccess('granted')
+                    setSubscription(r.data)
+                    return
+                  }
+                  if (attempts < MAX_POLL_ATTEMPTS) setTimeout(poll, POLL_DELAY_MS)
+                  else setAccess('subscription_required')
+                })
+                .catch((err: { response?: { status?: number } }) => {
+                  if (cancelled) return
+                  const st = err.response?.status
+                  if (st === 401 || st === 403) {
+                    applySubscriptionError(err)
+                    return
+                  }
+                  if (attempts < MAX_POLL_ATTEMPTS) setTimeout(poll, POLL_DELAY_MS)
+                  else setAccess('subscription_required')
+                })
+            }
+            setTimeout(poll, POLL_DELAY_MS)
+          } else {
+            setAccess('subscription_required')
+          }
+        })
+        .catch((err: { response?: { status?: number } }) => {
+          if (!cancelled) applySubscriptionError(err)
+        })
+    }
+
+    api.get<{ is_admin: boolean }>('/api/admin/session')
+      .then((sessionRes) => {
+        if (cancelled) return
+        if (sessionRes.data.is_admin) {
+          router.replace('/admin')
           return
         }
-        setSubscription(res.data)
-        const hasSessionId = typeof window !== 'undefined' && window.location.search.includes('session_id')
-        if (hasSessionId) {
-          let attempts = 0
-          const poll = () => {
-            if (cancelled || attempts >= MAX_POLL_ATTEMPTS) {
-              if (!cancelled) setAccess('subscription_required')
-              return
-            }
-            attempts += 1
-            api.get<SubscriptionState>('/api/subscription')
-              .then((r) => {
-                if (cancelled) return
-                if (r.data.can_use_app) {
-                  setAccess('granted')
-                  setSubscription(r.data)
-                  return
-                }
-                if (attempts < MAX_POLL_ATTEMPTS) setTimeout(poll, POLL_DELAY_MS)
-                else setAccess('subscription_required')
-              })
-              .catch(() => {
-                if (cancelled) return
-                if (attempts < MAX_POLL_ATTEMPTS) setTimeout(poll, POLL_DELAY_MS)
-                else setAccess('subscription_required')
-              })
-          }
-          setTimeout(poll, POLL_DELAY_MS)
-        } else {
-          setAccess('subscription_required')
-        }
+        loadSubscription()
       })
-      .catch((err: { response?: { status?: number } }) => {
-        if (!cancelled) {
-          setAccess(err.response?.status === 401 || err.response?.status === 403 ? 'denied' : 'granted')
-        }
+      .catch(() => {
+        if (cancelled) return
+        setDeniedKind('verification_failed')
+        setAccess('denied')
       })
+
     return () => { cancelled = true }
-  }, [api])
+  }, [api, router, applySubscriptionError])
 
   if (access === 'loading') {
     return (
@@ -116,11 +148,24 @@ export default function DashboardPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
-            <h2 className="text-xl font-semibold text-gray-900 mb-2">No Access</h2>
+            <h2 className="text-xl font-semibold text-gray-900 mb-2">
+              {deniedKind === 'verification_failed' ? 'Could not verify access' : 'No Access'}
+            </h2>
             <p className="text-gray-600 mb-6">
-              Your account is not linked to an active business. If you were invited, please use the link from your invite email. If your access was removed, contact your administrator.
+              {deniedKind === 'verification_failed'
+                ? 'We could not confirm your account with the server. Check your connection and try again.'
+                : 'Your account is not linked to an active business. Access is granted when your administrator creates your business and sends you an invite. If you were invited, open the link from that email. If your access was removed, contact your administrator.'}
             </p>
-            <div className="flex items-center justify-center gap-4">
+            <div className="flex flex-wrap items-center justify-center gap-4">
+              {deniedKind === 'verification_failed' && (
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:opacity-90"
+                >
+                  Try again
+                </button>
+              )}
               <Link href="/" className="text-blue-600 hover:underline text-sm">← Back to home</Link>
               <UserButton afterSignOutUrl="/" />
             </div>

@@ -15,7 +15,11 @@ export async function POST(request: Request) {
   const message = typeof json.message === 'string' ? json.message.trim() : ''
 
   if (!name || !email || !message) {
-    return NextResponse.json({ ok: false, error: 'missing_fields' }, { status: 400 })
+    const missing: string[] = []
+    if (!name) missing.push('name')
+    if (!email) missing.push('email')
+    if (!message) missing.push('message')
+    return NextResponse.json({ ok: false, error: 'missing_fields', missing }, { status: 400 })
   }
   if (message.length > 20_000) {
     return NextResponse.json({ ok: false, error: 'message_too_long' }, { status: 400 })

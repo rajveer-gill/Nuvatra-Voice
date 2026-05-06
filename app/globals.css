@@ -16,9 +16,24 @@
   }
 }
 
+html {
+  overflow-x: hidden;
+}
+
 body {
   color: rgb(var(--foreground-rgb));
   background: #030712;
+  overflow-x: hidden;
+}
+
+/* Keyboard focus: visible ring for WCAG 2.2 Focus Appearance (avoid 1px hairlines on dark UI) */
+:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
 }
 
 @layer utilities {
