@@ -48,6 +48,10 @@ interface AnalyticsSummary {
   by_hour: Record<string, number>
   by_day_of_week: Record<string, number>
   client_id: string | null
+  /** ISO date (Monday) — counts below are for this week only (UTC). */
+  by_day_of_week_period_start?: string
+  by_day_of_week_period_end?: string
+  by_day_of_week_timezone?: string
 }
 
 interface CallLogEntry {
@@ -285,7 +289,13 @@ export default function Dashboard() {
             </div>
           </div>
           <div>
-            <p className="text-gray-600 text-sm font-medium mb-2">By day of week</p>
+            <p className="text-gray-600 text-sm font-medium mb-1">By day of week (this week)</p>
+            {analyticsSummary.by_day_of_week_period_start && analyticsSummary.by_day_of_week_period_end && (
+              <p className="text-gray-500 text-xs mb-2">
+                {analyticsSummary.by_day_of_week_period_start} – {analyticsSummary.by_day_of_week_period_end}
+                {analyticsSummary.by_day_of_week_timezone ? ` (${analyticsSummary.by_day_of_week_timezone})` : ''}. Full history stays in the database; use Export CSV for all calls in your plan window.
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               {[0, 1, 2, 3, 4, 5, 6].map((d) => (
                 <span key={d} className="rounded bg-gray-200 px-2 py-1 text-xs font-medium text-gray-900">

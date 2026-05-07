@@ -2942,11 +2942,35 @@ def _call_log_days(tenant: Optional[dict]) -> int:
     """Return call log retention days for plan."""
     return get_plan_limits(tenant).get("call_log_days", 30) if get_plan_limits else 9999
 
+
+def _analytics_iso_week_bounds_utc(now: Optional[datetime] = None) -> tuple:
+    """Current ISO week: Monday 00:00 UTC (inclusive) through next Monday 00:00 UTC (exclusive)."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    monday = now - timedelta(days=now.weekday())
+    week_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end_excl = week_start + timedelta(days=7)
+    return week_start, week_end_excl
+
+
+def _weekday_sun_zero(dt: datetime) -> int:
+    """Dashboard uses Sun=0..Sat=6; Python weekday is Mon=0..Sun=6."""
+    return (dt.weekday() + 1) % 7
+
+
 @app.get("/api/analytics/summary")
 async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
-    """Pro: Peak call times, outcomes, total calls. Filtered by plan (call_log_days)."""
+    """Pro: Peak call times, outcomes, total calls. Filtered by plan (call_log_days).
+    by_day_of_week counts only the current ISO week (UTC); full history stays in DB/export."""
     days = _call_log_days(tenant)
     log = _load_call_log(days=days)
+    week_start, week_end_excl = _analytics_iso_week_bounds_utc()
+    week_period = {
+        "by_day_of_week_period_start": week_start.date().isoformat(),
+        "by_day_of_week_period_end": (week_end_excl - timedelta(days=1)).date().isoformat(),
+        "by_day_of_week_timezone": "UTC",
+    }
     if not log:
         return {
             "total_calls": 0,
@@ -2954,6 +2978,7 @@ async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant)
             "by_hour": {str(h): 0 for h in range(24)},
             "by_day_of_week": {str(d): 0 for d in range(7)},
             "client_id": get_db_client_id() or None,
+            **week_period,
         }
     by_outcome = {}
     by_hour = {str(h): 0 for h in range(24)}
@@ -2965,8 +2990,12 @@ async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant)
         if start_iso:
             try:
                 dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
                 by_hour[str(dt.hour)] = by_hour.get(str(dt.hour), 0) + 1
-                by_day[str(dt.weekday())] = by_day.get(str(dt.weekday()), 0) + 1
+                if week_start <= dt < week_end_excl:
+                    wd = _weekday_sun_zero(dt)
+                    by_day[str(wd)] = by_day.get(str(wd), 0) + 1
             except Exception:
                 pass
     return {
@@ -2974,7 +3003,8 @@ async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant)
         "by_outcome": by_outcome,
         "by_hour": by_hour,
         "by_day_of_week": by_day,
-        "client_id": CLIENT_ID or None,
+        "client_id": get_db_client_id() or None,
+        **week_period,
     }
 
 @app.get("/api/analytics/calls")
