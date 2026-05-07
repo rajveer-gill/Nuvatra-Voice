@@ -24,6 +24,7 @@ import math
 import time
 import json
 from pathlib import Path
+import shutil
 import io
 from urllib.parse import quote
 import base64
@@ -401,7 +402,7 @@ try:
         db_tenant_get_for_user,
         db_tenant_get_by_id,
         db_tenant_create,
-        db_tenant_delete,
+        db_archive_purge_and_delete_tenant,
         db_tenant_get_members,
         db_tenant_member_add,
         db_tenant_list_all,
@@ -433,7 +434,6 @@ try:
         db_appointments_get_by_phone_for_sms,
         db_appointments_get_accepted_for_date,
         db_appointments_mark_reminder_sent,
-        db_tenant_list_all,
         db_ping,
     )
     _db_imported = True
@@ -499,8 +499,8 @@ def load_client_config(client_id: Optional[str] = None):
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Normalize to get_business_info() shape
-        forwarding = (data.get("forwarding_phone") or os.getenv("BUSINESS_FORWARDING_PHONE") or "")
+        # Normalize to get_business_info() shape (do not merge BUSINESS_FORWARDING_PHONE — multi-tenant leak)
+        forwarding = (data.get("forwarding_phone") or "")
         if not forwarding and data.get("locations"):
             forwarding = data["locations"][0].get("forwarding_phone", "")
         _departments = data.get("departments")
@@ -533,12 +533,14 @@ def load_client_config(client_id: Optional[str] = None):
         print(f"WARNING: Failed to load client config: {e}")
         return None
 
-# Business configuration: loaded per-request (multi-tenant) or at startup (single-tenant)
+# Business configuration: loaded per-request (multi-tenant) or at startup (single-tenant).
+# Single-tenant / no-DB fallback only — do not put global env (e.g. BUSINESS_FORWARDING_PHONE) here
+# or it will appear as every tenant’s “forwarding” in the UI when config is missing.
 _DEMO_BUSINESS_INFO = {
-        "name": "Nuvatra Demo Business",
+        "name": "",
         "hours": "",
         "phone": "",
-        "forwarding_phone": os.getenv("BUSINESS_FORWARDING_PHONE", ""),
+        "forwarding_phone": "",
         "email": "",
         "address": "",
         "departments": [],
@@ -548,13 +550,40 @@ _DEMO_BUSINESS_INFO = {
         "reservation_rules": [],
         "staff": [],
         "locations": [],
-        "greeting": "Thank you for calling. How can I help you today?",
+        "greeting": "",
         "plan": "starter",
         "voice": "fable",
         "speed": 1.0,
         "receptionist_name": "",
         "business_type": "",
     }
+
+
+def _minimal_business_info_from_tenant_dict(tenant: dict) -> dict:
+    """Empty user-edited fields; Twilio line from tenant when no on-disk config (e.g. Render has no clients/)."""
+    plan = tenant.get("plan") or "starter"
+    return {
+        "name": "",
+        "hours": "",
+        "phone": (tenant.get("twilio_phone_number") or "").strip(),
+        "forwarding_phone": "",
+        "email": "",
+        "address": "",
+        "departments": [],
+        "menu_link": "",
+        "services": [],
+        "specials": [],
+        "reservation_rules": [],
+        "staff": [],
+        "locations": [],
+        "greeting": "",
+        "plan": plan,
+        "voice": "fable",
+        "speed": 1.0,
+        "receptionist_name": "",
+        "business_type": "",
+    }
+
 
 def _default_business_info_for_tenant() -> Optional[dict]:
     """Build minimal business info from the tenant DB record when no config file exists."""
@@ -574,29 +603,25 @@ def _default_business_info_for_tenant() -> Optional[dict]:
         cur.close()
         if not row:
             return None
-        return {
-            "name": "",
-            "hours": "",
-            "phone": row[1] or "",
-            "forwarding_phone": "",
-            "email": "",
-            "address": "",
-            "departments": [],
-            "menu_link": "",
-            "services": [],
-            "specials": [],
-            "reservation_rules": [],
-            "staff": [],
-            "locations": [],
-            "greeting": "",
-            "plan": row[2] or "starter",
-            "voice": "fable",
-            "speed": 1.0,
-            "receptionist_name": "",
-            "business_type": "",
-        }
+        return _minimal_business_info_from_tenant_dict(
+            {"twilio_phone_number": row[1] or "", "plan": row[2] or "starter"}
+        )
     except Exception:
         return None
+
+
+def business_info_for_dashboard(tenant: dict) -> dict:
+    """Settings / business-info API: never use _DEMO when a real tenant is authenticated."""
+    cid = (tenant.get("client_id") or "").strip()
+    if cid:
+        cfg = load_client_config(cid)
+        if cfg:
+            out = dict(cfg)
+            if not (out.get("phone") or "").strip():
+                out["phone"] = (tenant.get("twilio_phone_number") or "").strip()
+            return out
+    return _minimal_business_info_from_tenant_dict(tenant)
+
 
 def get_business_info() -> dict:
     """Get business config for current request (multi-tenant) or env CLIENT_ID (single-tenant)."""
@@ -2201,12 +2226,12 @@ async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: s
     """Delete a tenant and revoke access for its members.
 
     Steps:
-      1. Look up all tenant_members (clerk_user_ids) before cascade-delete.
-      2. Delete the tenant row (cascades to tenant_members).
-      3. For each former member via Clerk API:
-         a. Clear tenant_id from the user's public_metadata so stale tokens
-            no longer resolve to a tenant.
-         b. Revoke all active sessions so the user is signed out immediately.
+      1. Look up all tenant_members (clerk_user_ids) before any destructive work.
+      2. Archive all client_id-scoped operational data to tenant_removed_archive, then delete live rows
+         (so a new tenant reusing the same client_id does not see old appointments, etc.; archive supports retention).
+      3. Remove clients/<client_id> on-disk config if present.
+      4. Delete the tenant row (cascades to tenant_members).
+      5. For each former member via Clerk API: clear public_metadata tenant_id and revoke sessions.
       Users are NOT banned — they can be re-invited to a new tenant later.
     """
     if not USE_DB:
@@ -2215,9 +2240,20 @@ async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: s
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     member_ids = db_tenant_get_members(tenant_id)
-    deleted = db_tenant_delete(tenant_id)
-    if not deleted:
-        raise HTTPException(status_code=500, detail="Failed to delete tenant")
+    archive_id = db_archive_purge_and_delete_tenant(tenant_id, tenant, actor_clerk_id=admin_user_id)
+    if archive_id is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to archive tenant operational data; tenant was not removed. Retry or check database logs.",
+        )
+    client_slug = (tenant.get("client_id") or "").strip()
+    if client_slug:
+        client_dir = PROJECT_ROOT / "clients" / client_slug
+        try:
+            if client_dir.is_dir():
+                shutil.rmtree(client_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[Admin] Could not remove client directory {client_dir}: {e}")
     revoked_users: list[str] = []
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     if clerk_secret and member_ids:
@@ -2246,8 +2282,17 @@ async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: s
                 revoked_users.append(uid)
             except Exception as e:
                 print(f"[Admin] Error revoking access for Clerk user {uid}: {e}")
-    audit_log("admin", "tenant_deleted", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"name": tenant.get("name")}, request=request)
-    return {"success": True, "deleted_tenant": tenant, "revoked_users": revoked_users}
+    audit_log(
+        "admin",
+        "tenant_deleted",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"name": tenant.get("name"), "data_archive_id": archive_id},
+        request=request,
+    )
+    return {"success": True, "deleted_tenant": tenant, "revoked_users": revoked_users, "data_archive_id": archive_id}
 
 class BillingExemptUpdate(BaseModel):
     exempt_until: Optional[str] = None
@@ -2728,11 +2773,8 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 @app.get("/api/business-info")
-async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_subscription)):
-    info = get_business_info()
-    if not info.get("phone") and tenant:
-        info["phone"] = tenant.get("twilio_phone_number") or ""
-    return info
+async def api_get_business_info(tenant: dict = Depends(require_active_subscription)):
+    return business_info_for_dashboard(tenant)
 
 # Required and recommended fields so the AI receptionist can relay accurate info (any business type)
 SETUP_REQUIRED_FIELDS = [
@@ -2765,12 +2807,9 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
     }
 
 @app.get("/api/setup-status")
-async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def api_setup_status(tenant: dict = Depends(require_active_subscription)):
     """Return which required/recommended business info fields are missing. Used for setup checklist."""
-    info = get_business_info()
-    if not info.get("phone") and tenant:
-        info = {**info, "phone": tenant.get("twilio_phone_number") or ""}
-    return get_setup_status(info_override=info)
+    return get_setup_status(info_override=business_info_for_dashboard(tenant))
 
 class StaffMember(BaseModel):
     name: str = ""
@@ -2796,7 +2835,7 @@ class BusinessInfoUpdate(BaseModel):
     staff: Optional[List[StaffMember]] = None
 
 @app.patch("/api/business-info")
-async def api_update_business_info(update: BusinessInfoUpdate, request: Request, _: None = Depends(require_active_subscription)):
+async def api_update_business_info(update: BusinessInfoUpdate, request: Request, tenant: dict = Depends(require_active_subscription)):
     """Update business config (store info, voice, etc.). Writes to clients/<client_id>/config.json."""
     cid = get_db_client_id()
     if not cid or cid == "default":
@@ -2858,7 +2897,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
     audit_log("user", "business_info_updated", resource_type="config", client_id=cid, details={"fields": [k for k in update.model_dump(exclude_none=True)]}, request=request)
-    return get_business_info()
+    return business_info_for_dashboard(tenant)
 
 @app.get("/api/stats")
 async def get_stats(_: None = Depends(require_active_subscription)):

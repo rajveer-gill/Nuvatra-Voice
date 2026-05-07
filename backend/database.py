@@ -5,7 +5,7 @@ Tables: appointments, messages, call_log, caller_memory, booked_slots, tenants, 
 import os
 import json
 import contextvars
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List, Tuple
 from pathlib import Path
 
@@ -214,6 +214,18 @@ def init_db() -> bool:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_client_occurred ON audit_events(client_id, occurred_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_action_occurred ON audit_events(action, occurred_at)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tenant_removed_archive (
+                id BIGSERIAL PRIMARY KEY,
+                archived_at TIMESTAMPTZ DEFAULT NOW(),
+                former_tenant_id UUID NOT NULL,
+                client_id TEXT NOT NULL,
+                actor_clerk_id TEXT,
+                bundle JSONB NOT NULL
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tenant_removed_archive_client ON tenant_removed_archive(client_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tenant_removed_archive_time ON tenant_removed_archive(archived_at)")
         # Plan tier tables
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tenant_usage (
@@ -432,6 +444,106 @@ def db_tenant_delete(tenant_id: str) -> bool:
     except Exception as e:
         print(f"[DB] Failed to delete tenant: {e}")
         return False
+
+
+# Operational tables keyed by tenant client_id (purge when tenant is removed; snapshot retained for compliance).
+_CLIENT_SCOPED_TABLES = (
+    "overage_processed",
+    "tenant_usage",
+    "sms_automations",
+    "leads",
+    "sms_opt_out",
+    "sms_sessions",
+    "booked_slots",
+    "caller_memory",
+    "messages",
+    "call_log",
+    "appointments",
+)
+
+
+def _serialize_cell(val):
+    if isinstance(val, (datetime, date)):
+        return val.isoformat()
+    if isinstance(val, memoryview):
+        return bytes(val).decode("utf-8", errors="replace")
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    return val
+
+
+def _fetch_all_rows_for_client(cur, table: str, client_id: str) -> List[dict]:
+    if table not in _CLIENT_SCOPED_TABLES:
+        raise ValueError(f"Invalid table name: {table}")
+    cur.execute(f"SELECT * FROM {table} WHERE client_id = %s", (client_id,))
+    desc = cur.description
+    if not desc:
+        return []
+    cols = [d[0] for d in desc]
+    out: List[dict] = []
+    for row in cur.fetchall():
+        out.append({cols[i]: _serialize_cell(row[i]) for i in range(len(cols))})
+    return out
+
+
+def db_archive_purge_and_delete_tenant(
+    tenant_id: str,
+    tenant: dict,
+    *,
+    actor_clerk_id: Optional[str] = None,
+) -> Optional[int]:
+    """
+    One transaction: snapshot all client_id-scoped rows into tenant_removed_archive, delete those live rows,
+    then delete the tenant row (tenant_members CASCADE). Retains an auditable bundle for disputes/retention.
+    Returns archive row id, or None on failure (nothing committed).
+    """
+    conn = _get_conn()
+    if not conn:
+        return None
+    tid = (tenant.get("id") or "").strip()
+    cid = (tenant.get("client_id") or "").strip()
+    tid_n = str(tid).replace("-", "").lower()
+    path_n = str(tenant_id or "").replace("-", "").lower()
+    if not tid or not cid or tid_n != path_n:
+        return None
+    try:
+        from psycopg2.extras import Json
+    except ImportError:
+        Json = None  # type: ignore
+    bundle = {"tenant": dict(tenant), "scoped_tables": {}}
+    try:
+        cur = conn.cursor()
+        for table in _CLIENT_SCOPED_TABLES:
+            bundle["scoped_tables"][table] = _fetch_all_rows_for_client(cur, table, cid)
+        payload = Json(bundle) if Json else json.dumps(bundle, default=str)
+        cur.execute(
+            """
+            INSERT INTO tenant_removed_archive (former_tenant_id, client_id, actor_clerk_id, bundle)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (tid, cid, actor_clerk_id, payload),
+        )
+        archive_id = cur.fetchone()[0]
+        for table in _CLIENT_SCOPED_TABLES:
+            cur.execute(f"DELETE FROM {table} WHERE client_id = %s", (cid,))
+        cur.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
+        if cur.rowcount < 1:
+            conn.rollback()
+            cur.close()
+            print("[DB] db_archive_purge_and_delete_tenant: tenant row missing, rolled back")
+            return None
+        conn.commit()
+        cur.close()
+        print(f"[DB] Tenant removed archive_id={archive_id} client_id={cid!r}")
+        return int(archive_id)
+    except Exception as e:
+        print(f"[DB] db_archive_purge_and_delete_tenant failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
 
 def db_tenant_list_all() -> List[dict]:
     """List all tenants (admin only)."""
