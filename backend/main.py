@@ -2841,7 +2841,7 @@ class BusinessInfoUpdate(BaseModel):
 @app.patch("/api/business-info")
 async def api_update_business_info(update: BusinessInfoUpdate, request: Request, tenant: dict = Depends(require_active_subscription)):
     """Update business config (store info, voice, etc.). Writes to clients/<client_id>/config.json."""
-    cid = get_db_client_id()
+    cid = ((tenant.get("client_id") or "").strip() or get_db_client_id()).strip()
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
     config_path = PROJECT_ROOT / "clients" / cid / "config.json"
@@ -2852,10 +2852,13 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to read config: {e}")
     else:
-        trow = db_tenant_get_by_client_id(cid)
-        if not trow:
-            raise HTTPException(status_code=404, detail="Client config not found and tenant could not be resolved")
-        data = _default_client_config_data(cid, trow.get("plan") or "free")
+        # Use JWT-resolved tenant (always present here); do not require DB lookup — fails when USE_DB is off or DB is down.
+        plan = tenant.get("plan") or "free"
+        if USE_DB:
+            trow = db_tenant_get_by_client_id(cid)
+            if trow and trow.get("plan"):
+                plan = trow.get("plan") or plan
+        data = _default_client_config_data(cid, plan)
         config_path.parent.mkdir(parents=True, exist_ok=True)
     if update.name is not None:
         data["business_name"] = update.name
