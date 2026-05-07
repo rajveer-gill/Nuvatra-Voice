@@ -623,6 +623,32 @@ def business_info_for_dashboard(tenant: dict) -> dict:
     return _minimal_business_info_from_tenant_dict(tenant)
 
 
+def _default_client_config_data(client_id: str, plan: str = "free") -> dict:
+    """Seed clients/<client_id>/config.json (admin create + first PATCH when file missing on disk)."""
+    return {
+        "client_id": client_id,
+        "business_name": "",
+        "phone": "",
+        "plan": plan,
+        "hours": "",
+        "forwarding_phone": "",
+        "email": "",
+        "address": "",
+        "departments": [],
+        "services": [],
+        "specials": [],
+        "reservation_rules": [],
+        "menu_link": "",
+        "greeting": "",
+        "staff": [],
+        "locations": [],
+        "voice": "fable",
+        "speed": 1.0,
+        "receptionist_name": "",
+        "business_type": "",
+    }
+
+
 def get_business_info() -> dict:
     """Get business config for current request (multi-tenant) or env CLIENT_ID (single-tenant)."""
     cfg = load_client_config()
@@ -2129,27 +2155,7 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
     client_dir = PROJECT_ROOT / "clients" / req.client_id
     client_dir.mkdir(parents=True, exist_ok=True)
     config_path = client_dir / "config.json"
-    cfg = {
-        "client_id": req.client_id,
-        "business_name": "",
-        "phone": "",
-        "plan": "free",
-        "hours": "",
-        "forwarding_phone": "",
-        "email": "",
-        "address": "",
-        "departments": [],
-        "services": [],
-        "specials": [],
-        "reservation_rules": [],
-        "menu_link": "",
-        "greeting": "",
-        "staff": [],
-        "locations": [],
-        "voice": "fable",
-        "speed": 1.0,
-        "receptionist_name": "",
-    }
+    cfg = _default_client_config_data(req.client_id, tenant.get("plan") or "free")
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
     # Link the user to this tenant via Clerk.
@@ -2777,12 +2783,13 @@ async def api_get_business_info(tenant: dict = Depends(require_active_subscripti
     return business_info_for_dashboard(tenant)
 
 # Required and recommended fields so the AI receptionist can relay accurate info (any business type)
+# Setup checklist labels must stay in sync with Settings.tsx checklist rows.
 SETUP_REQUIRED_FIELDS = [
     ("name", "Business name"),
     ("hours", "Hours of operation"),
-    ("forwarding_phone", "Forwarding phone number"),
+    ("forwarding_phone", "Phone number"),
+    ("address", "Address"),
 ]
-SETUP_CONTACT_AT_LEAST_ONE = [("address", "Address"), ("phone", "Phone number")]
 
 def get_setup_status(info_override: Optional[dict] = None) -> dict:
     """Return setup completeness. Uses info_override if provided (e.g. with tenant phone merged), else get_business_info()."""
@@ -2793,9 +2800,6 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
         val = info.get(key)
         if not (val and str(val).strip()):
             missing.append(label)
-    has_contact = any(info.get(k) and str(info.get(k)).strip() for k, _ in SETUP_CONTACT_AT_LEAST_ONE)
-    if not has_contact:
-        missing.append("At least one of: " + ", ".join(l for _, l in SETUP_CONTACT_AT_LEAST_ONE))
     services = info.get("services") or []
     departments = info.get("departments") or []
     if not (services or departments):
@@ -2841,13 +2845,18 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
     config_path = PROJECT_ROOT / "clients" / cid / "config.json"
-    if not config_path.exists():
-        raise HTTPException(status_code=404, detail="Client config not found")
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read config: {e}")
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read config: {e}")
+    else:
+        trow = db_tenant_get_by_client_id(cid)
+        if not trow:
+            raise HTTPException(status_code=404, detail="Client config not found and tenant could not be resolved")
+        data = _default_client_config_data(cid, trow.get("plan") or "free")
+        config_path.parent.mkdir(parents=True, exist_ok=True)
     if update.name is not None:
         data["business_name"] = update.name
     if update.hours is not None:

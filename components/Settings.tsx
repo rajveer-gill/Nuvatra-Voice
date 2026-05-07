@@ -195,8 +195,15 @@ export default function Settings() {
       })
       setMessage({ type: 'success', text: 'Settings saved. Your AI receptionist will use this info.' })
       refreshSetupStatus()
-    } catch (e) {
-      setMessage({ type: 'error', text: 'Failed to save settings' })
+    } catch (e: unknown) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+      const msg =
+        typeof detail === 'string'
+          ? detail
+          : typeof detail === 'object' && detail !== null && 'message' in detail && typeof (detail as { message?: string }).message === 'string'
+            ? (detail as { message: string }).message
+            : 'Failed to save settings'
+      setMessage({ type: 'error', text: msg })
     } finally {
       setSaving(false)
     }
@@ -251,17 +258,25 @@ export default function Settings() {
           Complete these so your AI receptionist can give callers accurate info and handle bookings. Works for any business—restaurants, salons, HVAC, real estate, and more.
         </p>
         <ul className="space-y-2">
-          {[
-            { key: 'name', label: 'Business name', done: !missing.some((m) => m.toLowerCase().includes('business name')) },
-            { key: 'hours', label: 'Hours of operation', done: !missing.some((m) => m.toLowerCase().includes('hours')) },
-            { key: 'forwarding', label: 'Forwarding phone number', done: !missing.some((m) => m.toLowerCase().includes('forwarding')) },
-            { key: 'contact', label: 'Address or phone number', done: !missing.some((m) => m.toLowerCase().includes('least one')) },
-          ].map(({ key, label, done }) => (
+          {(
+            [
+              { key: 'name', label: 'Business name' },
+              { key: 'hours', label: 'Hours of operation' },
+              { key: 'phone', label: 'Phone number' },
+              { key: 'address', label: 'Address' },
+            ] as const
+          ).map(({ key, label }) => {
+            const done = !missing.includes(label)
+            return (
             <li key={key} className="flex items-center gap-2 text-sm">
               {done ? <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" /> : <Circle className="w-4 h-4 text-gray-300 shrink-0" />}
               <span className={done ? 'text-gray-700' : 'text-gray-500'}>{label}</span>
+              {key === 'phone' && (
+                <span className="text-gray-400 text-xs font-normal">(where callers go when they ask for a person)</span>
+              )}
             </li>
-          ))}
+            )
+          })}
         </ul>
         {warnings.length > 0 && (
           <p className="mt-3 text-amber-700 text-sm flex items-start gap-2">
