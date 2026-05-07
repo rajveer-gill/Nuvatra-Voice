@@ -34,7 +34,7 @@ export default function Leads() {
   }
 
   return (
-    <div className="bg-white rounded-lg shadow-md p-6">
+    <div className="rounded-lg bg-white p-6 text-gray-900 shadow-md">
       <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
         <Users className="w-5 h-5 mr-2 text-primary-600" />
         Leads
@@ -47,25 +47,25 @@ export default function Leads() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-gray-200">
-                <th className="text-left py-3 px-4 font-semibold text-gray-700">Name</th>
-                <th className="text-left py-3 px-4 font-semibold text-gray-700">Phone</th>
-                <th className="text-left py-3 px-4 font-semibold text-gray-700">Reason / Message</th>
-                <th className="text-left py-3 px-4 font-semibold text-gray-700">Source</th>
-                <th className="text-left py-3 px-4 font-semibold text-gray-700">Date</th>
+                <th className="text-left py-3 px-4 font-semibold text-gray-800">Name</th>
+                <th className="text-left py-3 px-4 font-semibold text-gray-800">Phone</th>
+                <th className="text-left py-3 px-4 font-semibold text-gray-800">Reason / Message</th>
+                <th className="text-left py-3 px-4 font-semibold text-gray-800">Source</th>
+                <th className="text-left py-3 px-4 font-semibold text-gray-800">Date</th>
               </tr>
             </thead>
             <tbody>
               {leads.map((lead) => (
-                <tr key={lead.id} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="py-3 px-4">{lead.name || '—'}</td>
+                <tr key={lead.id} className="border-b border-gray-200 hover:bg-gray-50">
+                  <td className="py-3 px-4 font-medium">{lead.name || '—'}</td>
                   <td className="py-3 px-4">{lead.phone}</td>
-                  <td className="py-3 px-4 max-w-xs truncate">{lead.reason || '—'}</td>
+                  <td className="max-w-xs truncate py-3 px-4">{lead.reason || '—'}</td>
                   <td className="py-3 px-4">
-                    <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800">
+                    <span className="rounded bg-gray-200 px-2 py-0.5 text-xs font-semibold text-gray-900">
                       {lead.source}
                     </span>
                   </td>
-                  <td className="py-3 px-4 text-sm text-gray-600">
+                  <td className="py-3 px-4 text-sm text-gray-800">
                     {lead.created_at ? new Date(lead.created_at).toLocaleDateString() : '—'}
                   </td>
                 </tr>

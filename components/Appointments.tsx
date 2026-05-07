@@ -139,7 +139,7 @@ export default function Appointments() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="mx-auto max-w-5xl space-y-6 text-gray-900">
       <div className="bg-white rounded-2xl shadow-xl p-6">
         <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
           <h2 className="text-xl font-bold text-gray-900 flex items-center">

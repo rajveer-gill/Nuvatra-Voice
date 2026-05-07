@@ -4,6 +4,15 @@ import { useState, useEffect } from 'react'
 import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
+import { STATUS_CLASSES, STATUS_LABELS } from '@/components/appointments/appointmentStatus'
+
+/** Call log outcome pills — dark text on tinted fills for white cards. */
+function callOutcomeClass(outcome: string): string {
+  if (outcome === 'answered_by_ai') return 'bg-emerald-200 text-emerald-950'
+  if (outcome === 'forwarded') return 'bg-blue-200 text-blue-950'
+  if (outcome === 'missed' || outcome === 'no_answer') return 'bg-red-200 text-red-950'
+  return 'bg-gray-200 text-gray-900'
+}
 
 interface Appointment {
   id: number
@@ -119,7 +128,7 @@ export default function Dashboard() {
   if (noTenant) {
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <p className="text-gray-600 text-center max-w-md">
+        <p className="text-zinc-300 text-center max-w-md">
           Your account is not yet linked to a business. If you were invited, please use the link from your invite email. Otherwise, contact support.
         </p>
       </div>
@@ -135,7 +144,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 text-gray-900">
       {/* Usage widget */}
       {usage != null && minutesCap != null && minutesCap > 0 && (
         <div className="bg-white rounded-lg shadow-md p-6">
@@ -245,11 +254,7 @@ export default function Dashboard() {
                 {Object.entries(analyticsSummary.by_outcome).map(([outcome, count]) => (
                   <span
                     key={outcome}
-                    className={`px-2 py-1 rounded-full text-xs font-medium ${
-                      outcome === 'answered_by_ai' ? 'bg-green-100 text-green-800' :
-                      outcome === 'forwarded' ? 'bg-blue-100 text-blue-800' :
-                      outcome === 'missed' ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-800'
-                    }`}
+                    className={`px-2 py-1 rounded-full text-xs font-semibold ${callOutcomeClass(outcome)}`}
                   >
                     {outcome.replace(/_/g, ' ')}: {count}
                   </span>
@@ -273,7 +278,7 @@ export default function Dashboard() {
                       className="w-3 bg-primary-600 rounded-t min-h-[4px]"
                       style={{ height: `${Math.max(pct, 4)}px` }}
                     />
-                    <span className="text-[10px] text-gray-500 mt-1">{h}</span>
+                    <span className="mt-1 text-[10px] font-medium text-gray-700">{h}</span>
                   </div>
                 )
               })}
@@ -283,7 +288,7 @@ export default function Dashboard() {
             <p className="text-gray-600 text-sm font-medium mb-2">By day of week</p>
             <div className="flex flex-wrap gap-2">
               {[0, 1, 2, 3, 4, 5, 6].map((d) => (
-                <span key={d} className="px-2 py-1 bg-gray-100 rounded text-xs">
+                <span key={d} className="rounded bg-gray-200 px-2 py-1 text-xs font-medium text-gray-900">
                   {DAY_NAMES[d]}: {analyticsSummary.by_day_of_week[String(d)] ?? 0}
                 </span>
               ))}
@@ -295,45 +300,41 @@ export default function Dashboard() {
               <p className="text-gray-500 text-sm">No calls logged yet</p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-sm text-gray-900">
                   <thead>
                     <tr className="border-b border-gray-200">
-                      <th className="text-left py-2 px-2 font-semibold text-gray-700">From</th>
-                      <th className="text-left py-2 px-2 font-semibold text-gray-700">Start</th>
-                      <th className="text-left py-2 px-2 font-semibold text-gray-700">Duration</th>
-                      <th className="text-left py-2 px-2 font-semibold text-gray-700">Outcome</th>
-                      <th className="text-left py-2 px-2 font-semibold text-gray-700">Summary</th>
-                      <th className="text-left py-2 px-2 font-semibold text-gray-700">Recording</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-800">From</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-800">Start</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-800">Duration</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-800">Outcome</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-800">Summary</th>
+                      <th className="text-left py-2 px-2 font-semibold text-gray-800">Recording</th>
                     </tr>
                   </thead>
                   <tbody>
                     {recentCalls.slice(0, 10).map((call) => (
-                      <tr key={call.call_sid} className="border-b border-gray-100 hover:bg-gray-50">
-                        <td className="py-2 px-2">{call.from_number}</td>
-                        <td className="py-2 px-2">
+                      <tr key={call.call_sid} className="border-b border-gray-200 hover:bg-gray-50">
+                        <td className="py-2 px-2 font-medium text-gray-900">{call.from_number}</td>
+                        <td className="py-2 px-2 text-gray-900">
                           {call.start_iso ? new Date(call.start_iso).toLocaleString() : '—'}
                         </td>
-                        <td className="py-2 px-2">
+                        <td className="py-2 px-2 text-gray-900">
                           {call.duration_sec != null ? `${call.duration_sec}s` : '—'}
                         </td>
                         <td className="py-2 px-2">
                           <span
-                            className={`px-2 py-0.5 rounded text-xs font-medium ${
-                              call.outcome === 'answered_by_ai' ? 'bg-green-100 text-green-800' :
-                              call.outcome === 'forwarded' ? 'bg-blue-100 text-blue-800' :
-                              'bg-gray-100 text-gray-800'
-                            }`}
+                            className={`rounded px-2 py-0.5 text-xs font-semibold ${callOutcomeClass(call.outcome || '')}`}
                           >
                             {call.outcome || '—'}
                           </span>
                         </td>
-                        <td className="py-2 px-2 max-w-[200px]">
+                        <td className="max-w-[200px] py-2 px-2">
                           {call.call_summary ? (
-                            <span className="text-gray-700 line-clamp-2" title={call.call_summary}>
+                            <span className="line-clamp-2 text-gray-900" title={call.call_summary}>
                               {call.call_summary.length > 120 ? `${call.call_summary.slice(0, 120)}…` : call.call_summary}
                             </span>
                           ) : (
-                            <span className="text-gray-400">—</span>
+                            <span className="text-gray-600">—</span>
                           )}
                         </td>
                         <td className="py-2 px-2">
@@ -359,7 +360,7 @@ export default function Dashboard() {
                               Play
                             </button>
                           ) : (
-                            <span className="text-gray-400">—</span>
+                            <span className="text-gray-600">—</span>
                           )}
                         </td>
                       </tr>
@@ -382,32 +383,30 @@ export default function Dashboard() {
           <p className="text-gray-500 text-center py-8">No appointments yet</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full text-gray-900">
               <thead>
                 <tr className="border-b border-gray-200">
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Name</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Date</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Time</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Reason</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Status</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Name</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Date</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Time</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Reason</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {appointments.slice(0, 10).map((appointment) => (
-                  <tr key={appointment.id} className="border-b border-gray-100 hover:bg-gray-50">
-                    <td className="py-3 px-4">{appointment.name}</td>
-                    <td className="py-3 px-4">{appointment.date}</td>
-                    <td className="py-3 px-4">{formatTimeHhmmToAmPm(appointment.time)}</td>
-                    <td className="py-3 px-4">{appointment.reason}</td>
+                  <tr key={appointment.id} className="border-b border-gray-200 hover:bg-gray-50">
+                    <td className="py-3 px-4 font-medium text-gray-900">{appointment.name}</td>
+                    <td className="py-3 px-4 text-gray-900">{appointment.date}</td>
+                    <td className="py-3 px-4 text-gray-900">{formatTimeHhmmToAmPm(appointment.time)}</td>
+                    <td className="py-3 px-4 text-gray-900">{appointment.reason}</td>
                     <td className="py-3 px-4">
                       <span
-                        className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          appointment.status === 'pending'
-                            ? 'bg-yellow-100 text-yellow-800'
-                            : 'bg-green-100 text-green-800'
+                        className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${
+                          STATUS_CLASSES[appointment.status] || 'bg-gray-200 text-gray-900'
                         }`}
                       >
-                        {appointment.status}
+                        {STATUS_LABELS[appointment.status] || appointment.status}
                       </span>
                     </td>
                   </tr>
@@ -428,30 +427,30 @@ export default function Dashboard() {
           <p className="text-gray-500 text-center py-8">No messages yet</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full text-gray-900">
               <thead>
                 <tr className="border-b border-gray-200">
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Caller</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Phone</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Message</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Urgency</th>
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">Status</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Caller</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Phone</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Message</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Urgency</th>
+                  <th className="text-left py-3 px-4 font-semibold text-gray-800">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {messages.slice(0, 10).map((message) => (
-                  <tr key={message.id} className="border-b border-gray-100 hover:bg-gray-50">
-                    <td className="py-3 px-4">{message.caller_name}</td>
-                    <td className="py-3 px-4">{message.caller_phone}</td>
-                    <td className="py-3 px-4 max-w-md truncate">{message.message}</td>
+                  <tr key={message.id} className="border-b border-gray-200 hover:bg-gray-50">
+                    <td className="py-3 px-4 font-medium text-gray-900">{message.caller_name}</td>
+                    <td className="py-3 px-4 text-gray-900">{message.caller_phone}</td>
+                    <td className="max-w-md truncate py-3 px-4 text-gray-900">{message.message}</td>
                     <td className="py-3 px-4">
                       <span
-                        className={`px-2 py-1 rounded-full text-xs font-medium ${
+                        className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${
                           message.urgency === 'urgent'
-                            ? 'bg-red-100 text-red-800'
+                            ? 'bg-red-200 text-red-950'
                             : message.urgency === 'high'
-                            ? 'bg-orange-100 text-orange-800'
-                            : 'bg-blue-100 text-blue-800'
+                              ? 'bg-orange-200 text-orange-950'
+                              : 'bg-sky-200 text-sky-950'
                         }`}
                       >
                         {message.urgency}
@@ -459,10 +458,10 @@ export default function Dashboard() {
                     </td>
                     <td className="py-3 px-4">
                       <span
-                        className={`px-2 py-1 rounded-full text-xs font-medium ${
+                        className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${
                           message.status === 'unread'
-                            ? 'bg-yellow-100 text-yellow-800'
-                            : 'bg-green-100 text-green-800'
+                            ? 'bg-amber-200 text-amber-950'
+                            : 'bg-emerald-200 text-emerald-950'
                         }`}
                       >
                         {message.status}

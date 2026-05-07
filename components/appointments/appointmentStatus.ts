@@ -9,15 +9,16 @@ export const STATUS_LABELS: Record<string, string> = {
   rejected: 'Declined',
 }
 
+/** High-contrast pills for light backgrounds (WCAG-friendly on white cards). */
 export const STATUS_CLASSES: Record<string, string> = {
-  pending: 'bg-amber-100 text-amber-800',
-  pending_customer: 'bg-blue-100 text-blue-800',
-  pending_review: 'bg-amber-100 text-amber-800',
-  confirmed: 'bg-green-100 text-green-800',
-  accepted: 'bg-green-100 text-green-800',
-  completed: 'bg-green-100 text-green-800',
-  cancelled: 'bg-gray-100 text-gray-600',
-  rejected: 'bg-red-100 text-red-800',
+  pending: 'bg-amber-200 text-amber-950',
+  pending_customer: 'bg-sky-200 text-sky-950',
+  pending_review: 'bg-amber-200 text-amber-950',
+  confirmed: 'bg-emerald-200 text-emerald-950',
+  accepted: 'bg-emerald-200 text-emerald-950',
+  completed: 'bg-emerald-200 text-emerald-950',
+  cancelled: 'bg-gray-200 text-gray-900',
+  rejected: 'bg-red-200 text-red-950',
 }
 
 /** Only show Accept/Decline when customer has already confirmed via text (pending_review). */

@@ -234,7 +234,7 @@ export default function Settings() {
   const warnings = setupStatus?.warnings ?? []
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
+    <div className="mx-auto max-w-4xl space-y-8 text-gray-900">
       {message && (
         <div className={`rounded-lg px-4 py-3 text-sm ${message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
           {message.text}
