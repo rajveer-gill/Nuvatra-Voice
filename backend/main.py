@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError, field_validator
 from typing import Optional, List, Literal
 import uuid
 import logging
@@ -610,8 +610,10 @@ def _default_business_info_for_tenant() -> Optional[dict]:
         return None
 
 
-def business_info_for_dashboard(tenant: dict) -> dict:
+def business_info_for_dashboard(tenant: Optional[dict]) -> dict:
     """Settings / business-info API: never use _DEMO when a real tenant is authenticated."""
+    if not tenant:
+        tenant = {}
     cid = (tenant.get("client_id") or "").strip()
     if cid:
         cfg = load_client_config(cid)
@@ -1063,7 +1065,8 @@ def update_caller_memory(phone: str, name: Optional[str] = None, last_reason: Op
         print(f"Failed to save caller memory: {e}")
 
 def get_staff_phone_by_name(name: str) -> Optional[str]:
-    """Return E.164 phone for staff member by name (case-insensitive match)."""
+    """Return E.164 phone for staff member by name (case-insensitive match).
+    Duplicate names under one tenant: deterministic first match in configured order."""
     staff = get_business_info().get("staff") or []
     name_clean = name.strip().lower()
     for s in staff:
@@ -2779,7 +2782,7 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 @app.get("/api/business-info")
-async def api_get_business_info(tenant: dict = Depends(require_active_subscription)):
+async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_subscription)):
     return business_info_for_dashboard(tenant)
 
 # Required and recommended fields so the AI receptionist can relay accurate info (any business type)
@@ -2811,13 +2814,101 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
     }
 
 @app.get("/api/setup-status")
-async def api_setup_status(tenant: dict = Depends(require_active_subscription)):
+async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subscription)):
     """Return which required/recommended business info fields are missing. Used for setup checklist."""
     return get_setup_status(info_override=business_info_for_dashboard(tenant))
 
+
+def _staff_sanitize_single_line(raw: Optional[str]) -> str:
+    """Strip whitespace; disallow control chars and newlines (name, phone paths)."""
+    if raw is None:
+        return ""
+    s = str(raw)
+    s = "".join(c for c in s if ord(c) >= 32)
+    return s.strip()
+
+
+def _staff_sanitize_notes(raw: Optional[str]) -> str:
+    """Notes: allow TAB/LF/CR; strip NUL and other C0 controls."""
+    if raw is None:
+        return ""
+    s = "".join(c for c in str(raw) if ord(c) >= 32 or c in "\t\n\r")
+    return s.strip()
+
+
 class StaffMember(BaseModel):
-    name: str = ""
-    phone: str = ""
+    id: Optional[str] = Field(default=None, max_length=36)
+    name: str = Field(default="", max_length=120)
+    phone: str = Field(default="", max_length=32)
+    email: str = Field(default="", max_length=254)
+    notes: str = Field(default="", max_length=4000)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def strip_id_optional(cls, v):
+        if v is None:
+            return None
+        vv = str(v).strip()
+        return vv if vv else None
+
+    @field_validator("id")
+    @classmethod
+    def id_must_be_uuid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            return str(uuid.UUID(v))
+        except ValueError as e:
+            raise ValueError("Staff id must be a valid UUID when provided.") from e
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def sanitize_name(cls, v):
+        return _staff_sanitize_single_line(v if v is not None else "")[:120]
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def sanitize_phone(cls, v):
+        return _staff_sanitize_single_line(v if v is not None else "")[:32]
+
+    @field_validator("notes", mode="before")
+    @classmethod
+    def sanitize_notes_field(cls, v):
+        return _staff_sanitize_notes(v if v is not None else "")
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def sanitize_email_raw(cls, v):
+        if v is None:
+            return ""
+        s = "".join(c for c in str(v).strip() if ord(c) >= 32)
+        return s[:254]
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_optional(cls, v: str) -> str:
+        if not v:
+            return ""
+        try:
+            return str(TypeAdapter(EmailStr).validate_python(v))
+        except ValidationError as e:
+            raise ValueError("Invalid email address.") from e
+
+
+def finalize_staff_records_for_storage(members: List[StaffMember]) -> List[dict]:
+    """Serialize staff for config.json; assign UUID when id omitted (backward compatible rows)."""
+    out: List[dict] = []
+    for m in members:
+        sid = (m.id or "").strip() or str(uuid.uuid4())
+        out.append({
+            "id": sid,
+            "name": m.name,
+            "phone": m.phone,
+            "email": m.email,
+            "notes": m.notes,
+        })
+    return out
+
 
 class BusinessInfoUpdate(BaseModel):
     name: Optional[str] = None
@@ -2839,9 +2930,10 @@ class BusinessInfoUpdate(BaseModel):
     staff: Optional[List[StaffMember]] = None
 
 @app.patch("/api/business-info")
-async def api_update_business_info(update: BusinessInfoUpdate, request: Request, tenant: dict = Depends(require_active_subscription)):
+async def api_update_business_info(update: BusinessInfoUpdate, request: Request, tenant: Optional[dict] = Depends(require_active_subscription)):
     """Update business config (store info, voice, etc.). Writes to clients/<client_id>/config.json."""
-    cid = ((tenant.get("client_id") or "").strip() or get_db_client_id()).strip()
+    tid = tenant or {}
+    cid = ((tid.get("client_id") or "").strip() or get_db_client_id()).strip()
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
     config_path = PROJECT_ROOT / "clients" / cid / "config.json"
@@ -2853,7 +2945,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
             raise HTTPException(status_code=500, detail=f"Failed to read config: {e}")
     else:
         # Use JWT-resolved tenant (always present here); do not require DB lookup — fails when USE_DB is off or DB is down.
-        plan = tenant.get("plan") or "free"
+        plan = tid.get("plan") or "free"
         if USE_DB:
             trow = db_tenant_get_by_client_id(cid)
             if trow and trow.get("plan"):
@@ -2895,13 +2987,13 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     if update.business_type is not None:
         data["business_type"] = update.business_type
     if update.staff is not None:
-        tenant = db_tenant_get_by_client_id(cid)
-        if tenant and get_plan_limits:
-            limits = get_plan_limits(tenant)
+        tenant_limits = db_tenant_get_by_client_id(cid)
+        if tenant_limits and get_plan_limits:
+            limits = get_plan_limits(tenant_limits)
             staff_max = limits.get("staff_max", 1)
             if len(update.staff) > staff_max:
                 raise HTTPException(status_code=403, detail=f"Plan allows up to {staff_max} staff member(s). Upgrade to add more.")
-        data["staff"] = [{"name": s.name or "", "phone": s.phone or ""} for s in update.staff]
+        data["staff"] = finalize_staff_records_for_storage(update.staff)
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as f:
@@ -2909,7 +3001,11 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
     audit_log("user", "business_info_updated", resource_type="config", client_id=cid, details={"fields": [k for k in update.model_dump(exclude_none=True)]}, request=request)
-    return business_info_for_dashboard(tenant)
+    resp_tenant: dict = {**tid, "client_id": cid}
+    if "plan" not in resp_tenant or not resp_tenant.get("plan"):
+        resp_tenant["plan"] = data.get("plan") or "free"
+    resp_tenant.setdefault("twilio_phone_number", tid.get("twilio_phone_number") or "")
+    return business_info_for_dashboard(resp_tenant)
 
 @app.get("/api/stats")
 async def get_stats(_: None = Depends(require_active_subscription)):

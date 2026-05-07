@@ -52,6 +52,16 @@ def test_prompt_staff_transfer_instruction(minimal_business):
     assert "Jamie" in p
 
 
+def test_prompt_staff_notes_reference_block(minimal_business):
+    minimal_business["staff"] = [
+        {"name": "Jamie", "notes": "Best for massage bookings."},
+    ]
+    p = build_system_prompt(business_info=minimal_business, include_booked_slots=False)
+    assert "Business-entered facts about staff" in p
+    assert "Jamie" in p
+    assert "massage" in p.lower()
+
+
 def test_prompt_non_english_locks_language(minimal_business):
     p = build_system_prompt(
         business_info=minimal_business,

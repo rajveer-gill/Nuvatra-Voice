@@ -1,0 +1,69 @@
+"""Validation for staff fields on PATCH /api/business-info."""
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+
+from main import app, require_tenant
+
+
+def _tenant_pro():
+    return {
+        "id": "test-tenant-id",
+        "client_id": "test-spa",
+        "plan": "pro",
+        "subscription_status": "active",
+        "twilio_phone_number": "+15550001111",
+    }
+
+
+@pytest.fixture
+def client(monkeypatch):
+    monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
+    return TestClient(app)
+
+
+def test_staff_invalid_email_returns_422(client, monkeypatch):
+    app.dependency_overrides[require_tenant] = _tenant_pro
+    monkeypatch.setenv("CLIENT_ID", "test-spa")
+    try:
+        resp = client.patch(
+            "/api/business-info",
+            json={
+                "staff": [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "name": "Test",
+                        "phone": "+15551234567",
+                        "email": "not-valid-email",
+                        "notes": "",
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 422
+    finally:
+        app.dependency_overrides.pop(require_tenant, None)
+
+
+def test_staff_notes_over_max_returns_422(client, monkeypatch):
+    app.dependency_overrides[require_tenant] = _tenant_pro
+    monkeypatch.setenv("CLIENT_ID", "test-spa")
+    try:
+        resp = client.patch(
+            "/api/business-info",
+            json={
+                "staff": [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "name": "Test",
+                        "phone": "+15551234567",
+                        "email": "",
+                        "notes": "x" * 4100,
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 422
+    finally:
+        app.dependency_overrides.pop(require_tenant, None)

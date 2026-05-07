@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, Plus, Trash2, CheckCircle2, Circle, AlertTriangle } from 'lucide-react'
+import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, CheckCircle2, Circle, AlertTriangle } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import {
   RANDOM_NAMES,
@@ -13,6 +13,7 @@ import {
   VOICE_SAMPLE_TEXT,
 } from '@/components/settings/constants'
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
+import { StaffMembersSection, normalizeStaffFromApi, type StaffRow } from '@/components/settings/StaffMembersSection'
 
 export default function Settings() {
   const api = useApiClient()
@@ -40,7 +41,7 @@ export default function Settings() {
     specials: '' as string,
     reservation_rules: '' as string,
   })
-  const [staff, setStaff] = useState<{ name: string; phone: string }[]>([])
+  const [staff, setStaff] = useState<StaffRow[]>([])
   const [staffMax, setStaffMax] = useState<number | null>(null)
   const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
   const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
@@ -70,8 +71,7 @@ export default function Settings() {
         const limits = (subRes?.data as { limits?: { staff_max?: number; sms_automations_max?: number } } | null)?.limits
         if (limits?.staff_max != null) setStaffMax(limits.staff_max)
         if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
-        const staffArr = (d.staff || []) as { name?: string; phone?: string }[]
-        setStaff(staffArr.length ? staffArr.map((x) => ({ name: x.name || '', phone: x.phone || '' })) : [])
+        setStaff(normalizeStaffFromApi(d.staff ?? []))
         const spd = typeof d.speed === 'number' ? d.speed : 1.0
         setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
         setReceptionistName(d.receptionist_name || '')
@@ -162,16 +162,11 @@ export default function Settings() {
     }
   }
 
-  const addStaff = () => setStaff((prev) => [...prev, { name: '', phone: '' }])
-  const removeStaff = (i: number) => setStaff((prev) => prev.filter((_, idx) => idx !== i))
-  const updateStaff = (i: number, field: 'name' | 'phone', value: string) =>
-    setStaff((prev) => prev.map((s, idx) => idx === i ? { ...s, [field]: value } : s))
-
   const handleSave = async () => {
     setSaving(true)
     setMessage(null)
     try {
-      await api.patch('/api/business-info', {
+      const { data } = await api.patch('/api/business-info', {
         name: form.name || undefined,
         business_type: form.business_type || undefined,
         hours: form.hours || undefined,
@@ -182,7 +177,15 @@ export default function Settings() {
         greeting: form.greeting || undefined,
         voice: voice || undefined,
         receptionist_name: receptionistName || undefined,
-        staff: staff.filter((s) => s.name.trim() || s.phone.trim()).map((s) => ({ name: s.name, phone: s.phone })),
+        staff: staff
+          .filter((s) => s.name.trim() || s.phone.trim())
+          .map((s) => ({
+            id: s.id,
+            name: s.name.trim(),
+            phone: s.phone.trim(),
+            email: s.email.trim() || undefined,
+            notes: s.notes || undefined,
+          })),
         services: form.services
           ? form.services.split('\n').map((s) => s.trim()).filter(Boolean)
           : undefined,
@@ -193,6 +196,7 @@ export default function Settings() {
           ? form.reservation_rules.split('\n').map((s) => s.trim()).filter(Boolean)
           : undefined,
       })
+      setStaff(normalizeStaffFromApi((data as { staff?: unknown }).staff ?? []))
       setMessage({ type: 'success', text: 'Settings saved. Your AI receptionist will use this info.' })
       refreshSetupStatus()
     } catch (e: unknown) {
@@ -389,7 +393,6 @@ export default function Settings() {
                 }`}
               >
                 {v.charAt(0).toUpperCase() + v.slice(1)}
-                {v === 'fable' && ' (recommended)'}
               </button>
               <button
                 type="button"
@@ -514,39 +517,14 @@ export default function Settings() {
             />
             <p className="text-xs text-gray-500 mt-1">When a caller asks to speak to someone, the AI will transfer the call to this number.</p>
           </div>
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Staff (transfer by name)</label>
-            {staffMax != null && <p className="text-xs text-gray-500 mb-2">Your plan allows up to {staffMax} staff member(s).</p>}
-            {staff.map((s, i) => (
-              <div key={i} className="flex gap-2 mb-2">
-                <input
-                  type="text"
-                  value={s.name}
-                  onChange={(e) => updateStaff(i, 'name', e.target.value)}
-                  className="cs-field flex-1 min-w-0"
-                  placeholder="Name"
-                />
-                <input
-                  type="text"
-                  value={s.phone}
-                  onChange={(e) => updateStaff(i, 'phone', e.target.value)}
-                  className="cs-field flex-1 min-w-0"
-                  placeholder="Phone (E.164)"
-                />
-                <button type="button" onClick={() => removeStaff(i)} className="p-2 text-red-600 hover:bg-red-50 rounded-lg" title="Remove">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={addStaff}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg"
-            >
-              <Plus className="w-4 h-4" /> Add staff
-            </button>
-            <p className="text-xs text-gray-500 mt-1">Callers can ask to speak to these people by name; the AI will transfer the call.</p>
-          </div>
+          <StaffMembersSection
+            staff={staff}
+            onStaffChange={setStaff}
+            staffMax={staffMax}
+            api={api}
+            onNotify={setMessage}
+            onAfterSave={refreshSetupStatus}
+          />
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
             <input
