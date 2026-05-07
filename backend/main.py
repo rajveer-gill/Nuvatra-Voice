@@ -503,21 +503,24 @@ def load_client_config(client_id: Optional[str] = None):
         forwarding = (data.get("forwarding_phone") or os.getenv("BUSINESS_FORWARDING_PHONE") or "")
         if not forwarding and data.get("locations"):
             forwarding = data["locations"][0].get("forwarding_phone", "")
+        _departments = data.get("departments")
+        if not isinstance(_departments, list):
+            _departments = []
         info = {
-            "name": data.get("business_name", data.get("name", "Business")),
+            "name": data.get("business_name") or data.get("name") or "",
             "hours": data.get("hours", ""),
             "phone": data.get("phone", ""),
             "forwarding_phone": forwarding,
             "email": data.get("email", ""),
             "address": data.get("address", ""),
-            "departments": data.get("departments", ["General"]),
+            "departments": _departments,
             "menu_link": data.get("menu_link", ""),
             "services": data.get("services", []),
             "specials": data.get("specials", []),
             "reservation_rules": data.get("reservation_rules", []),
             "staff": data.get("staff", []),
             "locations": data.get("locations", []),
-            "greeting": data.get("greeting", "Thank you for calling. How can I help you today?"),
+            "greeting": data.get("greeting", ""),
             "plan": data.get("plan", "starter"),
             "voice": data.get("voice", "fable"),
             "speed": float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0,
@@ -572,7 +575,7 @@ def _default_business_info_for_tenant() -> Optional[dict]:
         if not row:
             return None
         return {
-            "name": row[0] or "",
+            "name": "",
             "hours": "",
             "phone": row[1] or "",
             "forwarding_phone": "",
@@ -2103,8 +2106,8 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
     config_path = client_dir / "config.json"
     cfg = {
         "client_id": req.client_id,
-        "business_name": req.name,
-        "phone": req.twilio_phone_number or "",
+        "business_name": "",
+        "phone": "",
         "plan": "free",
         "hours": "",
         "forwarding_phone": "",
