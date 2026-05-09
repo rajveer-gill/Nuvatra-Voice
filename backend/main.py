@@ -1852,45 +1852,48 @@ def should_forward_to_human(user_input: str, ai_response: str) -> bool:
     
     return False
 
-def forward_call_to_business(forwarding_phone: str, base_url: str, detected_lang: str = "English") -> VoiceResponse:
-    """
-    Forward the call to the business's actual phone number using Twilio Dial.
-    """
-    response = VoiceResponse()
-    
-    # Get language-appropriate message
+def append_forward_call_verbs(
+    response: VoiceResponse,
+    forwarding_phone: str,
+    base_url: str,
+    detected_lang: str = "English",
+) -> None:
+    """Append handoff TTS, Dial, and no-answer fallback to an existing TwiML response."""
     if detected_lang == "Spanish":
         message = "Conectándote con alguien ahora. Por favor espera."
     elif detected_lang == "French":
         message = "Je vous connecte maintenant. Veuillez patienter."
     else:
         message = "Connecting you with someone now. Please hold."
-    
-    # Say message before forwarding
+
     message_encoded = quote(message)
     tts_url = f"{base_url}/api/phone/tts-audio?text={message_encoded}&voice={get_tts_voice()}"
     response.play(tts_url)
-    
-    # Dial the business phone number
-    # Format: +1XXXXXXXXXX (E.164 format)
-    # Remove any non-digit characters except +
-    clean_phone = ''.join(c for c in forwarding_phone if c.isdigit() or c == '+')
-    if not clean_phone.startswith('+'):
-        # If no +, assume US number and add +1
+
+    clean_phone = "".join(c for c in forwarding_phone if c.isdigit() or c == "+")
+    if not clean_phone.startswith("+"):
         if len(clean_phone) == 10:
             clean_phone = f"+1{clean_phone}"
-        elif len(clean_phone) == 11 and clean_phone.startswith('1'):
+        elif len(clean_phone) == 11 and clean_phone.startswith("1"):
             clean_phone = f"+{clean_phone}"
         else:
             clean_phone = f"+1{clean_phone}"
-    
+
     print(f"📞 Forwarding call to business: {clean_phone}")
     response.dial(clean_phone, timeout=30, record=False)
-    
-    # If dial fails (no answer, busy, etc.), say goodbye
-    response.say("I'm sorry, no one is available right now. Please try again later or leave a message.", voice='alice')
+    response.say(
+        "I'm sorry, no one is available right now. Please try again later or leave a message.",
+        voice="alice",
+    )
     response.hangup()
-    
+
+
+def forward_call_to_business(forwarding_phone: str, base_url: str, detected_lang: str = "English") -> VoiceResponse:
+    """
+    Forward the call to the business's actual phone number using Twilio Dial.
+    """
+    response = VoiceResponse()
+    append_forward_call_verbs(response, forwarding_phone, base_url, detected_lang)
     return response
 
 def detect_language(text: str) -> str:
@@ -4183,10 +4186,23 @@ async def respond_with_audio(request: Request):
                         speech_timeout='auto',
                         language=twilio_lang_code
                     )
-                    goodbye_text = "Thanks for calling! Have a wonderful day!"
-                    goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
-                    response.play(goodbye_url)
-                    response.hangup()
+                    forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
+                    if forwarding_phone:
+                        if call_sid and call_sid in active_calls:
+                            active_calls[call_sid]["outcome"] = "forwarded"
+                        if call_sid:
+                            call_log_set_outcome(call_sid, "forwarded")
+                        print(
+                            f"🔄 No speech after still there — forwarding to business phone: {forwarding_phone}"
+                        )
+                        append_forward_call_verbs(
+                            response, forwarding_phone, base_url, detected_lang
+                        )
+                    else:
+                        goodbye_text = "Thanks for calling! Have a wonderful day!"
+                        goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
+                        response.play(goodbye_url)
+                        response.hangup()
                 except Exception as e:
                     try:
                         _agent_log("CRASH_END", "backend/main.py:respond", "Exception in ready/goodbye block", {"error": str(e), "type": type(e).__name__}, "pre-fix")
