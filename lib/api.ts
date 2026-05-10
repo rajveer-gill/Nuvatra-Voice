@@ -6,6 +6,12 @@ import { useMemo } from 'react'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+/** Axios timeout (ms). Default 120s so cold-started hosts (e.g. Render free) can wake before abort. Override with NEXT_PUBLIC_API_TIMEOUT_MS. */
+const API_TIMEOUT_MS =
+  Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS) > 0
+    ? Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS)
+    : 120_000
+
 /** Base URL for constructing absolute links (same as axios baseURL). */
 export { API_URL }
 
@@ -27,7 +33,7 @@ export function sameOriginApiConfig(): { baseURL: string } {
 export function useApiClient(): AxiosInstance {
   const { getToken } = useAuth()
   const client = useMemo(() => {
-    const instance = axios.create({ baseURL: API_URL })
+    const instance = axios.create({ baseURL: API_URL, timeout: API_TIMEOUT_MS })
     instance.interceptors.request.use(async (config) => {
       try {
         const token = await getToken()

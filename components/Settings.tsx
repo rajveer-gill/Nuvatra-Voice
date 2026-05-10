@@ -74,41 +74,47 @@ export default function Settings() {
 
   useEffect(() => {
     Promise.all([
-      api.get('/api/business-info'),
+      api.get('/api/business-info').catch(() => ({ data: null as unknown })),
       api.get('/api/subscription').catch(() => ({ data: null })),
       api.get('/api/sms-automations').catch(() => ({ data: { automations: [] } })),
       api.get('/api/setup-status').catch(() => ({ data: null })),
-    ]).then(([infoRes, subRes, automationsRes, setupRes]) => {
-        const d = infoRes.data
-        setVoice(d.voice || 'fable')
+    ])
+      .then(([infoRes, subRes, automationsRes, setupRes]) => {
+        setMessage(null)
         const limits = (subRes?.data as { limits?: { staff_max?: number; sms_automations_max?: number } } | null)?.limits
         if (limits?.staff_max != null) setStaffMax(limits.staff_max)
         if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
+        setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
+        setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
+
+        const d = infoRes?.data as Record<string, unknown> | null | undefined
+        if (!d) {
+          return
+        }
+        setVoice((d.voice as string) || 'fable')
         setStaff(normalizeStaffFromApi(d.staff ?? []))
         const spd = typeof d.speed === 'number' ? d.speed : 1.0
         setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
-        setReceptionistName(d.receptionist_name || '')
-        setAiPhone(d.phone || '')
+        setReceptionistName((d.receptionist_name as string) || '')
+        setAiPhone((d.phone as string) || '')
         setForm({
-          name: d.name || '',
-          business_type: d.business_type || '',
-          hours: d.hours || '',
-          forwarding_phone: d.forwarding_phone || '',
-          email: d.email || '',
-          address: d.address || '',
-          menu_link: d.menu_link || '',
-          greeting: d.greeting || '',
+          name: (d.name as string) || '',
+          business_type: (d.business_type as string) || '',
+          hours: (d.hours as string) || '',
+          forwarding_phone: (d.forwarding_phone as string) || '',
+          email: (d.email as string) || '',
+          address: (d.address as string) || '',
+          menu_link: (d.menu_link as string) || '',
+          greeting: (d.greeting as string) || '',
         })
         setServiceItems(normalizeServices(d.services))
         setSpecialItems(normalizeSpecials(d.specials))
         setRuleItems(normalizeRules(d.reservation_rules))
-        setIndustryLocked(!!(d as { business_type_admin_locked?: boolean }).business_type_admin_locked)
-        setVerticalLabel(String((d as { business_vertical_label?: string }).business_vertical_label || ''))
-      setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
-      setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
+        setIndustryLocked(!!d.business_type_admin_locked)
+        setVerticalLabel(String(d.business_vertical_label || ''))
       })
-    .catch(() => setMessage({ type: 'error', text: 'Failed to load settings' }))
-    .finally(() => setLoading(false))
+      .catch(() => setMessage({ type: 'error', text: 'Failed to load settings' }))
+      .finally(() => setLoading(false))
   }, [api])
 
   const randomizeName = () => {
