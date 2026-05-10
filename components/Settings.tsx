@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import { useAuth } from '@clerk/nextjs'
 import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, CheckCircle2, Circle, AlertTriangle } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import {
@@ -27,6 +28,7 @@ import {
 } from '@/components/settings/StructuredListEditors'
 
 export default function Settings() {
+  const { isLoaded, isSignedIn } = useAuth()
   const api = useApiClient()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -73,6 +75,18 @@ export default function Settings() {
   }
 
   useEffect(() => {
+    if (!isLoaded) {
+      return
+    }
+    if (!isSignedIn) {
+      setLoading(false)
+      setMessage(null)
+      return
+    }
+
+    let cancelled = false
+    setLoading(true)
+
     Promise.all([
       api.get('/api/business-info').catch(() => ({ data: null as unknown })),
       api.get('/api/subscription').catch(() => ({ data: null })),
@@ -80,42 +94,58 @@ export default function Settings() {
       api.get('/api/setup-status').catch(() => ({ data: null })),
     ])
       .then(([infoRes, subRes, automationsRes, setupRes]) => {
+        if (cancelled) return
         setMessage(null)
-        const limits = (subRes?.data as { limits?: { staff_max?: number; sms_automations_max?: number } } | null)?.limits
-        if (limits?.staff_max != null) setStaffMax(limits.staff_max)
-        if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
-        setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
-        setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
+        try {
+          const limits = (subRes?.data as { limits?: { staff_max?: number; sms_automations_max?: number } } | null)?.limits
+          if (limits?.staff_max != null) setStaffMax(limits.staff_max)
+          if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
+          setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
+          setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
 
-        const d = infoRes?.data as Record<string, unknown> | null | undefined
-        if (!d) {
-          return
+          const d = infoRes?.data as Record<string, unknown> | null | undefined
+          if (!d) {
+            return
+          }
+          setVoice((d.voice as string) || 'fable')
+          setStaff(normalizeStaffFromApi(d.staff ?? []))
+          const spd = typeof d.speed === 'number' ? d.speed : 1.0
+          setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
+          setReceptionistName((d.receptionist_name as string) || '')
+          setAiPhone((d.phone as string) || '')
+          setForm({
+            name: (d.name as string) || '',
+            business_type: (d.business_type as string) || '',
+            hours: (d.hours as string) || '',
+            forwarding_phone: (d.forwarding_phone as string) || '',
+            email: (d.email as string) || '',
+            address: (d.address as string) || '',
+            menu_link: (d.menu_link as string) || '',
+            greeting: (d.greeting as string) || '',
+          })
+          setServiceItems(normalizeServices(d.services))
+          setSpecialItems(normalizeSpecials(d.specials))
+          setRuleItems(normalizeRules(d.reservation_rules))
+          setIndustryLocked(!!d.business_type_admin_locked)
+          setVerticalLabel(String(d.business_vertical_label || ''))
+        } catch (e) {
+          console.error('[Settings] failed to apply API response', e)
+          setMessage({ type: 'error', text: 'Failed to load settings' })
         }
-        setVoice((d.voice as string) || 'fable')
-        setStaff(normalizeStaffFromApi(d.staff ?? []))
-        const spd = typeof d.speed === 'number' ? d.speed : 1.0
-        setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
-        setReceptionistName((d.receptionist_name as string) || '')
-        setAiPhone((d.phone as string) || '')
-        setForm({
-          name: (d.name as string) || '',
-          business_type: (d.business_type as string) || '',
-          hours: (d.hours as string) || '',
-          forwarding_phone: (d.forwarding_phone as string) || '',
-          email: (d.email as string) || '',
-          address: (d.address as string) || '',
-          menu_link: (d.menu_link as string) || '',
-          greeting: (d.greeting as string) || '',
-        })
-        setServiceItems(normalizeServices(d.services))
-        setSpecialItems(normalizeSpecials(d.specials))
-        setRuleItems(normalizeRules(d.reservation_rules))
-        setIndustryLocked(!!d.business_type_admin_locked)
-        setVerticalLabel(String(d.business_vertical_label || ''))
       })
-      .catch(() => setMessage({ type: 'error', text: 'Failed to load settings' }))
-      .finally(() => setLoading(false))
-  }, [api])
+      .catch((err) => {
+        if (cancelled) return
+        console.error('[Settings] settings fetch failed', err)
+        setMessage({ type: 'error', text: 'Failed to load settings' })
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [api, isLoaded, isSignedIn])
 
   const randomizeName = () => {
     const current = receptionistName.trim().toLowerCase()
