@@ -14,6 +14,17 @@ import {
 } from '@/components/settings/constants'
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
 import { StaffMembersSection, normalizeStaffFromApi, type StaffRow } from '@/components/settings/StaffMembersSection'
+import {
+  normalizeServices,
+  normalizeSpecials,
+  normalizeRules,
+  ServicesEditor,
+  SpecialsEditor,
+  RulesEditor,
+  type ServiceRow,
+  type SpecialRow,
+  type RuleRow,
+} from '@/components/settings/StructuredListEditors'
 
 export default function Settings() {
   const api = useApiClient()
@@ -37,10 +48,12 @@ export default function Settings() {
     address: '',
     menu_link: '',
     greeting: '',
-    services: '' as string,
-    specials: '' as string,
-    reservation_rules: '' as string,
   })
+  const [serviceItems, setServiceItems] = useState<ServiceRow[]>([])
+  const [specialItems, setSpecialItems] = useState<SpecialRow[]>([])
+  const [ruleItems, setRuleItems] = useState<RuleRow[]>([])
+  const [industryLocked, setIndustryLocked] = useState(false)
+  const [verticalLabel, setVerticalLabel] = useState('')
   const [staff, setStaff] = useState<StaffRow[]>([])
   const [staffMax, setStaffMax] = useState<number | null>(null)
   const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
@@ -85,10 +98,12 @@ export default function Settings() {
           address: d.address || '',
           menu_link: d.menu_link || '',
           greeting: d.greeting || '',
-          services: Array.isArray(d.services) ? d.services.join('\n') : '',
-          specials: Array.isArray(d.specials) ? d.specials.join('\n') : '',
-          reservation_rules: Array.isArray(d.reservation_rules) ? d.reservation_rules.join('\n') : '',
         })
+        setServiceItems(normalizeServices(d.services))
+        setSpecialItems(normalizeSpecials(d.specials))
+        setRuleItems(normalizeRules(d.reservation_rules))
+        setIndustryLocked(!!(d as { business_type_admin_locked?: boolean }).business_type_admin_locked)
+        setVerticalLabel(String((d as { business_vertical_label?: string }).business_vertical_label || ''))
       setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
       setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
       })
@@ -168,7 +183,7 @@ export default function Settings() {
     try {
       const { data } = await api.patch('/api/business-info', {
         name: form.name || undefined,
-        business_type: form.business_type || undefined,
+        ...(!industryLocked ? { business_type: form.business_type || undefined } : {}),
         hours: form.hours || undefined,
         forwarding_phone: form.forwarding_phone || undefined,
         email: form.email || undefined,
@@ -186,15 +201,9 @@ export default function Settings() {
             email: s.email.trim() || undefined,
             notes: s.notes || undefined,
           })),
-        services: form.services
-          ? form.services.split('\n').map((s) => s.trim()).filter(Boolean)
-          : undefined,
-        specials: form.specials
-          ? form.specials.split('\n').map((s) => s.trim()).filter(Boolean)
-          : undefined,
-        reservation_rules: form.reservation_rules
-          ? form.reservation_rules.split('\n').map((s) => s.trim()).filter(Boolean)
-          : undefined,
+        services: serviceItems.length ? serviceItems : undefined,
+        specials: specialItems.length ? specialItems : undefined,
+        reservation_rules: ruleItems.length ? ruleItems : undefined,
       })
       setStaff(normalizeStaffFromApi((data as { staff?: unknown }).staff ?? []))
       setMessage({ type: 'success', text: 'Settings saved. Your AI receptionist will use this info.' })
@@ -484,17 +493,26 @@ export default function Settings() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Type of business</label>
-            <input
-              type="text"
-              value={form.business_type}
-              onChange={(e) => setForm((f) => ({ ...f, business_type: e.target.value }))}
-              className="cs-field w-full"
-              placeholder="e.g. nail salon, HVAC company, real estate brokerage, restaurant"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              This tells the AI what kind of business you run so it doesn&apos;t assume a generic or demo industry.
-            </p>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Industry</label>
+            {industryLocked && verticalLabel ? (
+              <>
+                <div className="cs-field w-full bg-gray-50 text-gray-800">{verticalLabel}</div>
+                <p className="text-xs text-gray-500 mt-1">Set by your administrator when the account was created.</p>
+              </>
+            ) : (
+              <>
+                <input
+                  type="text"
+                  value={form.business_type}
+                  onChange={(e) => setForm((f) => ({ ...f, business_type: e.target.value }))}
+                  className="cs-field w-full"
+                  placeholder="e.g. nail salon, HVAC company, real estate brokerage, restaurant"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  This tells the AI what kind of business you run so it doesn&apos;t assume a generic or demo industry.
+                </p>
+              </>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Hours</label>
@@ -566,34 +584,9 @@ export default function Settings() {
             />
             <p className="text-xs text-gray-500 mt-1">Use {'{business_name}'} for your business name.</p>
           </div>
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Services (one per line)</label>
-            <textarea
-              value={form.services}
-              onChange={(e) => setForm((f) => ({ ...f, services: e.target.value }))}
-              className="cs-field w-full min-h-[80px]"
-              placeholder="Appointments&#10;Estimates&#10;Emergency service&#10;Consultations"
-            />
-            <p className="text-xs text-gray-500 mt-1">What your business offers so the AI can answer &quot;what do you do?&quot;</p>
-          </div>
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Specials / promotions (one per line, optional)</label>
-            <textarea
-              value={form.specials}
-              onChange={(e) => setForm((f) => ({ ...f, specials: e.target.value }))}
-              className="cs-field w-full min-h-[80px]"
-              placeholder="Happy hour 4–6 PM&#10;First-time discount&#10;Seasonal offer"
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Booking / appointment rules (one per line)</label>
-            <textarea
-              value={form.reservation_rules}
-              onChange={(e) => setForm((f) => ({ ...f, reservation_rules: e.target.value }))}
-              className="cs-field w-full min-h-[80px]"
-              placeholder="Same-day booking available&#10;24h notice for cancellations&#10;Deposit required for groups"
-            />
-          </div>
+          <ServicesEditor items={serviceItems} onChange={setServiceItems} />
+          <SpecialsEditor items={specialItems} onChange={setSpecialItems} />
+          <RulesEditor items={ruleItems} onChange={setRuleItems} />
         </div>
 
         <div className="mt-6 flex items-center gap-3">

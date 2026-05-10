@@ -18,6 +18,7 @@ interface Tenant {
   trial_ends_at?: string | null
   subscription_status?: string | null
   billing_exempt_until?: string | null
+  business_vertical?: string | null
 }
 
 const inputClass =
@@ -42,6 +43,7 @@ export default function AdminPage() {
     name: '',
     twilio_phone_number: '',
     email: '',
+    business_vertical: 'salon_chair',
   })
   const [exempting, setExempting] = useState<string | null>(null)
   const [exemptAction, setExemptAction] = useState<Record<string, string>>({})
@@ -118,7 +120,7 @@ export default function AdminPage() {
     try {
       await api.post('/api/admin/tenants', { ...form, plan: 'free' })
       setSuccess(`Tenant "${form.name}" created. Invite sent to ${form.email}.`)
-      setForm({ client_id: '', name: '', twilio_phone_number: '', email: '' })
+      setForm({ client_id: '', name: '', twilio_phone_number: '', email: '', business_vertical: 'salon_chair' })
       fetchTenants()
     } catch (e: unknown) {
       const err = e as { response?: { status?: number; data?: { detail?: string } } }
@@ -285,6 +287,17 @@ export default function AdminPage() {
                 />
               </div>
               <div>
+                <label className="mb-1 block text-sm font-medium text-zinc-400">Industry (vertical)</label>
+                <select
+                  value={form.business_vertical}
+                  onChange={(e) => setForm({ ...form, business_vertical: e.target.value })}
+                  className={`${inputClass} w-full`}
+                >
+                  <option value="salon_chair">Salon, barbershop, nails & similar (chair services)</option>
+                </select>
+                <p className="mt-1 text-xs text-zinc-500">More industries later; this sets AI defaults for booking-style businesses.</p>
+              </div>
+              <div>
                 <label className="mb-1 block text-sm font-medium text-zinc-400">Twilio phone number (E.164)</label>
                 <input
                   type="tel"
@@ -344,6 +357,9 @@ export default function AdminPage() {
                         <div className="mt-1 flex flex-wrap items-center gap-3">
                           <span className="text-sm text-zinc-400">{t.twilio_phone_number}</span>
                           <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-300">{t.plan}</span>
+                          {t.business_vertical && (
+                            <span className="text-xs text-zinc-500">vertical: {t.business_vertical}</span>
+                          )}
                           {t.subscription_status && (
                             <span className="text-xs text-zinc-500">status: {t.subscription_status}</span>
                           )}

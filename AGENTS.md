@@ -105,6 +105,20 @@ When a tenant is removed via the admin page, the backend:
 
 Users are **not banned** — they can be re-invited later. The dashboard page gates all tabs behind a tenant check; removed users see a "No Access" screen.
 
+### Backend observability (logs while testing in production)
+
+Logs go to **stderr** with format `LEVEL|nuvatra|message`. Tune verbosity without code changes:
+
+| Variable | Effect |
+|----------|--------|
+| **`LOG_LEVEL`** | `INFO` (default) or **`DEBUG`** — DEBUG shows more framework noise; pair with **`OBS_VERBOSE`** for app internals. |
+| **`OBS_VERBOSE=1`** | Extra **DEBUG** lines: slot availability, booking parser context, inbound SMS thread context. Does not log full SMS bodies at INFO (lengths only where relevant). |
+| **`OBS_TRACE_WEBHOOKS=1`** | **INFO** line for each **`/api/phone/*`** and **`/api/sms/*`** request: method, path, HTTP status, latency ms, **`X-Request-ID`**. Use this to match Twilio webhook delivery to your service in Render logs. |
+
+Structured prefixes (grep-friendly): **`[SMS]`** (outbound/inbound, Twilio result, staff commands), **`[VOICE]`** (incoming call, tenant resolution, GPT/booking branch), **`[SYSTEM]`** (booking created/failed, slots), **`[USAGE]`** (plan cap, webhook rate limit), **`[AUTH]`** (invalid Twilio signature, subscription blocked), **`[HTTP]`** (webhook timing when **`OBS_TRACE_WEBHOOKS`** is on). Caller/callee phones are **masked** in those lines.
+
+After dependency updates, run **`pip install -r backend/requirements.txt`** on Render (includes **`email-validator`** for staff email validation).
+
 ### End-to-end verification
 
 For hello-world / smoke-test validation, use the production deployments rather than only local servers:

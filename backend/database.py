@@ -152,11 +152,18 @@ def init_db() -> bool:
             ("stripe_customer_id", "TEXT"),
             ("stripe_subscription_id", "TEXT"),
             ("billing_exempt_until", "TIMESTAMPTZ"),
+            ("business_vertical", "TEXT"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {typ}")
             except Exception:
                 pass
+        try:
+            cur.execute(
+                "UPDATE tenants SET business_vertical = 'salon_chair' WHERE business_vertical IS NULL OR trim(business_vertical) = ''"
+            )
+        except Exception:
+            pass
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tenant_members (
                 clerk_user_id TEXT NOT NULL,
@@ -275,6 +282,18 @@ def init_db() -> bool:
             cur.execute("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ")
         except Exception:
             pass
+        for col, typ in [
+            ("staff_id", "TEXT"),
+            ("owner_decline_reason", "TEXT"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE appointments ADD COLUMN IF NOT EXISTS {col} {typ}")
+            except Exception:
+                pass
+        try:
+            cur.execute("ALTER TABLE booked_slots ADD COLUMN IF NOT EXISTS staff_id TEXT")
+        except Exception:
+            pass
         cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_status_date ON appointments(client_id, status)")
         conn.commit()
         cur.close()
@@ -303,7 +322,13 @@ def _normalize_e164(phone: str) -> str:
     return f"+{d}" if d else phone
 
 # --- Tenants ---
-def db_tenant_create(client_id: str, name: str, twilio_phone_number: str, plan: str = "free") -> Optional[dict]:
+def db_tenant_create(
+    client_id: str,
+    name: str,
+    twilio_phone_number: str,
+    plan: str = "free",
+    business_vertical: str = "salon_chair",
+) -> Optional[dict]:
     """Create a tenant with 7-day trial. Returns tenant dict or None on conflict."""
     conn = _get_conn()
     if not conn:
@@ -311,12 +336,12 @@ def db_tenant_create(client_id: str, name: str, twilio_phone_number: str, plan: 
     try:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO tenants (client_id, name, twilio_phone_number, plan, subscription_status, trial_ends_at)
-            VALUES (%s, %s, %s, %s, 'trialing', NOW() + INTERVAL '7 days')
+            INSERT INTO tenants (client_id, name, twilio_phone_number, plan, subscription_status, trial_ends_at, business_vertical)
+            VALUES (%s, %s, %s, %s, 'trialing', NOW() + INTERVAL '7 days', %s)
             ON CONFLICT (client_id) DO NOTHING
             RETURNING id, client_id, name, twilio_phone_number, plan, created_at,
-                trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until
-        """, (client_id, name, twilio_phone_number, plan))
+                trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, business_vertical
+        """, (client_id, name, twilio_phone_number, plan, business_vertical))
         row = cur.fetchone()
         conn.commit()
         cur.close()
@@ -328,7 +353,7 @@ def db_tenant_create(client_id: str, name: str, twilio_phone_number: str, plan: 
         return None
 
 def _row_to_tenant(row) -> dict:
-    """Map tenant SELECT row (with subscription columns) to dict. Row has 11 cols from _tenant_select_cols."""
+    """Map tenant SELECT row to dict (includes business_vertical when present)."""
     base = {"id": str(row[0]), "client_id": row[1], "name": row[2], "twilio_phone_number": row[3], "plan": row[4]}
     base["created_at"] = row[5].isoformat() if len(row) > 5 and row[5] else None
     if len(row) >= 11:
@@ -343,10 +368,14 @@ def _row_to_tenant(row) -> dict:
         base["stripe_customer_id"] = None
         base["stripe_subscription_id"] = None
         base["billing_exempt_until"] = None
+    if len(row) >= 12 and row[11] is not None and str(row[11]).strip():
+        base["business_vertical"] = str(row[11]).strip()
+    else:
+        base["business_vertical"] = "salon_chair"
     return base
 
 def _tenant_select_cols():
-    return "id, client_id, name, twilio_phone_number, plan, created_at, trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until"
+    return "id, client_id, name, twilio_phone_number, plan, created_at, trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, business_vertical"
 
 def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
     """Look up tenant by Twilio phone number (E.164). Returns tenant or None."""
@@ -406,7 +435,7 @@ def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
     cur = conn.cursor()
     cur.execute("""
         SELECT t.id, t.client_id, t.name, t.twilio_phone_number, t.plan, t.created_at,
-               t.trial_ends_at, t.subscription_status, t.stripe_customer_id, t.stripe_subscription_id, t.billing_exempt_until
+               t.trial_ends_at, t.subscription_status, t.stripe_customer_id, t.stripe_subscription_id, t.billing_exempt_until, t.business_vertical
         FROM tenants t
         JOIN tenant_members m ON m.tenant_id = t.id
         WHERE m.clerk_user_id = %s
@@ -695,16 +724,26 @@ def db_appointments_get_all() -> List[dict]:
         return []
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, email, phone, date, time, reason, status, source, created_at FROM appointments WHERE client_id = %s ORDER BY date, time",
-        (_client_id(),)
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+           FROM appointments WHERE client_id = %s ORDER BY date, time""",
+        (_client_id(),),
     )
     rows = cur.fetchall()
     cur.close()
     return [
         {
-            "id": r[0], "name": r[1], "email": r[2] or "", "phone": r[3] or "",
-            "date": r[4], "time": r[5] or "", "reason": r[6] or "", "status": r[7],
-            "source": r[8] or "manual", "created_at": r[9].isoformat() if r[9] else ""
+            "id": r[0],
+            "name": r[1],
+            "email": r[2] or "",
+            "phone": r[3] or "",
+            "date": r[4],
+            "time": r[5] or "",
+            "reason": r[6] or "",
+            "status": r[7],
+            "source": r[8] or "manual",
+            "created_at": r[9].isoformat() if r[9] else "",
+            "staff_id": r[10] if len(r) > 10 else None,
+            "owner_decline_reason": r[11] if len(r) > 11 else None,
         }
         for r in rows
     ]
@@ -717,13 +756,20 @@ def db_appointments_insert(data: dict) -> dict:
     cid = (data.get("client_id") or "").strip() or _client_id()
     print(f"[DB] db_appointments_insert client_id={cid} name={data.get('name')!r} date={data.get('date')} time={data.get('time')}")
     cur.execute("""
-        INSERT INTO appointments (client_id, name, email, phone, date, time, reason, status, source)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO appointments (client_id, name, email, phone, date, time, reason, status, source, staff_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id, created_at
     """, (
-        cid, data["name"], data.get("email", ""), data.get("phone", ""),
-        data["date"], data.get("time", ""), data.get("reason", ""),
-        data.get("status", "pending"), data.get("source", "manual")
+        cid,
+        data["name"],
+        data.get("email", ""),
+        data.get("phone", ""),
+        data["date"],
+        data.get("time", ""),
+        data.get("reason", ""),
+        data.get("status", "pending"),
+        data.get("source", "manual"),
+        data.get("staff_id"),
     ))
     row = cur.fetchone()
     conn.commit()
@@ -736,7 +782,7 @@ def db_appointments_update(appointment_id: int, **kwargs) -> Optional[dict]:
     conn = _get_conn()
     if not conn:
         return None
-    allowed = ("status", "date", "time", "reason", "name", "email", "phone")
+    allowed = ("status", "date", "time", "reason", "name", "email", "phone", "staff_id", "owner_decline_reason")
     updates = []
     vals = []
     for k, v in kwargs.items():
@@ -749,15 +795,29 @@ def db_appointments_update(appointment_id: int, **kwargs) -> Optional[dict]:
     vals.append(_client_id())
     cur = conn.cursor()
     cur.execute(
-        f"UPDATE appointments SET {', '.join(updates)} WHERE id = %s AND client_id = %s RETURNING id, name, email, phone, date, time, reason, status, source, created_at",
-        vals
+        f"UPDATE appointments SET {', '.join(updates)} WHERE id = %s AND client_id = %s "
+        "RETURNING id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason",
+        vals,
     )
     row = cur.fetchone()
     conn.commit()
     cur.close()
     if not row:
         return None
-    return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
+    return {
+        "id": row[0],
+        "name": row[1],
+        "email": row[2] or "",
+        "phone": row[3] or "",
+        "date": row[4],
+        "time": row[5] or "",
+        "reason": row[6] or "",
+        "status": row[7],
+        "source": row[8] or "manual",
+        "created_at": row[9].isoformat() if row[9] else "",
+        "staff_id": row[10] if len(row) > 10 else None,
+        "owner_decline_reason": row[11] if len(row) > 11 else None,
+    }
 
 def db_appointments_get_by_id(appointment_id: int) -> Optional[dict]:
     conn = _get_conn()
@@ -765,14 +825,28 @@ def db_appointments_get_by_id(appointment_id: int) -> Optional[dict]:
         return None
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, email, phone, date, time, reason, status, source, created_at FROM appointments WHERE id = %s AND client_id = %s",
-        (appointment_id, _client_id())
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+           FROM appointments WHERE id = %s AND client_id = %s""",
+        (appointment_id, _client_id()),
     )
     row = cur.fetchone()
     cur.close()
     if not row:
         return None
-    return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
+    return {
+        "id": row[0],
+        "name": row[1],
+        "email": row[2] or "",
+        "phone": row[3] or "",
+        "date": row[4],
+        "time": row[5] or "",
+        "reason": row[6] or "",
+        "status": row[7],
+        "source": row[8] or "manual",
+        "created_at": row[9].isoformat() if row[9] else "",
+        "staff_id": row[10] if len(row) > 10 else None,
+        "owner_decline_reason": row[11] if len(row) > 11 else None,
+    }
 
 def db_appointments_max_id() -> int:
     conn = _get_conn()
@@ -783,6 +857,56 @@ def db_appointments_max_id() -> int:
     row = cur.fetchone()
     cur.close()
     return row[0] if row else 0
+
+
+def db_appointments_in_date_range(
+    date_from: str, date_to: str, staff_id: Optional[str] = None
+) -> List[dict]:
+    """Appointments for calendar view (inclusive date range). staff_id None = all staff."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    if staff_id:
+        cur.execute(
+            """
+            SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+            FROM appointments
+            WHERE client_id = %s AND date >= %s AND date <= %s AND staff_id = %s
+            ORDER BY date, time
+            """,
+            (_client_id(), date_from, date_to, staff_id),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+            FROM appointments
+            WHERE client_id = %s AND date >= %s AND date <= %s
+            ORDER BY date, time
+            """,
+            (_client_id(), date_from, date_to),
+        )
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {
+            "id": r[0],
+            "name": r[1],
+            "email": r[2] or "",
+            "phone": r[3] or "",
+            "date": r[4],
+            "time": r[5] or "",
+            "reason": r[6] or "",
+            "status": r[7],
+            "source": r[8] or "manual",
+            "created_at": r[9].isoformat() if r[9] else "",
+            "staff_id": r[10] if len(r) > 10 else None,
+            "owner_decline_reason": r[11] if len(r) > 11 else None,
+        }
+        for r in rows
+    ]
+
 
 def db_appointments_get_accepted_for_date(client_id: str, date: str) -> List[dict]:
     """Get accepted appointments for client_id and date (YYYY-MM-DD) with reminder_sent_at IS NULL."""
@@ -1486,10 +1610,22 @@ def db_booked_slots_load() -> List[dict]:
     if not conn:
         return []
     cur = conn.cursor()
-    cur.execute("SELECT date, time, appointment_id, duration_minutes FROM booked_slots WHERE client_id = %s", (_client_id(),))
+    cur.execute(
+        "SELECT date, time, appointment_id, duration_minutes, staff_id FROM booked_slots WHERE client_id = %s",
+        (_client_id(),),
+    )
     rows = cur.fetchall()
     cur.close()
-    return [{"date": r[0], "time": r[1], "appointment_id": r[2], "duration_minutes": r[3] or 30} for r in rows]
+    return [
+        {
+            "date": r[0],
+            "time": r[1],
+            "appointment_id": r[2],
+            "duration_minutes": r[3] or 30,
+            "staff_id": r[4] if len(r) > 4 else None,
+        }
+        for r in rows
+    ]
 
 def db_booked_slots_save(slots: List[dict]) -> None:
     conn = _get_conn()
@@ -1499,8 +1635,15 @@ def db_booked_slots_save(slots: List[dict]) -> None:
     cur.execute("DELETE FROM booked_slots WHERE client_id = %s", (_client_id(),))
     for s in slots:
         cur.execute(
-            "INSERT INTO booked_slots (client_id, date, time, appointment_id, duration_minutes) VALUES (%s, %s, %s, %s, %s)",
-            (_client_id(), s["date"], s["time"], s["appointment_id"], s.get("duration_minutes", 30))
+            "INSERT INTO booked_slots (client_id, date, time, appointment_id, duration_minutes, staff_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                _client_id(),
+                s["date"],
+                s["time"],
+                s["appointment_id"],
+                s.get("duration_minutes", 30),
+                s.get("staff_id"),
+            ),
         )
     conn.commit()
     cur.close()

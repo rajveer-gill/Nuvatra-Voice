@@ -18,6 +18,11 @@
   "dependencies": {
     "@clerk/nextjs": "^6.38.1",
     "@clerk/themes": "^2.4.57",
+    "@fullcalendar/core": "^6.1.20",
+    "@fullcalendar/daygrid": "^6.1.20",
+    "@fullcalendar/interaction": "^6.1.20",
+    "@fullcalendar/react": "^6.1.20",
+    "@fullcalendar/timegrid": "^6.1.20",
     "@sentry/nextjs": "^10.50.0",
     "axios": "^1.6.0",
     "framer-motion": "^11.18.2",

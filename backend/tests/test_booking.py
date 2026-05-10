@@ -38,3 +38,10 @@ def test_parse_booking_too_few_fields():
     text = "BOOKING: John|555"
     got = parse_booking(text)
     assert got is None
+
+
+def test_parse_booking_with_staff_field():
+    text = "BOOKING: Ann|+15550009999| |2025-04-01|15:00|Color|uuid-staff-1"
+    got = parse_booking(text)
+    assert got is not None
+    assert got.get("staff") == "uuid-staff-1"

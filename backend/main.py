@@ -6,7 +6,7 @@ import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError, field_validator
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Any
 import uuid
 import logging
 import openai
@@ -23,6 +23,7 @@ import secrets
 import math
 import time
 import json
+import re
 from pathlib import Path
 import shutil
 import io
@@ -87,6 +88,24 @@ if not logger.handlers:
     h.setFormatter(logging.Formatter("%(levelname)s|%(name)s|%(message)s"))
     logger.addHandler(h)
 
+from observability import (
+    auth_warning,
+    sms_debug,
+    sms_info,
+    system_debug,
+    system_info,
+    usage_warning,
+    voice_debug,
+    voice_info,
+    webhook_timing_middleware,
+)
+
+
+def _public_base_url() -> str:
+    """HTTPS origin Twilio can reach for webhooks (use NGROK_URL or PUBLIC_BASE_URL)."""
+    return (os.getenv("NGROK_URL") or os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+
+
 sentry_sdk.init(
     dsn=os.environ.get("SENTRY_DSN"),
     environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
@@ -94,31 +113,6 @@ sentry_sdk.init(
     integrations=[StarletteIntegration(), FastApiIntegration()],
 )
 
-# #region agent log helper
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_id: str = "pre-fix") -> None:
-    """Append a single NDJSON debug log line; also log to stdout so Render logs show it."""
-    try:
-        log_path = PROJECT_ROOT / "debug-1f01f9.log"
-    except NameError:
-        log_path = Path("debug-1f01f9.log")
-    try:
-        payload = {
-            "sessionId": "1f01f9",
-            "id": f"log_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-        }
-        line = json.dumps(payload) + "\n"
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(line)
-        logger.info("[BOOKING_DEBUG] %s", line.strip())
-    except Exception:
-        pass
-# #endregion agent log
 
 # Verify API key is loaded
 api_key = os.getenv("OPENAI_API_KEY")
@@ -250,6 +244,13 @@ async def request_id_middleware(request: Request, call_next):
     response.headers["X-Request-ID"] = req_id
     return response
 
+
+@app.middleware("http")
+async def observability_webhook_timing(request: Request, call_next):
+    """When OBS_TRACE_WEBHOOKS=1, log /api/phone/* and /api/sms/* latency and status."""
+    return await webhook_timing_middleware(request, call_next)
+
+
 # In-memory rate limit for public webhooks (phone/SMS) — 120 req/min per IP
 _webhook_rate_limit: dict = {}  # ip -> list of timestamps
 _webhook_rate_limit_lock = asyncio.Lock()
@@ -269,6 +270,12 @@ async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
         # Prune older than 1 minute
         times[:] = [t for t in times if now - t < 60]
         if len(times) >= WEBHOOK_RATE_LIMIT_PER_MIN:
+            usage_warning(
+                "webhook_rate_limit",
+                ip=ip,
+                path=path,
+                limit_per_min=WEBHOOK_RATE_LIMIT_PER_MIN,
+            )
             return Response(content="Too Many Requests", status_code=429)
         times.append(now)
     return None
@@ -434,6 +441,7 @@ try:
         db_appointments_get_by_phone_for_sms,
         db_appointments_get_accepted_for_date,
         db_appointments_mark_reminder_sent,
+        db_appointments_in_date_range,
         db_ping,
     )
     _db_imported = True
@@ -487,6 +495,97 @@ def audit_log(
 appointments: List[dict] = []
 messages: List[dict] = []
 
+ALLOWED_BUSINESS_VERTICALS = frozenset({"salon_chair"})
+BUSINESS_VERTICAL_LABELS = {
+    "salon_chair": "Salon, barbershop, nails & similar (chair services)",
+}
+
+
+def _normalize_service_entries(raw) -> List[dict]:
+    """Migrate legacy string lists to structured service rows."""
+    if not raw:
+        return []
+    out: List[dict] = []
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        for s in raw:
+            sid = (s.get("id") or "").strip() or str(uuid.uuid4())
+            try:
+                price = float(s.get("price", 0))
+            except (TypeError, ValueError):
+                price = 0.0
+            try:
+                dm = int(s.get("duration_minutes", 30))
+            except (TypeError, ValueError):
+                dm = 30
+            out.append(
+                {
+                    "id": sid,
+                    "name": str(s.get("name") or "")[:200],
+                    "price": max(0.0, min(price, 999999.0)),
+                    "duration_minutes": max(5, min(dm, 480)),
+                }
+            )
+        return out[:100]
+    for line in raw if isinstance(raw, list) else []:
+        t = str(line).strip()
+        if t:
+            out.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": t[:200],
+                    "price": 0.0,
+                    "duration_minutes": 30,
+                }
+            )
+    return out[:100]
+
+
+def _normalize_special_entries(raw) -> List[dict]:
+    if not raw:
+        return []
+    out: List[dict] = []
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        for s in raw:
+            sid = (s.get("id") or "").strip() or str(uuid.uuid4())
+            out.append(
+                {
+                    "id": sid,
+                    "title": str(s.get("title") or "")[:200],
+                    "description": str(s.get("description") or "")[:2000],
+                    "valid_until": str(s.get("valid_until") or "")[:32],
+                }
+            )
+        return out[:80]
+    for line in raw if isinstance(raw, list) else []:
+        t = str(line).strip()
+        if t:
+            out.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "title": t[:200],
+                    "description": "",
+                    "valid_until": "",
+                }
+            )
+    return out[:80]
+
+
+def _normalize_rule_entries(raw) -> List[dict]:
+    if not raw:
+        return []
+    out: List[dict] = []
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        for s in raw:
+            sid = (s.get("id") or "").strip() or str(uuid.uuid4())
+            out.append({"id": sid, "rule_text": str(s.get("rule_text") or "")[:2000]})
+        return out[:100]
+    for line in raw if isinstance(raw, list) else []:
+        t = str(line).strip()
+        if t:
+            out.append({"id": str(uuid.uuid4()), "rule_text": t[:2000]})
+    return out[:100]
+
+
 def load_client_config(client_id: Optional[str] = None):
     """Load business config from clients/<client_id>/config.json. Uses request-scoped client_id if not passed."""
     cid = (client_id or get_db_client_id()).strip()
@@ -515,9 +614,9 @@ def load_client_config(client_id: Optional[str] = None):
             "address": data.get("address", ""),
             "departments": _departments,
             "menu_link": data.get("menu_link", ""),
-            "services": data.get("services", []),
-            "specials": data.get("specials", []),
-            "reservation_rules": data.get("reservation_rules", []),
+            "services": _normalize_service_entries(data.get("services", [])),
+            "specials": _normalize_special_entries(data.get("specials", [])),
+            "reservation_rules": _normalize_rule_entries(data.get("reservation_rules", [])),
             "staff": data.get("staff", []),
             "locations": data.get("locations", []),
             "greeting": data.get("greeting", ""),
@@ -562,6 +661,7 @@ _DEMO_BUSINESS_INFO = {
 def _minimal_business_info_from_tenant_dict(tenant: dict) -> dict:
     """Empty user-edited fields; Twilio line from tenant when no on-disk config (e.g. Render has no clients/)."""
     plan = tenant.get("plan") or "starter"
+    bv = (tenant.get("business_vertical") or "salon_chair").strip()
     return {
         "name": "",
         "hours": "",
@@ -582,6 +682,8 @@ def _minimal_business_info_from_tenant_dict(tenant: dict) -> dict:
         "speed": 1.0,
         "receptionist_name": "",
         "business_type": "",
+        "business_vertical": bv,
+        "business_vertical_label": BUSINESS_VERTICAL_LABELS.get(bv, bv),
     }
 
 
@@ -598,13 +700,20 @@ def _default_business_info_for_tenant() -> Optional[dict]:
         if not conn:
             return None
         cur = conn.cursor()
-        cur.execute("SELECT name, twilio_phone_number, plan FROM tenants WHERE client_id = %s", (cid,))
+        cur.execute(
+            "SELECT name, twilio_phone_number, plan, business_vertical FROM tenants WHERE client_id = %s",
+            (cid,),
+        )
         row = cur.fetchone()
         cur.close()
         if not row:
             return None
         return _minimal_business_info_from_tenant_dict(
-            {"twilio_phone_number": row[1] or "", "plan": row[2] or "starter"}
+            {
+                "twilio_phone_number": row[1] or "",
+                "plan": row[2] or "starter",
+                "business_vertical": row[3] if len(row) > 3 else "salon_chair",
+            }
         )
     except Exception:
         return None
@@ -621,8 +730,17 @@ def business_info_for_dashboard(tenant: Optional[dict]) -> dict:
             out = dict(cfg)
             if not (out.get("phone") or "").strip():
                 out["phone"] = (tenant.get("twilio_phone_number") or "").strip()
+            bv = (tenant.get("business_vertical") or "salon_chair").strip()
+            out["business_vertical"] = bv
+            out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
+            out["business_type_admin_locked"] = True
             return out
-    return _minimal_business_info_from_tenant_dict(tenant)
+    out = _minimal_business_info_from_tenant_dict(tenant)
+    bv = (tenant.get("business_vertical") or "salon_chair").strip()
+    out["business_vertical"] = bv
+    out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
+    out["business_type_admin_locked"] = bool(cid)
+    return out
 
 
 def _default_client_config_data(client_id: str, plan: str = "free") -> dict:
@@ -655,17 +773,28 @@ def get_business_info() -> dict:
     """Get business config for current request (multi-tenant) or env CLIENT_ID (single-tenant)."""
     cfg = load_client_config()
     if cfg:
-        if not cfg.get("phone") and USE_DB:
+        out = dict(cfg)
+        if not out.get("phone") and USE_DB:
             cid = get_db_client_id()
             if cid:
                 tenant = db_tenant_get_by_client_id(cid)
                 if tenant:
-                    cfg["phone"] = tenant.get("twilio_phone_number") or ""
-        return cfg
-    tenant_info = _default_business_info_for_tenant()
-    if tenant_info:
-        return tenant_info
-    return _DEMO_BUSINESS_INFO
+                    out["phone"] = tenant.get("twilio_phone_number") or ""
+    else:
+        tenant_info = _default_business_info_for_tenant()
+        if tenant_info:
+            out = dict(tenant_info)
+        else:
+            out = dict(_DEMO_BUSINESS_INFO)
+    if USE_DB:
+        cid = get_db_client_id()
+        if cid:
+            t = db_tenant_get_by_client_id(cid)
+            if t:
+                bv = (t.get("business_vertical") or "salon_chair").strip()
+                out["business_vertical"] = bv
+                out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
+    return out
 
 def get_tts_voice() -> str:
     """Voice for TTS (phone/SMS). From business config or default fable."""
@@ -720,6 +849,7 @@ class AppointmentRequest(BaseModel):
     time: str
     reason: str
     source: Optional[str] = "manual"  # "receptionist" | "manual"
+    staff_id: Optional[str] = None  # stylist UUID from Settings staff list
 
 class AppointmentUpdate(BaseModel):
     status: Optional[str] = None
@@ -729,6 +859,16 @@ class AppointmentUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+
+
+class AppointmentRejectBody(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class PreviewDeclineSmsBody(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=2000)
+    appointment_id: Optional[int] = None
+
 
 class MessageRequest(BaseModel):
     caller_name: str
@@ -872,6 +1012,13 @@ def require_active_subscription(tenant: Optional[dict] = Depends(require_tenant)
     """Dependency: after require_tenant, require that tenant can use the app (trial or paid or exempt)."""
     state = get_tenant_subscription_state(tenant)
     if not state.get("can_use_app"):
+        cid = (tenant or {}).get("client_id") if tenant else None
+        usage_warning(
+            "app_access_denied_subscription",
+            client_id=cid,
+            subscription_status=state.get("subscription_status"),
+            plan=state.get("plan"),
+        )
         raise HTTPException(
             status_code=403,
             detail={"code": "SUBSCRIPTION_REQUIRED", "message": "Subscription required. Your trial has ended. Please choose a plan to continue."},
@@ -934,32 +1081,52 @@ def send_sms(
     Records usage via db_usage_increment_sms when client_id is set.
     If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only)."""
     if not TWILIO_AVAILABLE or not twilio_client:
-        print("SMS skipped: Twilio not configured")
+        sms_info("outbound_skipped", reason="twilio_not_configured")
         return False
     from_num = (from_override or TWILIO_SMS_FROM or "").strip()
     if not from_num:
-        print(f"[SMS] skipped: from number missing (from_override={bool(from_override)} TWILIO_SMS_FROM={'set' if TWILIO_SMS_FROM else 'unset'})")
+        sms_info(
+            "outbound_skipped",
+            reason="from_number_missing",
+            from_override_set=bool(from_override),
+            twilio_sms_from_set=bool(TWILIO_SMS_FROM),
+        )
         return False
     e164 = _phone_to_e164(to_phone or "")
     if not e164:
-        print(f"[SMS] skipped: invalid or short phone to_phone={to_phone!r}")
+        sms_info("outbound_skipped", reason="invalid_recipient_phone")
         return False
     if USE_DB and not force:
         cid = get_db_client_id()
         if cid and cid != "default":
             if db_sms_opt_out_is_blocked(e164, cid):
                 to_masked = mask_phone_e164(e164)
-                print(f"[SMS] skipped: recipient opted out (client={cid[:12]}...) to={to_masked}")
+                sms_info(
+                    "outbound_skipped",
+                    reason="recipient_opted_out",
+                    client_id_prefix=cid[:12],
+                    to_masked=to_masked,
+                )
                 return False
-    # Console debug: from, to (masked), body length
     to_masked = mask_phone_e164(e164)
-    print(f"[SMS] send_sms from={from_num} to={to_masked} body_len={len(body)}")
+    sms_debug(
+        "outbound_attempt",
+        from_num=from_num,
+        to_masked=to_masked,
+        body_len=len(body or ""),
+        force=force,
+    )
     last_err = None
     for attempt in range(3):
         try:
             msg = twilio_client.messages.create(from_=from_num, to=e164, body=body)
             sid = getattr(msg, "sid", None) or getattr(msg, "id", None)
-            print(f"[SMS] Twilio create ok sid={sid} (check Twilio Console > Messaging > Logs for delivery status)")
+            sms_info(
+                "outbound_twilio_ok",
+                message_sid=sid,
+                to_masked=to_masked,
+                body_len=len(body or ""),
+            )
             # Record SMS usage for billing (graceful degradation)
             if USE_DB:
                 cid = get_db_client_id()
@@ -972,11 +1139,16 @@ def send_sms(
             return True
         except Exception as e:
             last_err = e
-            print(f"[SMS] Twilio attempt {attempt + 1} failed: {e}")
+            logger.warning(
+                "[SMS] outbound_twilio_retry attempt=%s error=%s to_masked=%s",
+                attempt + 1,
+                e,
+                to_masked,
+            )
             if attempt < 2:
                 import time
                 time.sleep(2 ** attempt)
-    print(f"[SMS] send_sms FAILED after retries: {last_err}")
+    sms_info("outbound_failed_after_retries", error=str(last_err), to_masked=to_masked)
     return False
 
 
@@ -1221,23 +1393,30 @@ def _save_booked_slots(slots: List[dict]) -> None:
     except Exception as e:
         print(f"Failed to save booked_slots: {e}")
 
+def _staff_slot_key(sid: Optional[str]) -> str:
+    s = (sid or "").strip()
+    return s if s else "__unassigned__"
+
+
 def _get_all_booked_slots_merged() -> List[dict]:
     """Merge booked_slots table with appointments (accepted/pending) so AI sees all taken times."""
     slots = _load_booked_slots()
     if USE_DB:
         apts = db_appointments_get_all()
-        seen = {(s.get("date"), s.get("time")) for s in slots}
+        seen = {(s.get("date"), s.get("time"), _staff_slot_key(s.get("staff_id"))) for s in slots}
         for a in apts:
             if not a.get("date") or not a.get("time"):
                 continue
             if a.get("status") in ("accepted", "confirmed", "completed", "pending", "pending_review", "pending_customer"):
-                k = (a["date"], a["time"])
+                sk = _staff_slot_key(a.get("staff_id"))
+                k = (a["date"], a["time"], sk)
                 if k not in seen:
                     slots.append({
                         "date": a["date"],
                         "time": a["time"],
                         "appointment_id": a.get("id", 0),
                         "duration_minutes": DEFAULT_SLOT_DURATION_MINUTES,
+                        "staff_id": a.get("staff_id"),
                     })
                     seen.add(k)
     return slots
@@ -1304,66 +1483,53 @@ def _slot_overlaps(
     return a_start < b_end and b_start < a_end
 
 def is_slot_available(
-    date: str, time: str, duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES
+    date: str,
+    time: str,
+    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES,
+    staff_id: Optional[str] = None,
 ) -> bool:
-    """True if no overlapping booking for this date+time."""
-    slots = get_booked_slots(date)
-    # #region agent log
-    try:
-        _agent_log(
-            hypothesis_id="H4",
-            location="backend/main.py:is_slot_available",
-            message="Checking slot availability",
-            data={
-                "date": date,
-                "time": time,
-                "duration_minutes": duration_minutes,
-                "slots": [{"date": s.get("date"), "time": s.get("time"), "duration": s.get("duration_minutes")} for s in slots],
-            },
-        )
-    except Exception:
-        pass
-    # #endregion agent log
+    """True if no overlapping booking for this date+time and staff column."""
+    want = _staff_slot_key(staff_id)
+    slots = [s for s in _get_all_booked_slots_merged() if s.get("date") == date and _staff_slot_key(s.get("staff_id")) == want]
     for s in slots:
         d = s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES
         if _slot_overlaps(time, duration_minutes, s.get("time", ""), d):
-            print(f"[SLOT] is_slot_available date={date} time={time} -> TAKEN (overlaps {s.get('date')} {s.get('time')})")
+            system_debug(
+                "slot_unavailable",
+                date=date,
+                time=time,
+                staff_key=want,
+                overlaps_time=s.get("time"),
+            )
             return False
-    print(f"[SLOT] is_slot_available date={date} time={time} -> AVAILABLE (conflicts={len(slots)})")
+    system_debug("slot_available", date=date, time=time, staff_key=want)
     return True
 
 def reserve_slot(
-    date: str, time: str, appointment_id: int,
-    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES
+    date: str,
+    time: str,
+    appointment_id: int,
+    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES,
+    staff_id: Optional[str] = None,
 ) -> None:
     """Record a slot as booked when creating an appointment."""
     slots = _load_booked_slots()
-    # #region agent log
-    try:
-        _agent_log(
-            hypothesis_id="H4",
-            location="backend/main.py:reserve_slot",
-            message="Reserving slot",
-            data={
-                "date": date,
-                "time": time,
-                "duration_minutes": duration_minutes,
-                "appointment_id": appointment_id,
-                "existing_slots_count": len(slots),
-            },
-        )
-    except Exception:
-        pass
-    # #endregion agent log
     slots.append({
         "date": date,
         "time": time,
         "appointment_id": appointment_id,
         "duration_minutes": duration_minutes,
+        "staff_id": staff_id,
     })
     _save_booked_slots(slots)
     _invalidate_booked_slots_cache()
-    print(f"[SLOT] reserve_slot date={date} time={time} appointment_id={appointment_id}")
+    system_debug(
+        "slot_reserved",
+        date=date,
+        time=time,
+        appointment_id=appointment_id,
+        staff_id=staff_id,
+    )
 
 def release_slot(appointment_id: int) -> None:
     """Remove slot when appointment is rejected or cancelled."""
@@ -1371,7 +1537,7 @@ def release_slot(appointment_id: int) -> None:
     slots = [s for s in slots if s.get("appointment_id") != appointment_id]
     _save_booked_slots(slots)
     _invalidate_booked_slots_cache()
-    print(f"[SLOT] release_slot appointment_id={appointment_id}")
+    system_debug("slot_released", appointment_id=appointment_id)
 
 # Cache for booked slots prompt (avoids repeated DB hits during rapid turns)
 _booked_slots_cache: dict = {}  # {client_key: (text, expires_at)}
@@ -1390,12 +1556,17 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
     if not skip_cache and cache_key in _booked_slots_cache:
         text, expires = _booked_slots_cache[cache_key]
         if expires > now:
-            print(f"[SLOT] prompt used cache (client={client_key}, slots_text_len={len(text)})")
+            system_debug("booked_slots_prompt_cache_hit", client_key=client_key, slots_text_len=len(text))
             return text
         del _booked_slots_cache[cache_key]
     # Single merge + group by date (was: 90x get_booked_slots = 90x DB fetches)
     all_slots = _get_all_booked_slots_merged()
-    print(f"[SLOT] prompt built fresh (client={client_key}, skip_cache={skip_cache}, total_slots={len(all_slots)})")
+    system_debug(
+        "booked_slots_prompt_built",
+        client_key=client_key,
+        skip_cache=skip_cache,
+        total_slots=len(all_slots),
+    )
     by_date: dict = {}
     for s in all_slots:
         dt = s.get("date")
@@ -1432,22 +1603,6 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
         text += " " + " ".join(suggest_parts)
     expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
     _booked_slots_cache[cache_key] = (text, expires_at)
-    # #region agent log
-    try:
-        _agent_log(
-            hypothesis_id="H4",
-            location="backend/main.py:get_booked_slots_prompt_text",
-            message="Built booked slots prompt text",
-            data={
-                "client_key": client_key,
-                "days_ahead": days_ahead,
-                "all_slots_count": len(all_slots),
-                "text": text,
-            },
-        )
-    except Exception:
-        pass
-    # #endregion agent log
     return text
 
 def _suggests_booking(text: str) -> bool:
@@ -1458,7 +1613,7 @@ def _suggests_booking(text: str) -> bool:
     return any(k in t for k in ("book", "appointment", "reservation", "reserve", "schedule", "available", "slot", "time for"))
 
 def parse_booking(ai_text: str) -> Optional[dict]:
-    """If AI responded with BOOKING: name|phone|email|date|time|reason, return dict; else None."""
+    """If AI responded with BOOKING: name|phone|email|date|time|reason|staff_optional, return dict; else None."""
     if not ai_text or "BOOKING:" not in ai_text:
         return None
     line = ai_text.strip()
@@ -1475,9 +1630,37 @@ def parse_booking(ai_text: str) -> Optional[dict]:
                     "date": vals[3] if len(vals) > 3 else "",
                     "time": vals[4] if len(vals) > 4 else "",
                     "reason": vals[5] if len(vals) > 5 else "",
+                    "staff": vals[6] if len(vals) > 6 else "",
                 }
             break
     return None
+
+
+def resolve_staff_id_from_booking_fragment(fragment: Optional[str]) -> Optional[str]:
+    frag = (fragment or "").strip()
+    if not frag:
+        return None
+    staff = get_business_info().get("staff") or []
+    for s in staff:
+        sid = (s.get("id") or "").strip()
+        if sid and frag == sid:
+            return sid
+        name = (s.get("name") or "").strip()
+        if name and frag.lower() == name.lower():
+            return sid if sid else None
+    return None
+
+
+def _optional_staff_id_validated(raw: Optional[str]) -> Optional[str]:
+    """If staff_id is set, ensure it matches a row in this tenant's staff list."""
+    sid = (raw or "").strip()
+    if not sid:
+        return None
+    for s in get_business_info().get("staff") or []:
+        if (s.get("id") or "").strip() == sid:
+            return sid
+    raise HTTPException(status_code=400, detail="Invalid staff_id for this business.")
+
 
 def _create_appointment_from_booking(booking: dict, client_id_override: Optional[str] = None) -> Optional[dict]:
     """Create appointment from parsed BOOKING; check slot; return appointment_data or None (slot taken).
@@ -1488,31 +1671,15 @@ def _create_appointment_from_booking(booking: dict, client_id_override: Optional
     name = (booking.get("name") or "").strip()
     if not name or not date or not time:
         return None
-    # #region agent log
-    try:
-        _agent_log(
-            hypothesis_id="H4",
-            location="backend/main.py:_create_appointment_from_booking",
-            message="Attempting to create appointment from booking",
-            data={"booking": booking},
-        )
-    except Exception:
-        pass
-    # #endregion agent log
-    if not is_slot_available(date, time):
+    staff_key = resolve_staff_id_from_booking_fragment(booking.get("staff"))
+    if not is_slot_available(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key):
         _invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
-        print(f"[BOOKING] _create_appointment_from_booking FAILED slot taken name={name!r} date={date} time={time}")
-        # #region agent log
-        try:
-            _agent_log(
-                hypothesis_id="H4",
-                location="backend/main.py:_create_appointment_from_booking",
-                message="Slot NOT available when creating appointment",
-                data={"booking": booking},
-            )
-        except Exception:
-            pass
-        # #endregion agent log
+        system_info(
+            "booking_create_failed_slot_taken",
+            name=name,
+            date=date,
+            time=time,
+        )
         return None
     appointment_data = {
         "name": name,
@@ -1523,6 +1690,7 @@ def _create_appointment_from_booking(booking: dict, client_id_override: Optional
         "reason": (booking.get("reason") or "").strip() or "—",
         "source": "receptionist",
         "status": "pending_customer",
+        "staff_id": staff_key,
     }
     if client_id_override:
         appointment_data["client_id"] = client_id_override
@@ -1534,10 +1702,18 @@ def _create_appointment_from_booking(booking: dict, client_id_override: Optional
         appointment_data["id"] = apt_id
         appointment_data["created_at"] = datetime.now().isoformat()
         appointments.append(appointment_data)
-    reserve_slot(date, time, apt_id)
+    reserve_slot(date, time, apt_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
     appointment_data["id"] = apt_id
     appointment_data.setdefault("created_at", datetime.now().isoformat())
-    print(f"[BOOKING] _create_appointment_from_booking OK apt_id={apt_id} client_id={appointment_data.get('client_id') or '(context)'} name={name!r} date={date} time={time}")
+    system_info(
+        "booking_created_pending_customer",
+        apt_id=apt_id,
+        client_id=appointment_data.get("client_id") or "(request_context)",
+        name=name,
+        date=date,
+        time=time,
+        staff_id=staff_key,
+    )
     return appointment_data
 
 def uses_non_latin_script(language_name: str) -> bool:
@@ -1611,8 +1787,12 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
     try:
         # Keep tenant context so SMS and DB use correct client_id (async runs outside request)
         set_request_client_id(call_data.get("client_id") or get_db_client_id())
-        print(f"[CALL] generate_response_async call_sid={call_sid[:16]}... from={call_data.get('from_number','')[:10]}... client_id={call_data.get('client_id','')}")
-        print(f"🤖 Generating response for call {call_sid}...")
+        voice_info(
+            "generate_response_start",
+            call_sid=call_sid,
+            from_number=call_data.get("from_number") or None,
+            client_id=call_data.get("client_id") or None,
+        )
         
         # Always include booked slots (skip cache so prompt and is_slot_available see same data—avoids "available" then "booked")
         messages = [
@@ -1629,47 +1809,28 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         )
         
         ai_text = ai_response.choices[0].message.content
-        print(f"✅ GPT response generated: {ai_text[:50]}...")
-        # #region agent log
-        try:
-            _agent_log("H1", "backend/main.py:generate_response_async", "Before parse_booking", {
-                "has_booking_in_text": "BOOKING:" in (ai_text or ""),
-                "any_line_starts_with_booking": any((p or "").strip().upper().startswith("BOOKING:") for p in (ai_text or "").split("\n")),
-            }, "pre-fix")
-        except Exception:
-            pass
-        # #endregion agent log
+        voice_debug("gpt_reply", call_sid=call_sid, reply_preview=(ai_text or "")[:80])
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
-        # #region agent log
-        try:
-            _agent_log("H1", "backend/main.py:generate_response_async", "After parse_booking", {
-                "parse_booking_returned_none": booking is None,
-            }, "pre-fix")
-            # So Render logs show it too (no log file access there)
-            print(f"[DEBUG_SMS] has_booking={'BOOKING:' in (ai_text or '')} line_starts_booking={any((p or '').strip().upper().startswith('BOOKING:') for p in (ai_text or '').split(chr(10)))} parse_none={booking is None}")
-        except Exception:
-            pass
-        # #endregion agent log
         if booking:
             try:
                 from_num = call_data.get("from_number") or ""
                 to_num = call_data.get("to_number") or ""
                 cid_raw = call_data.get("client_id") or ""
-                print(f"[BOOKING] parsed name={booking.get('name')!r} date={booking.get('date')} time={booking.get('time')} from_number={from_num[:10] if from_num else 'None'}... to_number={to_num[:10] if to_num else 'None'}... client_id={cid_raw or 'None'}")
+                system_info(
+                    "voice_booking_line_parsed",
+                    name=booking.get("name"),
+                    date=booking.get("date"),
+                    time=booking.get("time"),
+                    from_number=from_num or None,
+                    to_number=to_num or None,
+                    client_id=cid_raw or None,
+                )
                 # Use caller's phone from Twilio when available (don't require asking)
                 if from_num:
                     booking["phone"] = (booking.get("phone") or "").strip() or from_num
                 cid = (call_data.get("client_id") or "").strip() or None
                 apt = _create_appointment_from_booking(booking, client_id_override=cid)
-                # #region agent log
-                try:
-                    _agent_log("H3", "backend/main.py:generate_response_async", "After _create_appointment_from_booking", {
-                        "apt_is_none": apt is None,
-                    }, "pre-fix")
-                except Exception:
-                    pass
-                # #endregion agent log
                 if apt:
                     call_data["appointment_created"] = True
                     ai_text = f"You're all set! We have you down for {apt['date']} at {_hhmm_to_ampm(apt.get('time', '') or '')}. The store will confirm shortly."
@@ -1701,37 +1862,33 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         tenant = db_tenant_get_by_client_id(cid)
                         if tenant:
                             from_number = (tenant.get("twilio_phone_number") or "").strip()
-                            print(f"[SMS] confirmation from_override was empty; used tenant twilio_phone_number for client_id={cid}")
+                            sms_info("confirmation_sms_from_tenant_lookup", client_id=cid)
                         else:
-                            print(f"[SMS] confirmation no from_override and tenant not found for client_id={cid}")
-                    # #region agent log
-                    try:
-                        _agent_log("H2", "backend/main.py:generate_response_async", "SMS branch", {
-                            "to_number_empty": not bool(to_number),
-                            "to_number_masked": f"{to_number[:6]}...{to_number[-2:]}" if len(to_number) >= 8 else "(short)",
-                        }, "pre-fix")
-                    except Exception:
-                        pass
-                    # #endregion agent log
+                            sms_info("confirmation_sms_tenant_missing_for_from_override", client_id=cid)
                     if to_number:
-                        print(f"[SMS] confirmation to={to_number[:12]}... from_override={from_number[:12] if from_number else 'None'}... client_id={cid}")
                         ok = send_sms(to_number, thanks_msg, from_override=from_number or None)
-                        # #region agent log
-                        try:
-                            _agent_log("H4", "backend/main.py:generate_response_async", "After send_sms", {"sms_ok": ok}, "pre-fix")
-                        except Exception:
-                            pass
-                        # #endregion agent log
-                        print(f"📱 Confirmation SMS to {to_number}: {'sent' if ok else 'FAILED'}")
+                        sms_info(
+                            "post_booking_confirmation_sms",
+                            client_id=cid,
+                            to_number=to_number,
+                            from_number=from_number,
+                            success=ok,
+                        )
                     else:
-                        print("📱 Confirmation SMS skipped: no caller phone (to_number empty)")
+                        sms_info("post_booking_confirmation_skipped", reason="no_caller_phone", client_id=cid)
                 else:
                     # Failed: either slot taken or missing/invalid data (name, date)
                     name_ok = bool((booking.get("name") or "").strip())
                     date_ok = bool((booking.get("date") or "").strip())
                     time_ok = bool((booking.get("time") or "").strip())
                     reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
-                    print(f"[BOOKING] create failed reason={reason} name_ok={name_ok} date_ok={date_ok} time_ok={time_ok}")
+                    system_info(
+                        "voice_booking_not_created",
+                        reason=reason,
+                        name_ok=name_ok,
+                        date_ok=date_ok,
+                        time_ok=time_ok,
+                    )
                     if not name_ok:
                         ai_text = "I'd love to book that for you—what's your name?"
                     elif not date_ok or not time_ok:
@@ -1739,9 +1896,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     else:
                         ai_text = "That time slot just got booked. Would you like to try another time or another day?"
             except Exception as e:
-                print(f"[BOOKING] CRASH during booking/SMS: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e)
                 ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
         
         # Add AI response to conversation
@@ -2127,6 +2282,7 @@ class AdminCreateTenantRequest(BaseModel):
     twilio_phone_number: str
     email: str
     plan: Optional[str] = "starter"
+    business_vertical: str = "salon_chair"
 
 @app.get("/api/admin/session")
 async def admin_session(request: Request):
@@ -2153,8 +2309,11 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
     """Create tenant and send Clerk invite. Requires admin auth."""
     if not USE_DB:
         raise HTTPException(status_code=503, detail="Database required for multi-tenant")
+    bv = (req.business_vertical or "salon_chair").strip()
+    if bv not in ALLOWED_BUSINESS_VERTICALS:
+        raise HTTPException(status_code=400, detail="Invalid business_vertical")
     # New tenants get 7-day trial (plan=free, subscription_status=trialing); no paid plan at creation
-    tenant = db_tenant_create(req.client_id, req.name, req.twilio_phone_number, "free")
+    tenant = db_tenant_create(req.client_id, req.name, req.twilio_phone_number, "free", bv)
     if not tenant:
         raise HTTPException(status_code=409, detail="Tenant already exists or create failed")
     # Create config with only admin-provided info; client fills the rest in Settings
@@ -2421,6 +2580,202 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+def polish_owner_decline_sms(raw_reason: str, business_name: str, apt: dict) -> str:
+    """Rewrite owner decline note into a warm customer SMS (OpenAI). Fallback: truncate raw."""
+    text = (raw_reason or "").strip()
+    if not text:
+        text = "We could not accommodate that time."
+    try:
+        _ensure_openai_client()
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You write brief SMS messages for a salon, barbershop, or nail studio. "
+                        "Rewrite the owner's decline reason into ONE warm, natural message. "
+                        "Max 480 characters. Do not invent discounts, guarantees, or policies. "
+                        "If appropriate, invite alternative dates/times. Match the tone of the owner's note."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Business name: {business_name}\n"
+                        f"Appointment requested: {apt.get('date')} at {apt.get('time')}\n"
+                        f"Owner note: {text[:1800]}"
+                    ),
+                },
+            ],
+            max_tokens=220,
+            temperature=0.45,
+        )
+        out = (r.choices[0].message.content or "").strip()
+        return out[:1580] if out else text[:1580]
+    except Exception as e:
+        logger.warning("polish_owner_decline_sms_openai_failed: %s", e)
+        return text[:1580]
+
+
+def _staff_pending_review_sms_enabled() -> bool:
+    return (os.getenv("STAFF_PENDING_REVIEW_SMS") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _notify_staff_pending_review(apt: dict, tenant: dict, twilio_from_number: str) -> None:
+    """Optional cost-controlled SMS to each staff phone when a customer submits the booking for shop approval."""
+    if not _staff_pending_review_sms_enabled():
+        return
+    apt_id = apt.get("id")
+    if not apt_id:
+        return
+    cfg = load_client_config(tenant["client_id"]) or {}
+    staff_list = cfg.get("staff") or []
+    n_staff_phones = len([s for s in staff_list if (s.get("phone") or "").strip()])
+    sms_info(
+        "staff_pending_review_notify_start",
+        apt_id=apt_id,
+        client_id=tenant["client_id"],
+        staff_sms_targets=n_staff_phones,
+    )
+    nm = (apt.get("name") or "").strip() or "Customer"
+    ds = (apt.get("date") or "").strip()
+    tm = _hhmm_to_ampm((apt.get("time") or "").strip())
+    msg = (
+        f"New booking request #{apt_id}: {nm}, {ds} at {tm}. "
+        f"Reply YES {apt_id} to approve or NO {apt_id} plus a short reason to decline."
+    )
+    for s in staff_list:
+        phone = (s.get("phone") or "").strip()
+        if not phone:
+            continue
+        try:
+            send_sms(phone, msg[:1580], from_override=twilio_from_number)
+        except Exception as e:
+            logger.warning("[SMS] staff_pending_review_notify_failed apt_id=%s err=%s", apt_id, e)
+
+
+def _maybe_handle_staff_sms_approval(from_number: str, body: str, tenant: dict, to_number: str) -> bool:
+    """
+    If From matches a staff member's phone, parse APPROVE/YES or DECLINE/NO <apt_id> [reason].
+    Returns True if this webhook turn was consumed as a staff command.
+    """
+    norm_from = _phone_to_e164(from_number)
+    if not norm_from:
+        return False
+    cfg = load_client_config(tenant["client_id"]) or {}
+    staff_list = cfg.get("staff") or []
+    is_staff = False
+    for s in staff_list:
+        sp = _phone_to_e164(s.get("phone") or "")
+        if sp and sp == norm_from:
+            is_staff = True
+            break
+    if not is_staff:
+        return False
+    raw = (body or "").strip()
+    tokens = raw.split()
+    if len(tokens) < 2:
+        sms_debug("staff_command_incomplete", from_number=from_number, body_len=len(raw))
+        return False
+    verb = tokens[0].upper()
+    try:
+        apt_id = int(tokens[1])
+    except ValueError:
+        sms_info("staff_command_invalid_id_token", from_number=from_number, token=str(tokens[1])[:20])
+        return False
+    apt = db_appointments_get_by_id(apt_id) if USE_DB else None
+    if not apt:
+        sms_info(
+            "staff_command_unknown_appointment",
+            apt_id=apt_id,
+            client_id=tenant["client_id"],
+            from_number=from_number,
+        )
+        send_sms(
+            from_number,
+            "We could not find that booking reference.",
+            from_override=to_number,
+            force=True,
+        )
+        return True
+    if str(apt.get("status") or "") != "pending_review":
+        sms_info(
+            "staff_command_wrong_status",
+            apt_id=apt_id,
+            status=apt.get("status"),
+            client_id=tenant["client_id"],
+            from_number=from_number,
+        )
+        send_sms(
+            from_number,
+            "That booking is not awaiting approval.",
+            from_override=to_number,
+            force=True,
+        )
+        return True
+    business_name = get_business_info().get("name", "your shop")
+    if verb in ("YES", "APPROVE", "OK", "ACCEPT"):
+        if USE_DB:
+            db_appointments_update(apt_id, status="accepted")
+        audit_log(
+            "staff_sms",
+            "appointment_accepted",
+            resource_type="appointment",
+            resource_id=str(apt_id),
+            client_id=tenant["client_id"],
+            details={"via": "sms"},
+        )
+        msg = (
+            f"Your appointment at {business_name} is confirmed for {apt.get('date')} at "
+            f"{_hhmm_to_ampm(apt.get('time') or '')}. Reply if you need to change."
+        )
+        send_sms(apt.get("phone") or "", msg, from_override=to_number)
+        send_sms(
+            from_number,
+            f"Booking {apt_id} approved. Customer notified.",
+            from_override=to_number,
+            force=True,
+        )
+        sms_info(
+            "staff_sms_approved",
+            apt_id=apt_id,
+            client_id=tenant["client_id"],
+            from_number=from_number,
+        )
+        return True
+    if verb in ("NO", "DECLINE", "REJECT"):
+        reason = " ".join(tokens[2:]).strip() or "We could not accommodate that time."
+        if USE_DB:
+            db_appointments_update(apt_id, status="rejected", owner_decline_reason=reason[:2000])
+        release_slot(apt_id)
+        audit_log(
+            "staff_sms",
+            "appointment_rejected",
+            resource_type="appointment",
+            resource_id=str(apt_id),
+            client_id=tenant["client_id"],
+            details={"via": "sms"},
+        )
+        polished = polish_owner_decline_sms(reason, business_name, apt)
+        send_sms(apt.get("phone") or "", polished, from_override=to_number)
+        send_sms(
+            from_number,
+            "Decline sent to the customer.",
+            from_override=to_number,
+            force=True,
+        )
+        sms_info(
+            "staff_sms_declined",
+            apt_id=apt_id,
+            client_id=tenant["client_id"],
+            from_number=from_number,
+        )
+        return True
+    return False
+
+
 @app.post("/api/appointments")
 async def create_appointment(appointment: AppointmentRequest, _: None = Depends(require_active_subscription)):
     try:
@@ -2430,8 +2785,9 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
         status = "pending_review" if source == "receptionist" else "pending"
         date = (appointment.date or "").strip()
         time = (appointment.time or "").strip()
+        staff_key = _optional_staff_id_validated(appointment.staff_id)
         if date and time:
-            if not is_slot_available(date, time):
+            if not is_slot_available(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key):
                 raise HTTPException(status_code=409, detail="That time slot is already booked.")
         appointment_data = {
             "name": appointment.name,
@@ -2442,6 +2798,7 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
             "reason": appointment.reason or "",
             "source": source,
             "status": status,
+            "staff_id": staff_key,
         }
         if USE_DB:
             row = db_appointments_insert(appointment_data)
@@ -2452,7 +2809,7 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
             appointment_data["created_at"] = datetime.now().isoformat()
             appointments.append(appointment_data)
         if date and time:
-            reserve_slot(date, time, appointment_id)
+            reserve_slot(date, time, appointment_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
         appointment_data["id"] = appointment_id
         appointment_data.setdefault("created_at", datetime.now().isoformat())
         return {"success": True, "appointment": appointment_data}
@@ -2468,6 +2825,21 @@ async def get_appointments(_: None = Depends(require_active_subscription)):
         a.setdefault("source", "manual")
         a.setdefault("status", "pending")
     return {"appointments": lst}
+
+
+@app.get("/api/appointments/calendar")
+async def appointments_calendar(
+    date_from: str,
+    date_to: str,
+    staff_id: Optional[str] = None,
+    _: None = Depends(require_active_subscription),
+):
+    """Return appointments for calendar grid (optionally filtered by staff UUID)."""
+    if not USE_DB:
+        return {"events": []}
+    events = db_appointments_in_date_range(date_from, date_to, staff_id)
+    return {"events": events}
+
 
 @app.patch("/api/appointments/{appointment_id}")
 async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: None = Depends(require_active_subscription)):
@@ -2497,6 +2869,8 @@ async def accept_appointment(appointment_id: int, request: Request, _: None = De
     apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
     if not apt:
         raise HTTPException(status_code=404, detail="Appointment not found")
+    if str(apt.get("status") or "") != "pending_review":
+        raise HTTPException(status_code=400, detail="Appointment is not awaiting approval")
     if USE_DB:
         apt = db_appointments_update(appointment_id, status="accepted") or apt
     else:
@@ -2504,28 +2878,59 @@ async def accept_appointment(appointment_id: int, request: Request, _: None = De
     audit_log("user", "appointment_accepted", resource_type="appointment", resource_id=str(appointment_id), details={"date": apt.get("date"), "time": apt.get("time")}, request=request)
     business_name = get_business_info().get("name", "us")
     date = apt.get("date", "")
-    time = apt.get("time", "")
-    msg = f"Your appointment at {business_name} is confirmed for {date} at {time}. Reply if you need to change."
+    time_ampm = _hhmm_to_ampm(apt.get("time") or "")
+    msg = f"Your appointment at {business_name} is confirmed for {date} at {time_ampm}. Reply if you need to change."
     send_sms(apt.get("phone") or "", msg, from_override=_tenant_sms_from_number())
     return {"success": True, "appointment": apt}
 
+
 @app.post("/api/appointments/{appointment_id}/reject")
-async def reject_appointment(appointment_id: int, request: Request, _: None = Depends(require_active_subscription)):
-    """Store rejected (time not available): release slot and send SMS asking for alternative times."""
+async def reject_appointment(
+    appointment_id: int,
+    body: AppointmentRejectBody,
+    request: Request,
+    _: None = Depends(require_active_subscription),
+):
+    """Reject request with owner-provided reason; AI-polished SMS to customer."""
     apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
     if not apt:
         raise HTTPException(status_code=404, detail="Appointment not found")
+    if str(apt.get("status") or "") != "pending_review":
+        raise HTTPException(status_code=400, detail="Appointment is not awaiting approval")
+    reason_clean = body.reason.strip()
     if USE_DB:
-        apt = db_appointments_update(appointment_id, status="rejected") or apt
+        apt = db_appointments_update(
+            appointment_id, status="rejected", owner_decline_reason=reason_clean
+        ) or apt
     else:
         apt["status"] = "rejected"
-    audit_log("user", "appointment_rejected", resource_type="appointment", resource_id=str(appointment_id), details={"date": apt.get("date"), "time": apt.get("time")}, request=request)
+    audit_log(
+        "user",
+        "appointment_rejected",
+        resource_type="appointment",
+        resource_id=str(appointment_id),
+        details={"date": apt.get("date"), "time": apt.get("time")},
+        request=request,
+    )
     release_slot(appointment_id)
-    date = apt.get("date", "")
-    time = apt.get("time", "")
-    msg = f"Sorry, {time} on {date} isn't available. Please reply with 2-3 alternative dates and times that work for you."
+    business_name = get_business_info().get("name", "us")
+    msg = polish_owner_decline_sms(reason_clean, business_name, apt)
     send_sms(apt.get("phone") or "", msg, from_override=_tenant_sms_from_number())
     return {"success": True, "appointment": apt}
+
+
+@app.post("/api/appointments/preview-decline-sms")
+async def preview_decline_sms(body: PreviewDeclineSmsBody, _: None = Depends(require_active_subscription)):
+    """Return AI-polished decline text without sending SMS (for owner review before reject)."""
+    apt: dict = {}
+    if body.appointment_id is not None and USE_DB:
+        apt = db_appointments_get_by_id(body.appointment_id) or {}
+        if not apt:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+    business_name = get_business_info().get("name", "us")
+    polished = polish_owner_decline_sms(body.reason.strip(), business_name, apt if apt else {"date": "", "time": ""})
+    return {"polished_message": polished}
+
 
 @app.post("/api/messages")
 async def create_message(message: MessageRequest, _: None = Depends(require_active_subscription)):
@@ -2921,9 +3326,9 @@ class BusinessInfoUpdate(BaseModel):
     email: Optional[str] = None
     address: Optional[str] = None
     departments: Optional[List[str]] = None
-    services: Optional[List[str]] = None
-    specials: Optional[List[str]] = None
-    reservation_rules: Optional[List[str]] = None
+    services: Optional[List[Any]] = None
+    specials: Optional[List[Any]] = None
+    reservation_rules: Optional[List[Any]] = None
     menu_link: Optional[str] = None
     greeting: Optional[str] = None
     voice: Optional[str] = None
@@ -2970,11 +3375,11 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     if update.departments is not None:
         data["departments"] = update.departments
     if update.services is not None:
-        data["services"] = update.services
+        data["services"] = _normalize_service_entries(update.services)
     if update.specials is not None:
-        data["specials"] = update.specials
+        data["specials"] = _normalize_special_entries(update.specials)
     if update.reservation_rules is not None:
-        data["reservation_rules"] = update.reservation_rules
+        data["reservation_rules"] = _normalize_rule_entries(update.reservation_rules)
     if update.menu_link is not None:
         data["menu_link"] = update.menu_link
     if update.greeting is not None:
@@ -2988,7 +3393,8 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     if update.receptionist_name is not None:
         data["receptionist_name"] = update.receptionist_name
     if update.business_type is not None:
-        data["business_type"] = update.business_type
+        if not (USE_DB and tid and tid.get("business_vertical")):
+            data["business_type"] = update.business_type
     if update.staff is not None:
         tenant_limits = db_tenant_get_by_client_id(cid)
         if tenant_limits and get_plan_limits:
@@ -3428,23 +3834,42 @@ async def get_got_it_audio(request: Request):
 async def handle_incoming_sms(request: Request):
     """Twilio webhook for incoming SMS. AI-powered mobile receptionist replies like a real person."""
     if not TWILIO_AVAILABLE:
+        sms_debug("inbound_skipped", reason="twilio_not_available")
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
     if not USE_DB:
+        sms_debug("inbound_skipped", reason="database_not_enabled")
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
     try:
         form_data = await request.form()
         form_dict = dict(form_data)
         if not _validate_twilio_webhook(request, form_dict):
+            auth_warning(
+                "sms_webhook_invalid_signature",
+                path=request.url.path,
+                request_id=getattr(request.state, "request_id", None),
+            )
             return Response(content="", status_code=403, media_type="application/xml")
         from_number = form_data.get("From", "").strip()
         to_number = form_data.get("To", "").strip()
         body = (form_data.get("Body", "") or "").strip()
+        msg_sid = (form_data.get("MessageSid") or form_data.get("SmsMessageSid") or "").strip()
         if not from_number or not to_number or not body:
+            sms_info("inbound_skipped", reason="missing_fields", message_sid=msg_sid or None)
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         tenant = db_tenant_get_by_phone(to_number)
         if not tenant:
+            sms_info("inbound_skipped", reason="unknown_to_number", to_number=to_number, message_sid=msg_sid or None)
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         set_request_client_id(tenant["client_id"])
+        sms_info(
+            "inbound_received",
+            client_id=tenant["client_id"],
+            from_number=from_number,
+            to_number=to_number,
+            body_len=len(body),
+            message_sid=msg_sid or None,
+            request_id=getattr(request.state, "request_id", None),
+        )
         kw = _sms_compliance_keyword(body)
         if kw:
             cid = tenant["client_id"]
@@ -3473,7 +3898,13 @@ async def handle_incoming_sms(request: Request):
                 )
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         if USE_DB and db_sms_opt_out_is_blocked(from_number, tenant["client_id"]):
-            print(f"[SMS] inbound ignored (recipient opted out) from={from_number[:8]}...")
+            sms_info(
+                "inbound_blocked_opt_out",
+                client_id=tenant["client_id"],
+                from_number=from_number,
+            )
+            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        if _maybe_handle_staff_sms_approval(from_number, body, tenant, to_number):
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         # Pre-SMS usage check: allow overage, log for billing (Option B)
         if get_plan_limits:
@@ -3485,17 +3916,31 @@ async def handle_incoming_sms(request: Request):
                 audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": limits.get("minutes_cap")}, request=request)
         apt = db_appointments_get_by_phone_for_sms(from_number) if USE_DB else None
         if apt:
-            print(f"[SMS] inbound from={from_number[:8]}... apt_id={apt.get('id')} status={apt.get('status')} body_len={len(body)}")
+            sms_debug(
+                "inbound_context",
+                apt_id=apt.get("id"),
+                apt_status=apt.get("status"),
+                body_len=len(body),
+                from_number=from_number,
+            )
         else:
-            print(f"[SMS] inbound from={from_number[:8]}... no pending apt body_len={len(body)}")
+            sms_debug("inbound_no_pending_appointment", body_len=len(body), from_number=from_number)
         session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
         messages = (session["messages"] if session else []) if session else []
         messages.append({"role": "user", "content": body})
         # If they have an appointment awaiting their confirmation (pending_customer) and they reply yes/looks good, promote to pending_review so store can Accept/Decline
         if apt and apt.get("status") == "pending_customer" and _is_sms_confirmation(body):
+            apt_after = apt
             if USE_DB and apt.get("id"):
                 db_appointments_update(apt["id"], status="pending_review")
-            print(f"[SMS] customer confirmed apt_id={apt.get('id')} from={from_number[:8]}... -> status=pending_review")
+                apt_after = db_appointments_get_by_id(apt["id"]) or apt
+            _notify_staff_pending_review(apt_after, tenant, to_number)
+            sms_info(
+                "customer_confirmed_pending_to_review",
+                apt_id=apt.get("id"),
+                client_id=tenant["client_id"],
+                from_number=from_number,
+            )
             reply = "Thanks! We've sent this to the store. We'll text you when they confirm."
             send_sms(from_number, reply, from_override=to_number)
             messages.append({"role": "assistant", "content": reply})
@@ -3506,11 +3951,20 @@ async def handle_incoming_sms(request: Request):
             apt_info = f"The customer has a PENDING appointment: Name {apt.get('name','')}, {apt.get('date','')} at {_hhmm_to_ampm(apt.get('time','') or '')}, service: {apt.get('reason','')}."
         else:
             apt_info = "The customer does not have a pending appointment in the system."
+        pending_customer_note = ""
+        if apt and apt.get("status") == "pending_customer":
+            pending_customer_note = (
+                "\nThey are refining DETAILS before the booking goes to the shop for approval. "
+                "Echo date, time, name, and service back clearly when they change something. "
+                "Do not say the shop already confirmed it—only that you will pass it along once they finalize. "
+                "Ask them to reply YES or CONFIRM only when everything looks exactly right; that submits the request "
+                "to the business for approval (you cannot approve it yourself)."
+            )
         business_name = get_business_info().get("name", "us")
         history_str = "\n".join([f"{m['role']}: {m['content']}" for m in messages[-10:]])
         sys_prompt = f"""You're the friendly text receptionist for {business_name}. Keep replies short (1-3 sentences), casual, like texting a friend.
 
-{apt_info}
+{apt_info}{pending_customer_note}
 
 They just texted: "{body}"
 
@@ -3569,29 +4023,50 @@ async def handle_incoming_call(request: Request):
     This endpoint is called when someone calls your Twilio phone number.
     """
     try:
-        # Log the incoming request for debugging
-        logger.info("Incoming call webhook from %s", request.client.host if request.client else "unknown")
+        voice_info(
+            "incoming_call_webhook",
+            remote_ip=request.client.host if request.client else "unknown",
+            request_id=getattr(request.state, "request_id", None),
+        )
         form_data = await request.form()
         form_dict = dict(form_data)
         if not _validate_twilio_webhook(request, form_dict):
+            auth_warning(
+                "voice_webhook_invalid_signature",
+                path=request.url.path,
+                request_id=getattr(request.state, "request_id", None),
+            )
             raise HTTPException(status_code=403, detail="Invalid webhook signature")
         call_sid = form_data.get("CallSid")
         from_number = form_data.get("From")
         to_number = form_data.get("To")
         
-        logger.info("Incoming call: %s -> %s (CallSid: %s)", from_number, to_number, call_sid)
-        print(f"[CALL] incoming from={from_number} to={to_number} call_sid={call_sid[:16]}...")
+        voice_info(
+            "incoming_call",
+            call_sid=call_sid,
+            from_number=from_number,
+            to_number=to_number,
+        )
 
         # Multi-tenant: resolve tenant by To number and set request context
         tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
         if tenant:
             set_request_client_id(tenant["client_id"])
-            print(f"[CALL] tenant from DB (To number matches): client_id={tenant['client_id']!r} name={tenant.get('name') or '(no name)'!r}")
+            voice_info(
+                "tenant_resolved_by_to_number",
+                client_id=tenant["client_id"],
+                tenant_name=tenant.get("name") or "",
+                to_number=to_number,
+            )
         elif CLIENT_ID:
             set_request_client_id(CLIENT_ID)
-            print(f"[CALL] no tenant for To={to_number}; using CLIENT_ID env: {CLIENT_ID!r}")
+            voice_info(
+                "tenant_fallback_client_id_env",
+                client_id_env=CLIENT_ID,
+                to_number=to_number,
+            )
         else:
-            print(f"[CALL] no tenant for To={to_number} and no CLIENT_ID env; using default")
+            voice_info("tenant_fallback_default", to_number=to_number)
         # Pre-call usage check: allow overage, log for billing (Option B)
         if USE_DB and tenant and get_plan_limits:
             limits = get_plan_limits(tenant)
@@ -3608,7 +4083,13 @@ async def handle_incoming_call(request: Request):
         # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"
         client_id = tenant["client_id"] if tenant else (CLIENT_ID or "default")
-        print(f"[CALL] session started client_id={client_id!r}")
+        voice_info(
+            "call_session_started",
+            call_sid=call_sid,
+            client_id=client_id,
+            from_number=from_number,
+            to_number=to_number,
+        )
         active_calls[call_sid] = {
             "session_id": session_id,
             "from_number": from_number,
@@ -3624,13 +4105,13 @@ async def handle_incoming_call(request: Request):
         response = VoiceResponse()
 
         # Get base URL - use the ngrok URL from environment or construct from request
-        base_url = os.getenv("NGROK_URL")
+        base_url = _public_base_url()
         if not base_url:
             request_url = str(request.url)
             if "ngrok" in request_url:
                 base_url = request_url.replace("/api/phone/incoming", "")
             else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+                base_url = ""
 
         if TWILIO_AVAILABLE and VoiceResponse and _call_recording_enabled():
             cb = f"{base_url.rstrip('/')}/api/phone/recording-complete"
@@ -3666,7 +4147,7 @@ async def handle_incoming_call(request: Request):
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
+        base_url = _public_base_url()
         
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
@@ -3773,13 +4254,13 @@ async def process_speech(request: Request):
         if not call_sid or call_sid not in active_calls:
             # Lost call session - forward to business phone if available
             response = VoiceResponse()
-            base_url = os.getenv("NGROK_URL")
+            base_url = _public_base_url()
             if not base_url:
                 request_url = str(request.url)
                 if "ngrok" in request_url:
                     base_url = request_url.replace("/api/phone/process-speech", "")
                 else:
-                    base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+                    base_url = ""
             
             forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
@@ -3813,13 +4294,13 @@ async def process_speech(request: Request):
             
             # Create response asking user to repeat using Record mode
             response = VoiceResponse()
-            base_url = os.getenv("NGROK_URL")
+            base_url = _public_base_url()
             if not base_url:
                 request_url = str(request.url)
                 if "ngrok" in request_url:
                     base_url = request_url.replace("/api/phone/process-speech", "")
                 else:
-                    base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+                    base_url = ""
             
             # Ask user to repeat using Record + Whisper
             prompt_text = f"I detected you're speaking in {current_detected_lang}. For better accuracy, please speak again and press pound when done."
@@ -3867,13 +4348,13 @@ async def process_speech(request: Request):
         detected_lang = current_detected_lang
         
         # Get base URL for TTS and forwarding
-        base_url = os.getenv("NGROK_URL")
+        base_url = _public_base_url()
         if not base_url:
             request_url = str(request.url)
             if "ngrok" in request_url:
                 base_url = request_url.replace("/api/phone/process-speech", "")
             else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+                base_url = ""
         
         # Add user message to conversation
         user_message = {
@@ -3941,13 +4422,6 @@ async def process_speech(request: Request):
             )
         
         # If no input, prompt once then goodbye (same TTS voice as receptionist)
-        # #region agent log
-        try:
-            print("[DEBUG_CALL_END] process-speech building timeout/goodbye TwiML")
-            _agent_log("CRASH_END", "backend/main.py:process_speech", "Building still_there/goodbye", {"call_sid": (call_sid or "")[:16]}, "pre-fix")
-        except Exception:
-            pass
-        # #endregion agent log
         try:
             still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
             response.play(still_there_url)
@@ -3963,11 +4437,7 @@ async def process_speech(request: Request):
             response.play(goodbye_url)
             response.hangup()
         except Exception as e:
-            try:
-                _agent_log("CRASH_END", "backend/main.py:process_speech", "Exception in goodbye block", {"error": str(e), "type": type(e).__name__}, "pre-fix")
-            except Exception:
-                pass
-            print(f"[DEBUG_CALL_END] process-speech goodbye block failed: {type(e).__name__}: {e}")
+            logger.warning("process-speech goodbye block failed: %s: %s", type(e).__name__, e)
             response = VoiceResponse()
             response.hangup()
         
@@ -3980,13 +4450,13 @@ async def process_speech(request: Request):
         
         # On error, offer to forward to a real person
         response = VoiceResponse()
-        base_url = os.getenv("NGROK_URL")
+        base_url = _public_base_url()
         if not base_url:
             request_url = str(request.url)
             if "ngrok" in request_url:
                 base_url = request_url.replace("/api/phone/process-speech", "")
             else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+                base_url = ""
         
         # Check if we have a forwarding number - if so, forward on error
         forwarding_phone = get_business_info().get("forwarding_phone")
@@ -4110,13 +4580,13 @@ async def respond_with_audio(request: Request):
         call_sid = form_data.get("CallSid")
         _restore_call_context(call_sid or "")
         # base_url needed for forward_call_to_business in all branches
-        base_url = os.getenv("NGROK_URL")
+        base_url = _public_base_url()
         if not base_url:
             request_url = str(request.url)
             if "ngrok" in request_url:
                 base_url = request_url.replace("/api/phone/respond", "")
             else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+                base_url = ""
         if not call_sid or call_sid not in response_status:
             # Lost response status - forward to business phone if available
             response = VoiceResponse()
@@ -4143,13 +4613,6 @@ async def respond_with_audio(request: Request):
             audio_url = status_data.get("audio_url")
             if audio_url:
                 response.play(audio_url)
-                # #region agent log
-                try:
-                    print(f"[DEBUG_CALL_END] respond status=ready building next Gather/goodbye call_sid={call_sid[:16] if call_sid else ''}")
-                    _agent_log("CRASH_END", "backend/main.py:respond", "Building still_there/goodbye", {"call_sid": (call_sid or "")[:16], "status": "ready"}, "pre-fix")
-                except Exception:
-                    pass
-                # #endregion agent log
                 try:
                     # After playing, set up next input gathering
                     call_data = active_calls.get(call_sid, {})
@@ -4204,11 +4667,7 @@ async def respond_with_audio(request: Request):
                         response.play(goodbye_url)
                         response.hangup()
                 except Exception as e:
-                    try:
-                        _agent_log("CRASH_END", "backend/main.py:respond", "Exception in ready/goodbye block", {"error": str(e), "type": type(e).__name__}, "pre-fix")
-                    except Exception:
-                        pass
-                    print(f"[DEBUG_CALL_END] respond ready/goodbye block failed: {type(e).__name__}: {e}")
+                    logger.warning("respond ready/goodbye block failed: %s: %s", type(e).__name__, e)
                     response = VoiceResponse()
                     response.hangup()
                 
@@ -4261,16 +4720,11 @@ async def respond_with_audio(request: Request):
             return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
-        print(f"❌ Error in respond endpoint: {e}")
-        try:
-            _agent_log("CRASH_END", "backend/main.py:respond", "Respond endpoint exception", {"error": str(e), "type": type(e).__name__}, "pre-fix")
-        except Exception:
-            pass
-        print(f"[DEBUG_CALL_END] respond endpoint exception: {type(e).__name__}: {e}")
+        logger.exception("Error in respond endpoint: %s", e)
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
+        base_url = _public_base_url()
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
@@ -4400,7 +4854,9 @@ async def process_recording(request: Request):
             print("⚠️ No recording URL provided")
             response = VoiceResponse()
             response.say("I didn't receive the recording. Please try again.", voice='alice')
-            response.redirect(f"{os.getenv('NGROK_URL')}/api/phone/process-speech", method='POST')
+            bu = _public_base_url()
+            if bu:
+                response.redirect(f"{bu}/api/phone/process-speech", method='POST')
             return Response(content=str(response), media_type="application/xml")
         
         call_data = active_calls[call_sid]
@@ -4422,7 +4878,9 @@ async def process_recording(request: Request):
             print(f"❌ Failed to download recording: {recording_response.status_code}")
             response = VoiceResponse()
             response.say("I had trouble processing the recording. Please try again.", voice='alice')
-            response.redirect(f"{os.getenv('NGROK_URL')}/api/phone/process-speech", method='POST')
+            bu = _public_base_url()
+            if bu:
+                response.redirect(f"{bu}/api/phone/process-speech", method='POST')
             return Response(content=str(response), media_type="application/xml")
         
         # Transcribe with Whisper
@@ -4487,13 +4945,13 @@ async def process_recording(request: Request):
         # Create TwiML response
         response = VoiceResponse()
         
-        base_url = os.getenv("NGROK_URL")
+        base_url = _public_base_url()
         if not base_url:
             request_url = str(request.url)
             if "ngrok" in request_url:
                 base_url = request_url.replace("/api/phone/process-recording", "")
             else:
-                base_url = "https://gwenda-denumerable-cami.ngrok-free.dev"
+                base_url = ""
         
         # Generate audio URL for AI response
         ai_text_encoded = quote(ai_text)
@@ -4529,7 +4987,7 @@ async def process_recording(request: Request):
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        base_url = os.getenv("NGROK_URL") or "https://gwenda-denumerable-cami.ngrok-free.dev"
+        base_url = _public_base_url()
         
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")

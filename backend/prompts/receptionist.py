@@ -33,13 +33,34 @@ def build_system_prompt(
     name = (business_info.get("name") or "the business").strip()
     hours = (business_info.get("hours") or "").strip()
     address = (business_info.get("address") or "").strip()
-    services_list = ", ".join(business_info.get("services") or [])
-    specials_list = " | ".join(business_info.get("specials") or [])
-    reservation_info = " | ".join(business_info.get("reservation_rules") or [])
+    services_raw = business_info.get("services") or []
+    if services_raw and isinstance(services_raw[0], dict):
+        services_list = ", ".join(
+            f"{s.get('name', '')} (${s.get('price', 0)}, {s.get('duration_minutes', '')} min)"
+            for s in services_raw
+        )
+    else:
+        services_list = ", ".join(str(x) for x in services_raw)
+    specials_raw = business_info.get("specials") or []
+    if specials_raw and isinstance(specials_raw[0], dict):
+        specials_list = " | ".join(
+            (s.get("title") or "")
+            + (f" — {s.get('description')}" if (s.get("description") or "").strip() else "")
+            for s in specials_raw
+        )
+    else:
+        specials_list = " | ".join(str(x) for x in specials_raw)
+    rules_raw = business_info.get("reservation_rules") or []
+    if rules_raw and isinstance(rules_raw[0], dict):
+        reservation_info = " | ".join(str(s.get("rule_text") or "") for s in rules_raw)
+    else:
+        reservation_info = " | ".join(str(x) for x in rules_raw)
     menu_link = (business_info.get("menu_link") or "").strip()
     departments = business_info.get("departments") or []
     staff = business_info.get("staff") or []
+    vertical_label = (business_info.get("business_vertical_label") or "").strip()
     business_type = (business_info.get("business_type") or "").strip()
+    industry_desc = vertical_label or business_type
 
     help_lines: List[str] = []
     if hours:
@@ -118,16 +139,16 @@ def build_system_prompt(
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date and time, and optionally email for confirmations.
-- When they have confirmed (name, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason (| separator). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
+- When they have confirmed (name, date, time, service) and the slot is available (either not in the list or list is empty), reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). The 7th field staff is OPTIONAL: use the exact staff/stylist name from the staff list if they requested someone; otherwise leave it empty (still include the trailing pipe if no staff). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
 
     help_section = (
         "\n".join(help_lines)
         if help_lines
         else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
     )
-    if business_type:
+    if industry_desc:
         header = (
-            f"Super peppy, warm AI receptionist for {name}, a {business_type}! "
+            f"Super peppy, warm AI receptionist for {name}, a {industry_desc}! "
             'Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". '
             "Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
         )
