@@ -593,7 +593,8 @@ def load_client_config(client_id: Optional[str] = None):
         return None
     config_path = PROJECT_ROOT / "clients" / cid / "config.json"
     if not config_path.exists():
-        print(f"WARNING: Client config not found: {config_path}")
+        # Normal on multi-tenant hosts until Settings PATCH creates the file; DB/minimal tenant fallback applies.
+        logger.debug("client_config_missing path=%s client_id=%s", config_path, cid)
         return None
     try:
         with open(config_path, "r", encoding="utf-8") as f:

@@ -45,6 +45,31 @@ export function useApiClient(): AxiosInstance {
       }
       return config
     })
+    instance.interceptors.response.use(
+      (response) => response,
+      async (error: {
+        config?: { headers?: Record<string, string>; url?: string; _retry?: boolean }
+        response?: { status?: number }
+      }) => {
+        const cfg = error.config
+        const status = error.response?.status
+        if (status !== 401 || !cfg || cfg._retry) {
+          return Promise.reject(error)
+        }
+        cfg._retry = true
+        try {
+          const token = await getToken({ skipCache: true })
+          if (token) {
+            cfg.headers = cfg.headers ?? {}
+            cfg.headers.Authorization = `Bearer ${token}`
+            return instance.request(cfg)
+          }
+        } catch {
+          // ignore
+        }
+        return Promise.reject(error)
+      }
+    )
     return instance
   }, [getToken])
   return client
