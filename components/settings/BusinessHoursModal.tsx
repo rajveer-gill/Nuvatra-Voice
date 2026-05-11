@@ -69,6 +69,60 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
     overlayScrollRef.current?.scrollTo(0, 0)
   }, [isOpen])
 
+  /**
+   * Wheel over day rows / time inputs often does not scroll this div: React's onWheel is passive
+   * (preventDefault ignored), and Chrome uses wheel on `<input type="time">` for stepping.
+   * Non-passive capture listener on the scroll container applies scroll reliably.
+   */
+  useEffect(() => {
+    if (!isOpen) return
+    let attachedEl: HTMLDivElement | null = null
+    let onWheel: ((e: WheelEvent) => void) | null = null
+    let raf1 = 0
+    let raf2 = 0
+
+    const tryAttach = () => {
+      const el = dayListScrollRef.current
+      if (!el || onWheel) return
+
+      onWheel = (e: WheelEvent) => {
+        if (!el.contains(e.target as Node)) return
+
+        let dy = e.deltaY
+        if (e.deltaMode === 1) dy *= 16
+        if (e.deltaMode === 2) dy *= el.clientHeight
+
+        const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight)
+        if (maxScroll <= 0) return
+
+        const top = el.scrollTop
+        const atTop = top <= 0.5
+        const atBottom = top >= maxScroll - 0.5
+        if (atTop && dy < 0) return
+        if (atBottom && dy > 0) return
+
+        el.scrollTop = Math.min(maxScroll, Math.max(0, top + dy))
+        e.preventDefault()
+        e.stopPropagation()
+      }
+      el.addEventListener('wheel', onWheel, { passive: false, capture: true })
+      attachedEl = el
+    }
+
+    raf1 = requestAnimationFrame(() => {
+      tryAttach()
+      raf2 = requestAnimationFrame(tryAttach)
+    })
+
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+      if (attachedEl && onWheel) {
+        attachedEl.removeEventListener('wheel', onWheel, { passive: false, capture: true })
+      }
+    }
+  }, [isOpen])
+
   useEffect(() => {
     if (!isOpen) return
     const onKey = (e: KeyboardEvent) => {
@@ -148,14 +202,6 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
     if (!validateTimes()) return
     onApply(weeklyScheduleToString(schedule))
     onClose()
-  }
-
-  /** Chrome steps `<input type="time">` with the wheel and swallow scroll; forward wheel to the day list. */
-  const forwardWheelToDayList = (e: React.WheelEvent<HTMLElement>) => {
-    const scroller = dayListScrollRef.current
-    if (!scroller) return
-    scroller.scrollTop += e.deltaY
-    e.preventDefault()
   }
 
   const dur = reduceMotion ? 0 : 0.22
@@ -276,7 +322,6 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
 
               <div
                 ref={dayListScrollRef}
-                data-hours-day-scroll
                 className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-2 pr-1 pt-5 [-webkit-overflow-scrolling:touch] sm:space-y-4 sm:px-8"
               >
                 {DAYS_FULL.map((label, idx) => {
@@ -330,7 +375,6 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                                 value={row.open}
                                 step={300}
                                 onChange={(e) => updateDay(i, { open: e.target.value })}
-                                onWheel={forwardWheelToDayList}
                                 className="cs-field min-h-[44px] w-full min-w-[10rem] font-mono text-base"
                               />
                               <span className="text-xs text-gray-500">{formatTimeLabel(row.open)}</span>
@@ -344,7 +388,6 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                                 value={row.close}
                                 step={300}
                                 onChange={(e) => updateDay(i, { close: e.target.value })}
-                                onWheel={forwardWheelToDayList}
                                 className="cs-field min-h-[44px] w-full min-w-[10rem] font-mono text-base"
                               />
                               <span className="text-xs text-gray-500">{formatTimeLabel(row.close)}</span>
