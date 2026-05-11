@@ -214,22 +214,27 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
               </div>
             </div>
 
-            <div className="-mt-6 flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-3xl bg-white px-5 pb-6 pt-3 sm:px-8 sm:pb-8 sm:pt-4">
+            {/* Flush below header (no negative margin) — avoids preset row overlapping the gradient */}
+            <div className="relative z-[2] flex min-h-0 flex-1 flex-col overflow-hidden border-t border-gray-200/95 bg-white">
               {parseWarning && (
                 <m.div
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: 'auto' }}
-                  className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-900"
+                  className="mx-5 mb-0 mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-900 sm:mx-8"
                 >
                   {parseWarning}
                 </m.div>
               )}
 
-              <div className="mb-4 flex flex-wrap gap-2.5">
+              <div
+                className={`shrink-0 border-b border-gray-200 bg-gray-50 px-5 py-4 sm:px-8 ${parseWarning ? 'mt-4' : ''}`}
+              >
+                <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Quick presets</p>
+                <div className="flex flex-wrap gap-2.5">
                 <button
                   type="button"
                   onClick={presetClassicOffice}
-                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-primary-300 hover:bg-primary-50"
+                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-800 shadow-sm transition hover:border-primary-300 hover:bg-primary-50"
                 >
                   <Sparkles className="h-4 w-4 text-primary-600" />
                   Mon–Fri 9–5
@@ -237,14 +242,14 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                 <button
                   type="button"
                   onClick={presetIncludeSaturday}
-                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-primary-300 hover:bg-primary-50"
+                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-800 shadow-sm transition hover:border-primary-300 hover:bg-primary-50"
                 >
                   + Sat hours
                 </button>
                 <button
                   type="button"
                   onClick={preset247}
-                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-primary-300 hover:bg-primary-50"
+                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-800 shadow-sm transition hover:border-primary-300 hover:bg-primary-50"
                 >
                   <Sun className="h-4 w-4 text-amber-500" />
                   24/7
@@ -252,14 +257,15 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                 <button
                   type="button"
                   onClick={copyMondayToWeekdays}
-                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-primary-300 hover:bg-primary-50"
+                  className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-800 shadow-sm transition hover:border-primary-300 hover:bg-primary-50"
                 >
                   <Copy className="h-4 w-4 text-gray-600" />
                   Copy Mon → weekdays
                 </button>
+                </div>
               </div>
 
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain pb-2 pr-1 pt-1 [-webkit-overflow-scrolling:touch] sm:space-y-4">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-2 pr-1 pt-5 [-webkit-overflow-scrolling:touch] sm:space-y-4 sm:px-8">
                 {DAYS_FULL.map((label, idx) => {
                   const i = idx as DayIndex
                   const row = schedule[i]
@@ -340,17 +346,17 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
               </div>
 
               {timeError && (
-                <p className="mt-2 text-center text-xs font-medium text-red-600" role="alert">
+                <p className="mx-5 mt-2 text-center text-xs font-medium text-red-600 sm:mx-8" role="alert">
                   {timeError}
                 </p>
               )}
 
-              <div className="mt-4 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 text-sm leading-relaxed text-gray-600">
+              <div className="mx-5 mt-4 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 text-sm leading-relaxed text-gray-600 sm:mx-8">
                 <span className="font-semibold text-gray-800">Preview </span>
                 {summarizeSchedule(schedule, 280)}
               </div>
 
-              <div className="mt-6 flex flex-col-reverse gap-3 border-t border-gray-100 pt-6 sm:flex-row sm:justify-end">
+              <div className="mx-5 mt-6 flex flex-col-reverse gap-3 border-t border-gray-100 pb-6 pt-6 sm:mx-8 sm:flex-row sm:justify-end sm:pb-8">
                 <button
                   type="button"
                   onClick={onClose}
