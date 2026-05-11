@@ -39,7 +39,8 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
   const reduceMotion = useReducedMotion()
   const titleId = useId()
   const overlayScrollRef = useRef<HTMLDivElement>(null)
-  const dayListScrollRef = useRef<HTMLDivElement>(null)
+  /** Single scroll region: presets + day rows + preview + footer (fixes flex child not shrinking → maxScroll 0 → rubberband). */
+  const modalBodyScrollRef = useRef<HTMLDivElement>(null)
   const [mounted, setMounted] = useState(false)
   const [schedule, setSchedule] = useState<WeeklySchedule>(() => defaultWeeklySchedule())
   const [parseWarning, setParseWarning] = useState<string | null>(null)
@@ -70,9 +71,8 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
   }, [isOpen])
 
   /**
-   * Wheel over day rows / time inputs often does not scroll this div: React's onWheel is passive
-   * (preventDefault ignored), and Chrome uses wheel on `<input type="time">` for stepping.
-   * Non-passive capture listener on the scroll container applies scroll reliably.
+   * Chrome uses wheel on `<input type="time">` for stepping; React onWheel is passive.
+   * Non-passive capture on the modal body scroll container scrolls the whole white area.
    */
   useEffect(() => {
     if (!isOpen) return
@@ -82,7 +82,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
     let raf2 = 0
 
     const tryAttach = () => {
-      const el = dayListScrollRef.current
+      const el = modalBodyScrollRef.current
       if (!el || onWheel) return
 
       onWheel = (e: WheelEvent) => {
@@ -93,7 +93,11 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
         if (e.deltaMode === 2) dy *= el.clientHeight
 
         const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight)
-        if (maxScroll <= 0) return
+        if (maxScroll <= 0) {
+          e.preventDefault()
+          e.stopPropagation()
+          return
+        }
 
         const top = el.scrollTop
         const atTop = top <= 0.5
@@ -235,7 +239,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className="relative z-[101] flex w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-gray-200/80 bg-white shadow-2xl shadow-primary-900/15 max-h-[min(920px,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-7rem)]"
+            className="relative z-[101] flex h-[min(920px,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-7rem))] min-h-0 w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-gray-200/80 bg-white shadow-2xl shadow-primary-900/15 max-h-[min(920px,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-7rem))]"
             initial={{ opacity: 0, y: reduceMotion ? 0 : 28, scale: reduceMotion ? 1 : 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: reduceMotion ? 0 : 16, scale: reduceMotion ? 1 : 0.98 }}
@@ -269,8 +273,11 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
               </div>
             </div>
 
-            {/* Flush below header (no negative margin) — avoids preset row overlapping the gradient */}
-            <div className="relative z-[2] flex min-h-0 flex-1 flex-col overflow-hidden border-t border-gray-200/95 bg-white">
+            {/* One scroll column below header: flex-1 min-h-0 so inner overflow-y-auto gets a real maxScroll */}
+            <div
+              ref={modalBodyScrollRef}
+              className="relative z-[2] flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain border-t border-gray-200/95 bg-white [-webkit-overflow-scrolling:touch]"
+            >
               {parseWarning && (
                 <m.div
                   initial={{ opacity: 0, height: 0 }}
@@ -320,10 +327,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                 </div>
               </div>
 
-              <div
-                ref={dayListScrollRef}
-                className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-2 pr-1 pt-5 [-webkit-overflow-scrolling:touch] sm:space-y-4 sm:px-8"
-              >
+              <div className="space-y-3 px-5 pb-2 pr-1 pt-5 sm:space-y-4 sm:px-8">
                 {DAYS_FULL.map((label, idx) => {
                   const i = idx as DayIndex
                   const row = schedule[i]
