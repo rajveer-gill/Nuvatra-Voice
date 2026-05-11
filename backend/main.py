@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 import shutil
 import io
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import base64
 # Twilio imports (optional - only needed for phone integration)
 try:
@@ -105,6 +105,39 @@ from observability import (
 def _public_base_url() -> str:
     """HTTPS origin Twilio can reach for webhooks (use NGROK_URL or PUBLIC_BASE_URL)."""
     return (os.getenv("NGROK_URL") or os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+
+
+def _derived_public_base_from_request(request: Request) -> str:
+    """When PUBLIC_BASE_URL is unset, derive https://host from the inbound webhook (Render/proxies send X-Forwarded-*)."""
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+    if not host:
+        return ""
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    if proto not in ("https", "http"):
+        proto = (request.url.scheme or "https").lower()
+        if proto not in ("http", "https"):
+            proto = "https"
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _twilio_base_url(request: Request) -> str:
+    """
+    Absolute base URL for Twilio <Play>, <Gather action>, etc.
+    Twilio rejects relative URLs — without this, calls end immediately on production if env base is unset.
+    """
+    bu = _public_base_url()
+    if bu:
+        return bu
+    d = _derived_public_base_from_request(request)
+    if d:
+        return d
+    try:
+        ru = urlparse(str(request.url))
+        if ru.hostname and "ngrok" in ru.hostname.lower():
+            return f"{ru.scheme}://{ru.netloc}".rstrip("/")
+    except Exception:
+        pass
+    return ""
 
 
 def _settings_load_debug_enabled() -> bool:
@@ -4397,17 +4430,24 @@ async def handle_incoming_call(request: Request):
             "caller_memory": caller_memory,
         }
         
+        # Absolute HTTPS base for <Play> / <Gather> — Twilio rejects relative URLs (call ends immediately).
+        base_url = _twilio_base_url(request)
+        if not base_url:
+            logger.error(
+                "[VOICE] incoming_call missing public base URL; set PUBLIC_BASE_URL (or NGROK_URL), "
+                "or ensure the reverse proxy forwards Host and X-Forwarded-Proto."
+            )
+            voice_info("incoming_call_missing_public_base_url", call_sid=call_sid)
+            fail_twiml = VoiceResponse()
+            fail_twiml.say(
+                "Sorry, this phone line is not fully configured yet. Please try again later.",
+                voice="alice",
+            )
+            fail_twiml.hangup()
+            return Response(content=str(fail_twiml), media_type="application/xml")
+
         # Create TwiML response
         response = VoiceResponse()
-
-        # Get base URL - use the ngrok URL from environment or construct from request
-        base_url = _public_base_url()
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/incoming", "")
-            else:
-                base_url = ""
 
         if TWILIO_AVAILABLE and VoiceResponse and _call_recording_enabled():
             cb = f"{base_url.rstrip('/')}/api/phone/recording-complete"
@@ -4443,8 +4483,8 @@ async def handle_incoming_call(request: Request):
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        base_url = _public_base_url()
-        
+        base_url = _twilio_base_url(request)
+
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
@@ -4550,14 +4590,8 @@ async def process_speech(request: Request):
         if not call_sid or call_sid not in active_calls:
             # Lost call session - forward to business phone if available
             response = VoiceResponse()
-            base_url = _public_base_url()
-            if not base_url:
-                request_url = str(request.url)
-                if "ngrok" in request_url:
-                    base_url = request_url.replace("/api/phone/process-speech", "")
-                else:
-                    base_url = ""
-            
+            base_url = _twilio_base_url(request)
+
             forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
                 print(f"🔄 Lost call session - forwarding to business phone: {forwarding_phone}")
@@ -4590,14 +4624,8 @@ async def process_speech(request: Request):
             
             # Create response asking user to repeat using Record mode
             response = VoiceResponse()
-            base_url = _public_base_url()
-            if not base_url:
-                request_url = str(request.url)
-                if "ngrok" in request_url:
-                    base_url = request_url.replace("/api/phone/process-speech", "")
-                else:
-                    base_url = ""
-            
+            base_url = _twilio_base_url(request)
+
             # Ask user to repeat using Record + Whisper
             prompt_text = f"I detected you're speaking in {current_detected_lang}. For better accuracy, please speak again and press pound when done."
             prompt_encoded = quote(prompt_text)
@@ -4644,14 +4672,8 @@ async def process_speech(request: Request):
         detected_lang = current_detected_lang
         
         # Get base URL for TTS and forwarding
-        base_url = _public_base_url()
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/process-speech", "")
-            else:
-                base_url = ""
-        
+        base_url = _twilio_base_url(request)
+
         # Add user message to conversation
         user_message = {
             "role": "user",
@@ -4746,14 +4768,8 @@ async def process_speech(request: Request):
         
         # On error, offer to forward to a real person
         response = VoiceResponse()
-        base_url = _public_base_url()
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/process-speech", "")
-            else:
-                base_url = ""
-        
+        base_url = _twilio_base_url(request)
+
         # Check if we have a forwarding number - if so, forward on error
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
@@ -4876,13 +4892,7 @@ async def respond_with_audio(request: Request):
         call_sid = form_data.get("CallSid")
         _restore_call_context(call_sid or "")
         # base_url needed for forward_call_to_business in all branches
-        base_url = _public_base_url()
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/respond", "")
-            else:
-                base_url = ""
+        base_url = _twilio_base_url(request)
         if not call_sid or call_sid not in response_status:
             # Lost response status - forward to business phone if available
             response = VoiceResponse()
@@ -5020,7 +5030,7 @@ async def respond_with_audio(request: Request):
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        base_url = _public_base_url()
+        base_url = _twilio_base_url(request)
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
@@ -5150,7 +5160,7 @@ async def process_recording(request: Request):
             print("⚠️ No recording URL provided")
             response = VoiceResponse()
             response.say("I didn't receive the recording. Please try again.", voice='alice')
-            bu = _public_base_url()
+            bu = _twilio_base_url(request)
             if bu:
                 response.redirect(f"{bu}/api/phone/process-speech", method='POST')
             return Response(content=str(response), media_type="application/xml")
@@ -5174,7 +5184,7 @@ async def process_recording(request: Request):
             print(f"❌ Failed to download recording: {recording_response.status_code}")
             response = VoiceResponse()
             response.say("I had trouble processing the recording. Please try again.", voice='alice')
-            bu = _public_base_url()
+            bu = _twilio_base_url(request)
             if bu:
                 response.redirect(f"{bu}/api/phone/process-speech", method='POST')
             return Response(content=str(response), media_type="application/xml")
@@ -5240,15 +5250,9 @@ async def process_recording(request: Request):
         
         # Create TwiML response
         response = VoiceResponse()
-        
-        base_url = _public_base_url()
-        if not base_url:
-            request_url = str(request.url)
-            if "ngrok" in request_url:
-                base_url = request_url.replace("/api/phone/process-recording", "")
-            else:
-                base_url = ""
-        
+
+        base_url = _twilio_base_url(request)
+
         # Generate audio URL for AI response
         ai_text_encoded = quote(ai_text)
         tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={get_tts_voice()}"
@@ -5283,8 +5287,8 @@ async def process_recording(request: Request):
         import traceback
         traceback.print_exc()
         response = VoiceResponse()
-        base_url = _public_base_url()
-        
+        base_url = _twilio_base_url(request)
+
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
