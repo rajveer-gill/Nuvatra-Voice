@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import * as Sentry from '@sentry/nextjs'
 import { useAuth } from '@clerk/nextjs'
-import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, CheckCircle2, Circle, AlertTriangle } from 'lucide-react'
+import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, CheckCircle2, Circle, AlertTriangle, Clock } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import {
   RANDOM_NAMES,
@@ -27,6 +27,8 @@ import {
   type SpecialRow,
   type RuleRow,
 } from '@/components/settings/StructuredListEditors'
+import { BusinessHoursModal } from '@/components/settings/BusinessHoursModal'
+import { parseHoursToWeekly, summarizeSchedule } from '@/lib/businessHours'
 
 /** Set NEXT_PUBLIC_DEBUG_SETTINGS=1 in .env.local (or Vercel) to log per-endpoint load outcomes — no tokens. */
 const DEBUG_SETTINGS = process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1'
@@ -65,6 +67,13 @@ export default function Settings() {
   const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
   const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
   const [setupStatus, setSetupStatus] = useState<{ complete: boolean; missing: string[]; warnings: string[] } | null>(null)
+  const [hoursModalOpen, setHoursModalOpen] = useState(false)
+
+  const hoursSummaryPreview = useMemo(() => {
+    const { schedule } = parseHoursToWeekly(form.hours || '')
+    const line = summarizeSchedule(schedule, 96)
+    return (form.hours || '').trim() ? line : ''
+  }, [form.hours])
 
   // Preload static voice samples so first play is instant
   useEffect(() => {
@@ -581,14 +590,30 @@ export default function Settings() {
               </>
             )}
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Hours</label>
-            <input
-              type="text"
-              value={form.hours}
-              onChange={(e) => setForm((f) => ({ ...f, hours: e.target.value }))}
-              className="cs-field w-full"
-              placeholder="e.g. Mon–Fri 9 AM–5 PM, or 24/7 for emergency"
+          <div className="md:col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Hours of operation</label>
+            <button
+              type="button"
+              onClick={() => setHoursModalOpen(true)}
+              className="group flex w-full items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gradient-to-br from-white via-white to-primary-50/40 px-4 py-3.5 text-left shadow-sm ring-1 ring-black/5 transition hover:border-primary-300 hover:shadow-md hover:ring-primary-200/40"
+            >
+              <div className="min-w-0 flex-1">
+                <p className={`truncate text-sm ${hoursSummaryPreview ? 'font-medium text-gray-900' : 'text-gray-500'}`}>
+                  {hoursSummaryPreview || 'Set which days you’re open and your hours — opens the visual editor'}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  Schedule presets, copy weekdays, and live preview — saved when you click Apply in the editor, then Save changes below.
+                </p>
+              </div>
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-100 text-primary-700 transition group-hover:scale-105 group-hover:bg-primary-200">
+                <Clock className="h-5 w-5" aria-hidden />
+              </div>
+            </button>
+            <BusinessHoursModal
+              isOpen={hoursModalOpen}
+              onClose={() => setHoursModalOpen(false)}
+              hoursText={form.hours}
+              onApply={(next) => setForm((f) => ({ ...f, hours: next }))}
             />
           </div>
           <div className="md:col-span-2">
