@@ -5,6 +5,7 @@ Environment:
   LOG_LEVEL=INFO|DEBUG     — DEBUG enables verbose branches when combined with OBS_VERBOSE.
   OBS_VERBOSE=1            — Extra DEBUG logs inside SMS/voice/chat paths (slot checks, branches).
   OBS_TRACE_WEBHOOKS=1     — INFO log for each /api/phone/* and /api/sms/* request (timing + status).
+  OBS_TRACE_SMS=1          — INFO logs each inbound SMS pipeline step (tenant resolve, compliance, AI, DB); use when debugging delivery or replies.
 
 Phone numbers are masked in log lines (security.redaction).
 """
@@ -27,6 +28,7 @@ def _truthy(name: str) -> bool:
 
 OBS_VERBOSE: bool = _truthy("OBS_VERBOSE")
 OBS_TRACE_WEBHOOKS: bool = _truthy("OBS_TRACE_WEBHOOKS")
+OBS_TRACE_SMS: bool = _truthy("OBS_TRACE_SMS")
 
 
 def mask_phone(raw: Optional[str]) -> str:
@@ -88,6 +90,13 @@ def sms_debug(event: str, **fields: Any) -> None:
     if not OBS_VERBOSE:
         return
     sms_event(logging.DEBUG, event, **fields)
+
+
+def sms_trace(event: str, **fields: Any) -> None:
+    """Detailed inbound/outbound SMS pipeline steps at INFO when OBS_TRACE_SMS=1 (Render-friendly)."""
+    if not OBS_TRACE_SMS:
+        return
+    sms_event(logging.INFO, event, **fields)
 
 
 def voice_event(level: int, event: str, **fields: Any) -> None:

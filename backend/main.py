@@ -92,6 +92,7 @@ from observability import (
     auth_warning,
     sms_debug,
     sms_info,
+    sms_trace,
     system_debug,
     system_info,
     usage_warning,
@@ -1138,6 +1139,13 @@ def send_sms(
                 return False
     to_masked = mask_phone_e164(e164)
     sms_debug(
+        "outbound_attempt",
+        from_num=from_num,
+        to_masked=to_masked,
+        body_len=len(body or ""),
+        force=force,
+    )
+    sms_trace(
         "outbound_attempt",
         from_num=from_num,
         to_masked=to_masked,
@@ -2704,8 +2712,15 @@ def _maybe_handle_staff_sms_approval(from_number: str, body: str, tenant: dict, 
         return False
     raw = (body or "").strip()
     tokens = raw.split()
+    sms_trace(
+        "inbound_staff_phone_matched",
+        client_id=tenant["client_id"],
+        body_len=len(raw),
+        token_count=len(tokens),
+    )
     if len(tokens) < 2:
         sms_debug("staff_command_incomplete", from_number=from_number, body_len=len(raw))
+        sms_trace("inbound_staff_command_incomplete", client_id=tenant["client_id"], token_count=len(tokens))
         return False
     verb = tokens[0].upper()
     try:
@@ -3893,32 +3908,66 @@ async def get_got_it_audio(request: Request):
 @app.post("/api/sms/incoming")
 async def handle_incoming_sms(request: Request):
     """Twilio webhook for incoming SMS. AI-powered mobile receptionist replies like a real person."""
+    rid = getattr(request.state, "request_id", None)
     if not TWILIO_AVAILABLE:
         sms_debug("inbound_skipped", reason="twilio_not_available")
+        sms_trace("inbound_early_exit", reason="twilio_not_available", request_id=rid)
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
     if not USE_DB:
         sms_debug("inbound_skipped", reason="database_not_enabled")
+        sms_trace("inbound_early_exit", reason="database_not_enabled", request_id=rid)
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
     try:
         form_data = await request.form()
         form_dict = dict(form_data)
+        sig_mode = "skipped"
+        if (os.getenv("TWILIO_AUTH_TOKEN") or "").strip():
+            sig_mode = "enforced"
+        sms_trace(
+            "inbound_form_parsed",
+            request_id=rid,
+            signature_mode=sig_mode,
+            from_number=str(form_dict.get("From") or ""),
+            to_number=str(form_dict.get("To") or ""),
+            body_len=len(str(form_dict.get("Body") or "")),
+            message_sid=str(form_dict.get("MessageSid") or form_dict.get("SmsMessageSid") or ""),
+            num_media=str(form_dict.get("NumMedia") or ""),
+        )
         if not _validate_twilio_webhook(request, form_dict):
             auth_warning(
                 "sms_webhook_invalid_signature",
                 path=request.url.path,
-                request_id=getattr(request.state, "request_id", None),
+                request_id=rid,
             )
+            sms_trace("inbound_signature_invalid", request_id=rid, signature_mode=sig_mode)
             return Response(content="", status_code=403, media_type="application/xml")
+        sms_trace("inbound_signature_ok", request_id=rid, signature_mode=sig_mode)
         from_number = form_data.get("From", "").strip()
         to_number = form_data.get("To", "").strip()
         body = (form_data.get("Body", "") or "").strip()
         msg_sid = (form_data.get("MessageSid") or form_data.get("SmsMessageSid") or "").strip()
         if not from_number or not to_number or not body:
             sms_info("inbound_skipped", reason="missing_fields", message_sid=msg_sid or None)
+            sms_trace(
+                "inbound_early_exit",
+                reason="missing_fields",
+                request_id=rid,
+                has_from=bool(from_number),
+                has_to=bool(to_number),
+                has_body=bool(body),
+                message_sid=msg_sid or None,
+            )
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         tenant = db_tenant_get_by_phone(to_number)
         if not tenant:
             sms_info("inbound_skipped", reason="unknown_to_number", to_number=to_number, message_sid=msg_sid or None)
+            sms_trace(
+                "inbound_tenant_not_found",
+                request_id=rid,
+                to_number=to_number,
+                message_sid=msg_sid or None,
+                hint="ensure_twilio_to_matches_tenant_twilio_phone_number",
+            )
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         set_request_client_id(tenant["client_id"])
         sms_info(
@@ -3928,10 +3977,24 @@ async def handle_incoming_sms(request: Request):
             to_number=to_number,
             body_len=len(body),
             message_sid=msg_sid or None,
-            request_id=getattr(request.state, "request_id", None),
+            request_id=rid,
+        )
+        sms_trace(
+            "inbound_tenant_resolved",
+            request_id=rid,
+            client_id=tenant["client_id"],
+            tenant_name=(tenant.get("name") or "")[:80],
+            message_sid=msg_sid or None,
         )
         kw = _sms_compliance_keyword(body)
         if kw:
+            sms_trace(
+                "inbound_compliance_keyword",
+                request_id=rid,
+                keyword=kw,
+                client_id=tenant["client_id"],
+                message_sid=msg_sid or None,
+            )
             cid = tenant["client_id"]
             if kw == "stop":
                 db_sms_opt_out_set(from_number, cid)
@@ -3956,6 +4019,7 @@ async def handle_incoming_sms(request: Request):
                     from_override=to_number,
                     force=True,
                 )
+            sms_trace("inbound_compliance_handled", request_id=rid, keyword=kw, client_id=cid)
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         if USE_DB and db_sms_opt_out_is_blocked(from_number, tenant["client_id"]):
             sms_info(
@@ -3963,8 +4027,16 @@ async def handle_incoming_sms(request: Request):
                 client_id=tenant["client_id"],
                 from_number=from_number,
             )
+            sms_trace(
+                "inbound_early_exit",
+                reason="recipient_opted_out",
+                request_id=rid,
+                client_id=tenant["client_id"],
+            )
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
-        if _maybe_handle_staff_sms_approval(from_number, body, tenant, to_number):
+        staff_handled = _maybe_handle_staff_sms_approval(from_number, body, tenant, to_number)
+        if staff_handled:
+            sms_trace("inbound_staff_command_handled", request_id=rid, client_id=tenant["client_id"])
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         # Pre-SMS usage check: allow overage, log for billing (Option B)
         if get_plan_limits:
@@ -3972,8 +4044,20 @@ async def handle_incoming_sms(request: Request):
             month = datetime.now(timezone.utc).strftime("%Y-%m")
             usage = db_usage_get(tenant["client_id"], month)
             total = (usage.get("voice_minutes") or 0) + (usage.get("sms_count") or 0)
-            if total >= limits.get("minutes_cap", 999999):
-                audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": limits.get("minutes_cap")}, request=request)
+            cap = limits.get("minutes_cap", 999999)
+            sms_trace(
+                "inbound_usage_snapshot",
+                request_id=rid,
+                client_id=tenant["client_id"],
+                month=month,
+                voice_minutes=usage.get("voice_minutes") or 0,
+                sms_count=usage.get("sms_count") or 0,
+                combined_total=total,
+                minutes_cap=cap,
+                at_or_over_cap=total >= cap,
+            )
+            if total >= cap:
+                audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": cap}, request=request)
         apt = db_appointments_get_by_phone_for_sms(from_number) if USE_DB else None
         if apt:
             sms_debug(
@@ -3983,13 +4067,34 @@ async def handle_incoming_sms(request: Request):
                 body_len=len(body),
                 from_number=from_number,
             )
+            sms_trace(
+                "inbound_appointment_context",
+                request_id=rid,
+                apt_id=apt.get("id"),
+                apt_status=apt.get("status"),
+                body_len=len(body),
+            )
         else:
             sms_debug("inbound_no_pending_appointment", body_len=len(body), from_number=from_number)
+            sms_trace("inbound_no_appointment_for_number", request_id=rid, body_len=len(body))
         session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
         messages = (session["messages"] if session else []) if session else []
+        prior_turns = len(messages)
         messages.append({"role": "user", "content": body})
+        sms_trace(
+            "inbound_session_loaded",
+            request_id=rid,
+            prior_turns=prior_turns,
+            session_existed=session is not None,
+        )
         # If they have an appointment awaiting their confirmation (pending_customer) and they reply yes/looks good, promote to pending_review so store can Accept/Decline
         if apt and apt.get("status") == "pending_customer" and _is_sms_confirmation(body):
+            sms_trace(
+                "inbound_customer_confirm_branch",
+                request_id=rid,
+                apt_id=apt.get("id"),
+                client_id=tenant["client_id"],
+            )
             apt_after = apt
             if USE_DB and apt.get("id"):
                 db_appointments_update(apt["id"], status="pending_review")
@@ -4002,9 +4107,25 @@ async def handle_incoming_sms(request: Request):
                 from_number=from_number,
             )
             reply = "Thanks! We've sent this to the store. We'll text you when they confirm."
-            send_sms(from_number, reply, from_override=to_number)
+            send_ok = send_sms(from_number, reply, from_override=to_number)
+            sms_trace(
+                "inbound_customer_confirm_reply_sent",
+                request_id=rid,
+                send_sms_ok=send_ok,
+                reply_len=len(reply),
+            )
             messages.append({"role": "assistant", "content": reply})
-            db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+            try:
+                db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+            except Exception as upsert_err:
+                sms_info(
+                    "inbound_session_persist_failed",
+                    request_id=rid,
+                    client_id=tenant["client_id"],
+                    error_type=type(upsert_err).__name__,
+                    phase="pending_customer_confirm",
+                )
+                logger.warning("db_sms_session_upsert failed (pending_customer path): %s", upsert_err, exc_info=True)
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         apt_info = ""
         if apt:
@@ -4033,32 +4154,128 @@ Previous conversation:
 
 Respond naturally. If they confirm it's correct, say we'll text when the business confirms. If they want changes (date, time, name, etc.), acknowledge and say we'll update it—don't make up new details. For other questions (hours, location, services), answer from your knowledge. Be warm and helpful."""
 
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        resp = client.chat.completions.create(
+        openai_configured = bool((os.getenv("OPENAI_API_KEY") or "").strip())
+        sms_trace(
+            "inbound_ai_prepare",
+            request_id=rid,
+            client_id=tenant["client_id"],
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": body}],
-            temperature=0.8,
-            max_tokens=150,
+            openai_key_configured=openai_configured,
+            history_turns=len(messages),
+            apt_id=apt.get("id") if apt else None,
+            apt_status=(apt.get("status") if apt else None) or "",
+            pending_customer_flow=bool(pending_customer_note),
+            sys_prompt_len=len(sys_prompt),
+            user_body_len=len(body),
         )
-        reply = (resp.choices[0].message.content or "").strip()
+        reply = ""
+        if not openai_configured:
+            sms_info(
+                "inbound_ai_skipped_no_openai_key",
+                request_id=rid,
+                client_id=tenant["client_id"],
+            )
+        else:
+            client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            try:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": body}],
+                    temperature=0.8,
+                    max_tokens=150,
+                )
+                reply = (resp.choices[0].message.content or "").strip()
+                finish_reason = getattr(resp.choices[0], "finish_reason", None)
+                sms_trace(
+                    "inbound_ai_complete",
+                    request_id=rid,
+                    reply_len=len(reply),
+                    finish_reason=finish_reason or "",
+                    empty_reply=not bool(reply),
+                )
+            except Exception as ai_err:
+                sms_info(
+                    "inbound_ai_openai_failed",
+                    request_id=rid,
+                    client_id=tenant["client_id"],
+                    error_type=type(ai_err).__name__,
+                    error=str(ai_err)[:400],
+                )
+                logger.warning("SMS OpenAI completion failed: %s", ai_err, exc_info=True)
+                reply = ""
+        if not reply:
+            sms_info(
+                "inbound_ai_empty_reply",
+                request_id=rid,
+                client_id=tenant["client_id"],
+                openai_configured=openai_configured,
+            )
+        send_ok = False
         if reply:
-            send_sms(from_number, reply, from_override=to_number)
+            send_ok = bool(send_sms(from_number, reply, from_override=to_number))
+            sms_trace(
+                "inbound_ai_reply_send_result",
+                request_id=rid,
+                send_sms_ok=send_ok,
+                reply_len=len(reply),
+            )
         messages.append({"role": "assistant", "content": reply})
-        db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"] if apt else None)
+        try:
+            db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"] if apt else None)
+            sms_trace(
+                "inbound_session_persist_ok",
+                request_id=rid,
+                messages_stored=len(messages),
+                appointment_id_attached=apt.get("id") if apt else None,
+            )
+        except Exception as upsert_err:
+            sms_info(
+                "inbound_session_persist_failed",
+                request_id=rid,
+                client_id=tenant["client_id"],
+                error_type=type(upsert_err).__name__,
+                phase="ai_reply_path",
+            )
+            logger.warning("db_sms_session_upsert failed (AI path): %s", upsert_err, exc_info=True)
         # Lead capture: when no pending appointment and plan allows, treat as inquiry
         if not apt and get_plan_limits and get_plan_limits(tenant).get("has_lead_capture"):
             body_lower = (body or "").lower().strip()
             if len(body_lower) > 5 and body_lower not in ("yes", "no", "ok", "nope", "sure", "thanks"):
+                lead_inserted = False
                 try:
                     db_leads_insert(tenant["client_id"], None, from_number, body[:500] if body else "inquiry", "sms")
-                except Exception:
-                    pass
+                    lead_inserted = True
+                except Exception as lead_err:
+                    sms_info(
+                        "inbound_lead_insert_failed",
+                        request_id=rid,
+                        client_id=tenant["client_id"],
+                        error_type=type(lead_err).__name__,
+                    )
+                    logger.warning("db_leads_insert SMS failed: %s", lead_err, exc_info=True)
+                sms_trace(
+                    "inbound_lead_capture",
+                    request_id=rid,
+                    lead_inserted=lead_inserted,
+                    body_qualifies=True,
+                )
                 # SMS automation: after_inquiry - send template to customer
                 if USE_DB:
                     automations = db_sms_automations_get_by_trigger(tenant["client_id"], "after_inquiry")
+                    sms_trace(
+                        "inbound_after_inquiry_automations",
+                        request_id=rid,
+                        automation_count=len(automations),
+                    )
                     for auto in automations:
                         template = (auto.get("template") or "").strip()
                         if not template:
+                            sms_trace(
+                                "inbound_automation_skipped",
+                                request_id=rid,
+                                automation_id=str(auto.get("id") or ""),
+                                reason="empty_template",
+                            )
                             continue
                         cfg = load_client_config(tenant["client_id"])
                         business_name = (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
@@ -4066,10 +4283,29 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                         try:
                             set_request_client_id(tenant["client_id"])
                             send_sms(from_number, msg[:1600], from_override=to_number)
-                        except Exception:
-                            pass
+                            sms_trace(
+                                "inbound_automation_sent",
+                                request_id=rid,
+                                automation_id=str(auto.get("id") or ""),
+                                template_len=len(msg),
+                            )
+                        except Exception as auto_err:
+                            sms_info(
+                                "inbound_automation_send_failed",
+                                request_id=rid,
+                                automation_id=str(auto.get("id") or ""),
+                                error_type=type(auto_err).__name__,
+                            )
+                            logger.warning("after_inquiry automation send failed: %s", auto_err, exc_info=True)
+        sms_trace("inbound_pipeline_done", request_id=rid, client_id=tenant["client_id"])
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
     except Exception as e:
+        sms_info(
+            "inbound_webhook_unhandled_exception",
+            error_type=type(e).__name__,
+            error=str(e)[:400],
+            request_id=rid,
+        )
         logger.exception("SMS webhook error: %s", e)
         return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
 

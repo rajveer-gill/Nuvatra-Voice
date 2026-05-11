@@ -116,11 +116,12 @@ Logs go to **stderr** with format `LEVEL|nuvatra|message`. Tune verbosity withou
 | **`LOG_LEVEL`** | `INFO` (default) or **`DEBUG`** — DEBUG shows more framework noise; pair with **`OBS_VERBOSE`** for app internals. |
 | **`OBS_VERBOSE=1`** | Extra **DEBUG** lines: slot availability, booking parser context, inbound SMS thread context. Does not log full SMS bodies at INFO (lengths only where relevant). |
 | **`OBS_TRACE_WEBHOOKS=1`** | **INFO** line for each **`/api/phone/*`** and **`/api/sms/*`** request: method, path, HTTP status, latency ms, **`X-Request-ID`**. Use this to match Twilio webhook delivery to your service in Render logs. |
+| **`OBS_TRACE_SMS=1`** | **INFO** lines for each inbound SMS pipeline step on **`/api/sms/incoming`**: signature mode, tenant resolution, compliance keywords, staff commands, usage snapshot, session/history, OpenAI request/result (lengths and **`finish_reason`** only), outbound send result, DB persist, lead capture and **`after_inquiry`** automations. Pair with **`OBS_TRACE_WEBHOOKS`** to correlate **`request_id`**. Remove after debugging. |
 | **`SETTINGS_LOAD_DEBUG=1`** | **INFO** lines for Settings dashboard loads: **`GET /api/business-info`**, **`/api/subscription`**, **`/api/sms-automations`**, **`/api/setup-status`** — response **keys** and **types** for `services` / `specials` / `reservation_rules` / `staff` (no PII). Remove after debugging. |
 
 Front-end: **`NEXT_PUBLIC_DEBUG_SETTINGS=1`** logs which of those requests failed in the **browser console** (status / message only, no token).
 
-Structured prefixes (grep-friendly): **`[SMS]`** (outbound/inbound, Twilio result, staff commands), **`[VOICE]`** (incoming call, tenant resolution, GPT/booking branch), **`[SYSTEM]`** (booking created/failed, slots), **`[USAGE]`** (plan cap, webhook rate limit), **`[AUTH]`** (invalid Twilio signature, subscription blocked), **`[HTTP]`** (webhook timing when **`OBS_TRACE_WEBHOOKS`** is on). Caller/callee phones are **masked** in those lines.
+Structured prefixes (grep-friendly): **`[SMS]`** (outbound/inbound, Twilio result, staff commands; detailed pipeline steps when **`OBS_TRACE_SMS`** is on), **`[VOICE]`** (incoming call, tenant resolution, GPT/booking branch), **`[SYSTEM]`** (booking created/failed, slots), **`[USAGE]`** (plan cap, webhook rate limit), **`[AUTH]`** (invalid Twilio signature, subscription blocked), **`[HTTP]`** (webhook timing when **`OBS_TRACE_WEBHOOKS`** is on). Caller/callee phones are **masked** in those lines.
 
 After dependency updates, run **`pip install -r backend/requirements.txt`** on Render (includes **`email-validator`** for staff email validation).
 
