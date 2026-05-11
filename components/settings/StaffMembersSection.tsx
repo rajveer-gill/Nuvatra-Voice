@@ -14,7 +14,7 @@ export type StaffRow = {
   notes: string
 }
 
-function normalizeStaffFromApi(raw: unknown): StaffRow[] {
+export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
   if (!Array.isArray(raw)) return []
   return raw.map((item) => {
     const o = item as Record<string, unknown>

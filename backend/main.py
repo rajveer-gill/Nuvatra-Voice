@@ -106,6 +106,33 @@ def _public_base_url() -> str:
     return (os.getenv("NGROK_URL") or os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
 
 
+def _settings_load_debug_enabled() -> bool:
+    """Set SETTINGS_LOAD_DEBUG=1 on Render to log Settings API diagnostics (keys/types only, no PII)."""
+    return os.getenv("SETTINGS_LOAD_DEBUG", "").strip().lower() in ("1", "true", "yes")
+
+
+def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) -> None:
+    if not _settings_load_debug_enabled():
+        return
+    cid = (tenant or {}).get("client_id") if tenant else None
+    prefix = (str(cid)[:10] + "…") if cid else "none"
+
+    def _tn(key: str) -> str:
+        v = out.get(key)
+        return type(v).__name__ if v is not None else "none"
+
+    logger.info(
+        "settings_load_debug GET /api/business-info client_id_prefix=%s response_keys=%s "
+        "services_ty=%s specials_ty=%s reservation_rules_ty=%s staff_ty=%s",
+        prefix,
+        sorted(out.keys()),
+        _tn("services"),
+        _tn("specials"),
+        _tn("reservation_rules"),
+        _tn("staff"),
+    )
+
+
 sentry_sdk.init(
     dsn=os.environ.get("SENTRY_DSN"),
     environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
@@ -2959,12 +2986,22 @@ async def get_sms_automations(tenant: Optional[dict] = Depends(require_active_su
     """List SMS automations. Growth/Pro only."""
     cid = get_db_client_id()
     if not cid or cid == "default":
+        if _settings_load_debug_enabled():
+            logger.info("settings_load_debug GET /api/sms-automations early_empty cid_default=%s", not cid or cid == "default")
         return {"automations": []}
     if get_plan_limits:
         limits = get_plan_limits(tenant) if tenant else {}
         if limits.get("sms_automations_max", 0) <= 0:
+            if _settings_load_debug_enabled():
+                logger.info("settings_load_debug GET /api/sms-automations plan_has_no_automations_slot")
             return {"automations": []}
     automations = db_sms_automations_get_all(cid)
+    if _settings_load_debug_enabled():
+        logger.info(
+            "settings_load_debug GET /api/sms-automations client_id_prefix=%s count=%s",
+            (str(cid)[:10] + "…") if cid else "none",
+            len(automations) if isinstance(automations, list) else "na",
+        )
     return {"automations": automations}
 
 @app.post("/api/sms-automations")
@@ -3041,6 +3078,15 @@ async def get_subscription(tenant: Optional[dict] = Depends(require_tenant)):
         }
     else:
         state["usage"] = {"voice_minutes": 0, "sms_count": 0, "month": datetime.now(timezone.utc).strftime("%Y-%m")}
+    if _settings_load_debug_enabled():
+        cid = (tenant or {}).get("client_id") if tenant else None
+        prefix = (str(cid)[:10] + "…") if cid else "none"
+        logger.info(
+            "settings_load_debug GET /api/subscription client_id_prefix=%s keys=%s can_use_app=%s",
+            prefix,
+            sorted(state.keys()) if isinstance(state, dict) else type(state).__name__,
+            (state.get("can_use_app") if isinstance(state, dict) else None),
+        )
     return state
 
 # ---------- Stripe billing ----------
@@ -3192,7 +3238,9 @@ async def stripe_webhook(request: Request):
 
 @app.get("/api/business-info")
 async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_subscription)):
-    return business_info_for_dashboard(tenant)
+    out = business_info_for_dashboard(tenant)
+    _settings_load_debug_log_business_info(tenant, out)
+    return out
 
 # Required and recommended fields so the AI receptionist can relay accurate info (any business type)
 # Setup checklist labels must stay in sync with Settings.tsx checklist rows.
@@ -3225,7 +3273,18 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
 @app.get("/api/setup-status")
 async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subscription)):
     """Return which required/recommended business info fields are missing. Used for setup checklist."""
-    return get_setup_status(info_override=business_info_for_dashboard(tenant))
+    info = business_info_for_dashboard(tenant)
+    body = get_setup_status(info_override=info)
+    if _settings_load_debug_enabled():
+        cid = (tenant or {}).get("client_id") if tenant else None
+        prefix = (str(cid)[:10] + "…") if cid else "none"
+        logger.info(
+            "settings_load_debug GET /api/setup-status client_id_prefix=%s complete=%s missing_n=%s",
+            prefix,
+            body.get("complete"),
+            len(body.get("missing") or []),
+        )
+    return body
 
 
 def _staff_sanitize_single_line(raw: Optional[str]) -> str:

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import * as Sentry from '@sentry/nextjs'
 import { useAuth } from '@clerk/nextjs'
 import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, CheckCircle2, Circle, AlertTriangle } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
@@ -26,6 +27,9 @@ import {
   type SpecialRow,
   type RuleRow,
 } from '@/components/settings/StructuredListEditors'
+
+/** Set NEXT_PUBLIC_DEBUG_SETTINGS=1 in .env.local (or Vercel) to log per-endpoint load outcomes — no tokens. */
+const DEBUG_SETTINGS = process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1'
 
 export default function Settings() {
   const { isLoaded, isSignedIn } = useAuth()
@@ -87,11 +91,25 @@ export default function Settings() {
     let cancelled = false
     setLoading(true)
 
+    const swallow =
+      (label: string, fallback: unknown) => (err: unknown) => {
+        if (DEBUG_SETTINGS) {
+          const ax = err as { response?: { status?: number; data?: unknown }; message?: string }
+          console.warn(
+            `[Settings] ${label} request failed`,
+            ax.response?.status ?? 'network',
+            ax.message,
+            ax.response?.data !== undefined ? '(body present)' : ''
+          )
+        }
+        return { data: fallback }
+      }
+
     Promise.all([
-      api.get('/api/business-info').catch(() => ({ data: null as unknown })),
-      api.get('/api/subscription').catch(() => ({ data: null })),
-      api.get('/api/sms-automations').catch(() => ({ data: { automations: [] } })),
-      api.get('/api/setup-status').catch(() => ({ data: null })),
+      api.get('/api/business-info').catch(swallow('business-info', null as unknown)),
+      api.get('/api/subscription').catch(swallow('subscription', null)),
+      api.get('/api/sms-automations').catch(swallow('sms-automations', { automations: [] })),
+      api.get('/api/setup-status').catch(swallow('setup-status', null)),
     ])
       .then(([infoRes, subRes, automationsRes, setupRes]) => {
         if (cancelled) return
@@ -105,6 +123,11 @@ export default function Settings() {
 
           const d = infoRes?.data as Record<string, unknown> | null | undefined
           if (!d) {
+            if (DEBUG_SETTINGS) {
+              console.warn(
+                '[Settings] business-info body is empty — open Network → /api/business-info (status, JSON, CORS)'
+              )
+            }
             return
           }
           setVoice((d.voice as string) || 'fable')
@@ -130,12 +153,20 @@ export default function Settings() {
           setVerticalLabel(String(d.business_vertical_label || ''))
         } catch (e) {
           console.error('[Settings] failed to apply API response', e)
+          Sentry.captureException(e instanceof Error ? e : new Error(String(e)), {
+            tags: { area: 'settings_load' },
+            extra: { phase: 'apply_response' },
+          })
           setMessage({ type: 'error', text: 'Failed to load settings' })
         }
       })
       .catch((err) => {
         if (cancelled) return
         console.error('[Settings] settings fetch failed', err)
+        Sentry.captureException(err instanceof Error ? err : new Error(String(err)), {
+          tags: { area: 'settings_load' },
+          extra: { phase: 'promise_all' },
+        })
         setMessage({ type: 'error', text: 'Failed to load settings' })
       })
       .finally(() => {
