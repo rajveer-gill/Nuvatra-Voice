@@ -39,6 +39,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
   const reduceMotion = useReducedMotion()
   const titleId = useId()
   const overlayScrollRef = useRef<HTMLDivElement>(null)
+  const dayListScrollRef = useRef<HTMLDivElement>(null)
   const [mounted, setMounted] = useState(false)
   const [schedule, setSchedule] = useState<WeeklySchedule>(() => defaultWeeklySchedule())
   const [parseWarning, setParseWarning] = useState<string | null>(null)
@@ -147,6 +148,14 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
     if (!validateTimes()) return
     onApply(weeklyScheduleToString(schedule))
     onClose()
+  }
+
+  /** Chrome steps `<input type="time">` with the wheel and swallow scroll; forward wheel to the day list. */
+  const forwardWheelToDayList = (e: React.WheelEvent<HTMLElement>) => {
+    const scroller = dayListScrollRef.current
+    if (!scroller) return
+    scroller.scrollTop += e.deltaY
+    e.preventDefault()
   }
 
   const dur = reduceMotion ? 0 : 0.22
@@ -265,16 +274,17 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-2 pr-1 pt-5 [-webkit-overflow-scrolling:touch] sm:space-y-4 sm:px-8">
+              <div
+                ref={dayListScrollRef}
+                data-hours-day-scroll
+                className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-2 pr-1 pt-5 [-webkit-overflow-scrolling:touch] sm:space-y-4 sm:px-8"
+              >
                 {DAYS_FULL.map((label, idx) => {
                   const i = idx as DayIndex
                   const row = schedule[i]
                   return (
-                    <m.div
+                    <div
                       key={label}
-                      initial={reduceMotion ? false : { opacity: 0, x: -8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: reduceMotion ? 0 : idx * 0.035, duration: dur }}
                       className="rounded-2xl border border-gray-100 bg-gradient-to-b from-gray-50/90 to-white p-4 shadow-sm sm:p-5"
                     >
                       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between lg:gap-6">
@@ -320,6 +330,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                                 value={row.open}
                                 step={300}
                                 onChange={(e) => updateDay(i, { open: e.target.value })}
+                                onWheel={forwardWheelToDayList}
                                 className="cs-field min-h-[44px] w-full min-w-[10rem] font-mono text-base"
                               />
                               <span className="text-xs text-gray-500">{formatTimeLabel(row.open)}</span>
@@ -333,6 +344,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                                 value={row.close}
                                 step={300}
                                 onChange={(e) => updateDay(i, { close: e.target.value })}
+                                onWheel={forwardWheelToDayList}
                                 className="cs-field min-h-[44px] w-full min-w-[10rem] font-mono text-base"
                               />
                               <span className="text-xs text-gray-500">{formatTimeLabel(row.close)}</span>
@@ -340,7 +352,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                           </div>
                         )}
                       </div>
-                    </m.div>
+                    </div>
                   )
                 })}
               </div>
