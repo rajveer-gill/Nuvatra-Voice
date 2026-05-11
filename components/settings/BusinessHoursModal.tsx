@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { m, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { Clock, Copy, Sparkles, Sun, X } from 'lucide-react'
@@ -38,6 +38,7 @@ export interface BusinessHoursModalProps {
 export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: BusinessHoursModalProps) {
   const reduceMotion = useReducedMotion()
   const titleId = useId()
+  const overlayScrollRef = useRef<HTMLDivElement>(null)
   const [mounted, setMounted] = useState(false)
   const [schedule, setSchedule] = useState<WeeklySchedule>(() => defaultWeeklySchedule())
   const [parseWarning, setParseWarning] = useState<string | null>(null)
@@ -60,6 +61,11 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
     return () => {
       document.body.style.overflow = prev
     }
+  }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen) return
+    overlayScrollRef.current?.scrollTo(0, 0)
   }, [isOpen])
 
   useEffect(() => {
@@ -151,7 +157,10 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
   const modal = (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain">
+        <div
+          ref={overlayScrollRef}
+          className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain"
+        >
           <m.button
             type="button"
             aria-label="Close"
@@ -162,12 +171,16 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
             transition={{ duration: dur }}
             onClick={onClose}
           />
-          <div className="relative z-[1] flex min-h-[100dvh] w-full items-start justify-center px-4 pb-12 pt-[max(1.25rem,calc(env(safe-area-inset-top,0px)+12px))] sm:items-center sm:px-6 sm:pb-16 sm:pt-[max(1.5rem,calc(env(safe-area-inset-top,0px)+16px))]">
+          {/*
+            Never vertically center with items-center: tall modals overflow above the viewport and clip the header.
+            Top padding + max-height reserves space; dialog stays below the browser chrome / notch.
+          */}
+          <div className="relative z-[1] flex w-full flex-col items-center px-4 pb-16 pt-[max(2.25rem,calc(env(safe-area-inset-top,0px)+32px))] sm:px-6 sm:pb-24 sm:pt-[max(3rem,calc(env(safe-area-inset-top,0px)+40px))]">
           <m.div
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className="relative z-[101] flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-gray-200/80 bg-white shadow-2xl shadow-primary-900/15 max-sm:mt-2 max-sm:max-h-[min(calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem),920px)] max-sm:rounded-3xl sm:my-8 sm:max-h-[min(calc(100dvh-3rem),920px)]"
+            className="relative z-[101] flex w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-gray-200/80 bg-white shadow-2xl shadow-primary-900/15 max-h-[min(920px,calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px)-7rem)]"
             initial={{ opacity: 0, y: reduceMotion ? 0 : 28, scale: reduceMotion ? 1 : 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: reduceMotion ? 0 : 16, scale: reduceMotion ? 1 : 0.98 }}
