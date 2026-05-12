@@ -31,7 +31,7 @@ See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `n
 | Backend | Render (`nuvatra-voice.onrender.com`) | Render dashboard > Environment tab |
 | Database | Render PostgreSQL (Virginia region) | Auto-linked via `DATABASE_URL` on Render |
 
-Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_JWKS_URL`, `ADMIN_CLERK_USER_IDS`, `FRONTEND_URL`.
+Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_JWKS_URL`, `ADMIN_CLERK_USER_IDS`, `FRONTEND_URL`, **`PUBLIC_BASE_URL`** (canonical HTTPS origin of this API, e.g. `https://nuvatra-voice.onrender.com` — no trailing slash). Twilio `<Play>` / webhook URLs use this when set; the app can still derive from `Host` / `X-Forwarded-*` if unset, but **setting it is recommended** for stable integrations and ops clarity.
 
 **Do not set `CLIENT_ID` on multi-tenant production** unless you run a true single-tenant instance. If `CLIENT_ID` is set to a dev value like `test`, any code path that runs before `require_tenant` sets the request context (or background jobs) will look for `clients/test/config.json` on disk and merge the wrong tenant. Leave `CLIENT_ID` **unset** on Render when using Clerk + PostgreSQL for all tenants.
 
@@ -75,7 +75,7 @@ Do this in order (human steps—cannot be done from git alone):
 
 ### Voice call recording (Twilio)
 
-- `CALL_RECORDING_ENABLED` — set to `true` on Render to start dual-channel full-call recording on inbound Twilio calls and to append a spoken disclosure to the greeting (“This call may be recorded for quality and training.”). Requires `NGROK_URL` (or equivalent public base URL) so Twilio can reach `/api/phone/recording-complete`.
+- `CALL_RECORDING_ENABLED` — set to `true` on Render to start dual-channel full-call recording on inbound Twilio calls and to append a spoken disclosure to the greeting (“This call may be recorded for quality and training.”). Requires a public API base URL (`PUBLIC_BASE_URL` on production, or `NGROK_URL` in dev) so Twilio can reach `/api/phone/recording-complete`.
 - `CALL_SUMMARY_ENABLED` — optional. If unset, defaults to the same as `CALL_RECORDING_ENABLED` (summaries on when recording is on). Set to `false` to disable post-call Whisper + GPT summaries and avoid that cost in dev.
 - `CALL_SUMMARY_MAX_DURATION_SEC` — optional cap (default `1800`); longer recordings skip summarization.
 - `TWILIO_INTELLIGENCE_SERVICE_SID` — optional; if set, logs that Intelligence is configured but Phase 1 still uses OpenAI for transcription/summary.
