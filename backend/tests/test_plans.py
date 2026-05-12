@@ -38,7 +38,7 @@ def test_get_plan_limits_pro():
     tenant = {"plan": "pro", "subscription_status": "active"}
     limits = get_plan_limits(tenant)
     assert limits["plan"] == "pro"
-    assert limits["minutes_cap"] == 10000
+    assert limits["minutes_cap"] == 3500
     assert limits["staff_max"] == 999
     assert limits["call_log_days"] == 9999
     assert limits["has_reminders"] is True

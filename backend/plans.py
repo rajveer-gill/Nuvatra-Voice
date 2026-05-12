@@ -3,7 +3,7 @@ Plan limits and helpers for Starter/Growth/Pro tiers.
 """
 from typing import Optional
 
-PLAN_MINUTES = {"starter": 500, "growth": 1500, "pro": 10000}
+PLAN_MINUTES = {"starter": 500, "growth": 1500, "pro": 3500}
 PLAN_STAFF_MAX = {"starter": 1, "growth": 5, "pro": 999}
 PLAN_CALL_LOG_DAYS = {"starter": 30, "growth": 90, "pro": 9999}
 PLAN_HAS_REMINDERS = {"starter": False, "growth": True, "pro": True}

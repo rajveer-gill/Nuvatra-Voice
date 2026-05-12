@@ -24,7 +24,7 @@ const PLANS = [
     name: 'Pro',
     price: '$399',
     description: 'Full capability & priority',
-    features: ['10,000 min/mo', 'Unlimited staff', 'All Growth features', 'Full analytics', 'Dedicated support'],
+    features: ['3,500 min/mo', 'Unlimited staff', 'All Growth features', 'Full analytics', 'Dedicated support'],
   },
 ]
 
