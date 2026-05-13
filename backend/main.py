@@ -3758,7 +3758,7 @@ def _restore_call_context(call_sid: str) -> bool:
 TTS_FALLBACK_TEXT = "We're experiencing a brief technical issue. Please try again in a moment."
 
 
-def _pcm_wav_silence(*, duration_sec: float = 0.3, sample_rate: int = 8000) -> bytes:
+def _pcm_wav_silence(*, duration_sec: float = 0.8, sample_rate: int = 8000) -> bytes:
     """Short mono 16-bit PCM WAV Twilio can fetch when OpenAI TTS returns errors (avoids 500 on <Play>)."""
     n_channels = 1
     bits_per_sample = 16
@@ -4538,22 +4538,21 @@ async def handle_incoming_call(request: Request):
                 recording_status_callback_method="POST",
             )
 
-        # Greeting audio uses voice from Settings; pass call_sid so we resolve client_id
+        # Greeting must be nested inside <Gather> so Twilio plays the prompt then listens.
+        # A standalone <Play> followed by an empty <Gather> can leave callers hearing nothing
+        # while speech recognition waits (especially across carriers / with <Start><Recording>).
         greeting_audio_url = f"{base_url}/api/phone/greeting-audio?{_phone_audio_query(call_sid, client_id)}"
-        response.play(greeting_audio_url)
-        
-        # Gather voice input from caller - start with English, will adapt based on detected language
-        # Note: For non-Latin scripts (Japanese, Punjabi, etc.), we'll use Record + Whisper in process-speech
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
             method='POST',
             speech_timeout='auto',
             language='en-US',  # Start with English, will be updated dynamically after first detection
-            hints='appointment, schedule, message, hours, contact, help'
+            hints='appointment, schedule, message, hours, contact, help',
         )
-        
-        # If no input, redirect to process speech anyway
+        gather.play(greeting_audio_url)
+
+        # If Gather times out without speech, continue the flow (same handler tolerates empty SpeechResult)
         response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
         
         return Response(content=str(response), media_type="application/xml")
