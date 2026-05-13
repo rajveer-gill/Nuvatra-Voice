@@ -3902,7 +3902,19 @@ async def _schedule_recording_summary(call_sid: str, client_id: str, recording_u
         logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
 
 
-@app.get("/api/phone/greeting-audio")
+@app.get(
+    "/api/phone/greeting-audio",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "Binary audio for Twilio Play (MP3 from OpenAI TTS, or WAV silence fallback).",
+            "content": {
+                "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+                "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+            },
+        }
+    },
+)
 async def get_greeting_audio(request: Request):
     """Serve greeting audio using the voice selected in Settings. Per-client cache."""
     global greeting_audio_cache
@@ -4006,7 +4018,19 @@ async def get_greeting_audio(request: Request):
             )
             return _response_twilio_silence_wav()
 
-@app.get("/api/phone/got-it-audio")
+@app.get(
+    "/api/phone/got-it-audio",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "Binary MP3 (or WAV fallback) for Twilio Play.",
+            "content": {
+                "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+                "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+            },
+        }
+    },
+)
 async def get_got_it_audio(request: Request):
     """Serve 'Got it, one moment' audio using the voice selected in Settings. Per-client cache."""
     global got_it_audio_cache
