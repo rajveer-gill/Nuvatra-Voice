@@ -103,6 +103,7 @@ from observability import (
     usage_warning,
     voice_debug,
     voice_info,
+    voice_trace,
     webhook_timing_middleware,
 )
 
@@ -313,7 +314,7 @@ async def request_id_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def observability_webhook_timing(request: Request, call_next):
-    """When OBS_TRACE_WEBHOOKS=1, log /api/phone/* and /api/sms/* latency and status."""
+    """Log /api/phone/* (and /api/sms/* when OBS_TRACE_WEBHOOKS) latency and status. OBS_TRACE_VOICE alone enables phone HTTP logs."""
     return await webhook_timing_middleware(request, call_next)
 
 
@@ -3905,11 +3906,28 @@ async def _schedule_recording_summary(call_sid: str, client_id: str, recording_u
 async def get_greeting_audio(request: Request):
     """Serve greeting audio using the voice selected in Settings. Per-client cache."""
     global greeting_audio_cache
+    rid = getattr(request.state, "request_id", None)
     client_id = _resolve_phone_audio_client_id(request)
     set_request_client_id(client_id)
     cache_key = (client_id, _call_recording_enabled())
+    voice_trace(
+        "greeting_audio_begin",
+        request_id=rid,
+        client_id=client_id,
+        query_keys=",".join(sorted(request.query_params.keys())),
+        ua=(request.headers.get("user-agent") or "")[:140],
+        proto=(request.headers.get("x-forwarded-proto") or request.url.scheme or "")[:16],
+        host=(request.headers.get("host") or "")[:120],
+    )
     cached = greeting_audio_cache.get(cache_key)
     if cached:
+        voice_info(
+            "greeting_audio_response",
+            bytes=len(cached),
+            cached=True,
+            media="audio/mpeg",
+            source="cache",
+        )
         return Response(
             content=cached,
             media_type="audio/mpeg",
@@ -3922,6 +3940,12 @@ async def get_greeting_audio(request: Request):
     try:
         voice = get_tts_voice()
         greeting_text = add_sentence_pauses(get_greeting_text())
+        voice_trace(
+            "greeting_audio_openai_request",
+            voice=voice,
+            greeting_chars=len(greeting_text or ""),
+            recording_disclosure=_call_recording_enabled(),
+        )
         greeting_audio = client.audio.speech.create(
             model="tts-1-hd",
             voice=voice,
@@ -3931,6 +3955,13 @@ async def get_greeting_audio(request: Request):
         data = greeting_audio.content
         greeting_audio_cache[cache_key] = data
         print(f"🎵 Greeting audio generated for {client_id} (voice={voice})")
+        voice_info(
+            "greeting_audio_response",
+            bytes=len(data),
+            cached=False,
+            media="audio/mpeg",
+            source="openai_tts_hd",
+        )
         return Response(
             content=data,
             media_type="audio/mpeg",
@@ -3944,6 +3975,7 @@ async def get_greeting_audio(request: Request):
         print(f"❌ Failed to generate greeting audio: {e}")
         import traceback
         traceback.print_exc()
+        voice_trace("greeting_audio_openai_failed", error_type=type(e).__name__, error=str(e)[:200])
         try:
             fallback_audio = client.audio.speech.create(
                 model="tts-1-hd",
@@ -3953,10 +3985,25 @@ async def get_greeting_audio(request: Request):
             )
             data = fallback_audio.content
             greeting_audio_cache[cache_key] = data
+            voice_info(
+                "greeting_audio_response",
+                bytes=len(data),
+                cached=False,
+                media="audio/mpeg",
+                source="openai_fallback_phrase",
+            )
             return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
         except Exception as e2:
             print(f"❌ Fallback greeting audio failed: {e2}")
             logger.warning("greeting_audio_openai_unavailable_returning_silence_wav")
+            bw = len(_pcm_wav_silence())
+            voice_info(
+                "greeting_audio_response",
+                bytes=bw,
+                cached=False,
+                media="audio/wav",
+                source="silence_wav",
+            )
             return _response_twilio_silence_wav()
 
 @app.get("/api/phone/got-it-audio")
@@ -3965,8 +4012,14 @@ async def get_got_it_audio(request: Request):
     global got_it_audio_cache
     client_id = _resolve_phone_audio_client_id(request)
     set_request_client_id(client_id)
+    voice_trace(
+        "got_it_audio_begin",
+        client_id=client_id,
+        ua=(request.headers.get("user-agent") or "")[:140],
+    )
     cached = got_it_audio_cache.get(client_id)
     if cached:
+        voice_info("got_it_audio_response", bytes=len(cached), cached=True, media="audio/mpeg", source="cache")
         return Response(
             content=cached,
             media_type="audio/mpeg",
@@ -3988,6 +4041,7 @@ async def get_got_it_audio(request: Request):
         data = got_it_audio.content
         got_it_audio_cache[client_id] = data
         print(f"🎵 'Got it' audio generated for {client_id} (voice={voice})")
+        voice_info("got_it_audio_response", bytes=len(data), cached=False, media="audio/mpeg", source="openai_tts_hd")
         return Response(
             content=data,
             media_type="audio/mpeg",
@@ -4010,10 +4064,13 @@ async def get_got_it_audio(request: Request):
             )
             data = fallback_audio.content
             got_it_audio_cache[client_id] = data
+            voice_info("got_it_audio_response", bytes=len(data), cached=False, media="audio/mpeg", source="openai_fallback_phrase")
             return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
         except Exception as e2:
             print(f"❌ Fallback 'got it' audio failed: {e2}")
             logger.warning("got_it_audio_openai_unavailable_returning_silence_wav")
+            bw = len(_pcm_wav_silence())
+            voice_info("got_it_audio_response", bytes=bw, cached=False, media="audio/wav", source="silence_wav")
             return _response_twilio_silence_wav()
 
 
@@ -4554,8 +4611,29 @@ async def handle_incoming_call(request: Request):
 
         # If Gather times out without speech, continue the flow (same handler tolerates empty SpeechResult)
         response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
-        
-        return Response(content=str(response), media_type="application/xml")
+
+        twxml = str(response)
+        nested_ok = (
+            "<Gather" in twxml
+            and "greeting-audio" in twxml
+            and twxml.find("<Gather") < twxml.find("greeting-audio") < twxml.find("</Gather>")
+        )
+        voice_info(
+            "incoming_call_twiml_returned",
+            call_sid=call_sid,
+            twiml_chars=len(twxml),
+            nested_greeting_in_gather=nested_ok,
+            recording_on=_call_recording_enabled(),
+        )
+        voice_trace(
+            "incoming_call_twiml_detail",
+            call_sid=call_sid,
+            client_id=client_id,
+            nested_greeting_in_gather=nested_ok,
+            twiml_tail=twxml[-400:] if len(twxml) > 400 else twxml,
+        )
+
+        return Response(content=twxml, media_type="application/xml")
     
     except Exception as e:
         print(f"❌ Error handling incoming call: {e}")

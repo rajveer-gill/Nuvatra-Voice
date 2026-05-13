@@ -5,6 +5,7 @@ Environment:
   LOG_LEVEL=INFO|DEBUG     — DEBUG enables verbose branches when combined with OBS_VERBOSE.
   OBS_VERBOSE=1            — Extra DEBUG logs inside SMS/voice/chat paths (slot checks, branches).
   OBS_TRACE_WEBHOOKS=1     — INFO log for each /api/phone/* and /api/sms/* request (timing + status).
+  OBS_TRACE_VOICE=1       — INFO logs for Twilio-fetched audio (greeting/got-it/TTS): cache, byte length, UA, errors (set on Render while debugging silent calls).
   OBS_TRACE_SMS=1          — INFO logs each inbound SMS pipeline step (tenant resolve, compliance, AI, DB); use when debugging delivery or replies.
 
 Phone numbers are masked in log lines (security.redaction).
@@ -28,6 +29,7 @@ def _truthy(name: str) -> bool:
 
 OBS_VERBOSE: bool = _truthy("OBS_VERBOSE")
 OBS_TRACE_WEBHOOKS: bool = _truthy("OBS_TRACE_WEBHOOKS")
+OBS_TRACE_VOICE: bool = _truthy("OBS_TRACE_VOICE")
 OBS_TRACE_SMS: bool = _truthy("OBS_TRACE_SMS")
 
 
@@ -114,6 +116,13 @@ def voice_debug(event: str, **fields: Any) -> None:
     voice_event(logging.DEBUG, event, **fields)
 
 
+def voice_trace(event: str, **fields: Any) -> None:
+    """Detailed voice / Twilio audio steps at INFO when OBS_TRACE_VOICE=1."""
+    if not OBS_TRACE_VOICE:
+        return
+    voice_event(logging.INFO, event, **fields)
+
+
 def system_info(event: str, **fields: Any) -> None:
     msg = _format_fields(fields)
     _log.info("[SYSTEM] %s | %s", event, msg)
@@ -148,18 +157,24 @@ def webhook_http_log(request_method: str, path: str, status_code: int, ms: float
 
 
 async def webhook_timing_middleware(request, call_next):
-    """When OBS_TRACE_WEBHOOKS=1, log latency and status for Twilio webhook routes."""
+    """Log latency and status for Twilio webhook routes when OBS_TRACE_WEBHOOKS or OBS_TRACE_VOICE (phone only)."""
     path = request.url.path
-    if not OBS_TRACE_WEBHOOKS or not (
-        path.startswith("/api/phone") or path.startswith("/api/sms")
-    ):
+    trace_sms = OBS_TRACE_WEBHOOKS and path.startswith("/api/sms")
+    trace_phone = (OBS_TRACE_WEBHOOKS and path.startswith("/api/phone")) or (
+        OBS_TRACE_VOICE and path.startswith("/api/phone")
+    )
+    if not (trace_sms or trace_phone):
         return await call_next(request)
     t0 = time.perf_counter()
     try:
         response = await call_next(request)
         ms = (time.perf_counter() - t0) * 1000
         rid = getattr(request.state, "request_id", "") or ""
-        webhook_http_log(request.method, path, response.status_code, ms, rid)
+        path_for_log = path
+        if OBS_TRACE_VOICE and request.method == "GET" and request.url.query:
+            q = request.url.query
+            path_for_log = f"{path}?{q[:220]}{'…' if len(q) > 220 else ''}"
+        webhook_http_log(request.method, path_for_log, response.status_code, ms, rid)
         return response
     except Exception:
         ms = (time.perf_counter() - t0) * 1000
