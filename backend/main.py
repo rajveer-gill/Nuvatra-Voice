@@ -1129,17 +1129,53 @@ def _is_sms_confirmation(body: str) -> bool:
     if not body or len(body) > 80:
         return False
     b = body.lower().strip()
-    confirm_words = (
-        "yes", "yep", "yeah", "confirm", "confirmed", "correct", "perfect", "good", "great",
-        "ok", "okay", "looks good", "look good", "that's right", "thats right", "all good",
-        "sounds good", "sounds great", "that works", "that works for me", "approved", "confirm"
+    # Whole-message exact matches
+    exact = (
+        "yes",
+        "yep",
+        "yeah",
+        "confirm",
+        "confirmed",
+        "correct",
+        "perfect",
+        "great",
+        "ok",
+        "okay",
+        "approved",
     )
-    if b in confirm_words:
+    if b in exact:
         return True
-    for w in confirm_words:
-        if w in b and len(b) <= 50:
+    # Multi-word phrases (substring OK; still length-capped above)
+    phrases = (
+        "looks good",
+        "look good",
+        "that's right",
+        "thats right",
+        "all good",
+        "sounds good",
+        "sounds great",
+        "that works for me",
+        "that works",
+    )
+    for p in phrases:
+        if p in b:
             return True
-    return False
+    # Single-word confirms: whole tokens only (avoids "yes" in "yesterday", "ok" in "token", "good" in "goods")
+    tokens = set(re.findall(r"[a-z0-9']+", b))
+    word_ok = {
+        "yes",
+        "yep",
+        "yeah",
+        "ok",
+        "confirm",
+        "confirmed",
+        "correct",
+        "perfect",
+        "great",
+        "approved",
+        "okay",
+    }
+    return bool(tokens & word_ok)
 
 
 def _sms_compliance_keyword(body: str) -> Optional[str]:
@@ -1947,7 +1983,8 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         f"Date: {apt.get('date', '')}\n"
                         f"Time: {_hhmm_to_ampm(apt.get('time', '') or '')}\n"
                         f"Service: {apt.get('reason', '')}\n\n"
-                        f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!"
+                        f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!\n\n"
+                        f"Msg & data rates may apply. Reply STOP to opt out."
                     )
                     # Prefer caller number from live call so confirmation SMS always goes to the right person
                     to_number = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
@@ -4135,6 +4172,27 @@ async def handle_incoming_sms(request: Request):
         else:
             sms_debug("inbound_no_pending_appointment", body_len=len(body), from_number=from_number)
             sms_trace("inbound_no_appointment_for_number", request_id=rid, body_len=len(body))
+        # Persist email from SMS while appointment is still pending_customer (e.g. "my email is x@y.com")
+        if apt and apt.get("status") == "pending_customer" and USE_DB and apt.get("id"):
+            em_match = re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", body or "", re.I)
+            if em_match:
+                em = em_match.group(0).strip()
+                try:
+                    aid = int(apt["id"])
+                    db_appointments_update(aid, email=em)
+                    apt = db_appointments_get_by_id(aid) or apt
+                    sms_info(
+                        "inbound_customer_email_saved_from_reply",
+                        apt_id=aid,
+                        client_id=tenant["client_id"],
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "inbound save email from SMS failed apt_id=%s: %s",
+                        apt.get("id"),
+                        e,
+                        exc_info=True,
+                    )
         session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
         messages = (session["messages"] if session else []) if session else []
         prior_turns = len(messages)
@@ -4164,7 +4222,10 @@ async def handle_incoming_sms(request: Request):
                 client_id=tenant["client_id"],
                 from_number=from_number,
             )
-            reply = "Thanks! We've sent this to the store. We'll text you when they confirm."
+            reply = (
+                "Thanks! We've sent this to the store. We'll text you when they confirm. "
+                "Msg & data rates may apply. Reply STOP to opt out."
+            )
             send_ok = send_sms(from_number, reply, from_override=to_number)
             sms_trace(
                 "inbound_customer_confirm_reply_sent",
@@ -4267,6 +4328,21 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                 request_id=rid,
                 client_id=tenant["client_id"],
                 openai_configured=openai_configured,
+            )
+            if apt and str(apt.get("status") or "") == "pending_customer":
+                reply = (
+                    "Thanks — we got that. Reply YES when everything looks right and we'll send it to the shop. "
+                    "Msg & data rates may apply. Reply STOP to opt out."
+                )
+            else:
+                reply = (
+                    "Thanks — we got your message and will follow up shortly. "
+                    "Msg & data rates may apply. Reply STOP to opt out."
+                )
+            sms_trace(
+                "inbound_ai_fallback_reply_used",
+                request_id=rid,
+                pending_customer=bool(apt and str(apt.get("status") or "") == "pending_customer"),
             )
         send_ok = False
         if reply:

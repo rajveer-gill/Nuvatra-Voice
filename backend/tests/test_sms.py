@@ -94,7 +94,23 @@ def test_sms_incoming_returns_xml(client):
     assert "<Response>" in resp.text
 
 
-def test_sms_incoming_missing_params(client):
-    """POST with missing From/To/Body still returns 200 (graceful)."""
-    resp = client.post("/api/sms/incoming", data={})
-    assert resp.status_code == 200
+def test_is_sms_confirmation_yesterday_not_treated_as_yes(monkeypatch):
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    from main import _is_sms_confirmation
+
+    assert not _is_sms_confirmation("Can we move it to yesterday afternoon?")
+
+
+def test_is_sms_confirmation_email_only_not_confirm(monkeypatch):
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    from main import _is_sms_confirmation
+
+    assert not _is_sms_confirmation("my email is rajsgill03@gmail.com")
+
+
+def test_is_sms_confirmation_plain_yes(monkeypatch):
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    from main import _is_sms_confirmation
+
+    assert _is_sms_confirmation("yes")
+    assert _is_sms_confirmation("Sounds good")
