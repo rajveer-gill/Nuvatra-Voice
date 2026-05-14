@@ -1,6 +1,6 @@
 """Unit tests for parse_booking."""
 import pytest
-from main import parse_booking
+from main import _strip_booking_directive_for_voice, parse_booking
 
 
 def test_parse_booking_valid():
@@ -45,3 +45,29 @@ def test_parse_booking_with_staff_field():
     got = parse_booking(text)
     assert got is not None
     assert got.get("staff") == "uuid-staff-1"
+
+
+def test_parse_booking_with_leading_prose_same_line():
+    text = "Awesome! BOOKING: Alex Pereira|||2026-05-19|3:00 PM|Nextiva|"
+    got = parse_booking(text)
+    assert got is not None
+    assert got["name"] == "Alex Pereira"
+    assert got["phone"] == ""
+    assert got["email"] == ""
+    assert got["date"] == "2026-05-19"
+    assert got["time"] == "3:00 PM"
+    assert got["reason"] == "Nextiva"
+
+
+def test_parse_booking_multiline_prose_before_marker():
+    text = "Sounds great.\nBOOKING: Sam|+15550001111|sam@x.com|2026-06-01|09:00|Cut|"
+    got = parse_booking(text)
+    assert got is not None
+    assert got["name"] == "Sam"
+    assert got["phone"] == "+15550001111"
+
+
+def test_strip_booking_directive_for_voice():
+    raw = "Great!\nBOOKING: X|y| |2026-01-02|10:00|Z|\nSee you then."
+    assert "BOOKING" not in _strip_booking_directive_for_voice(raw)
+    assert "Great" in _strip_booking_directive_for_voice(raw)

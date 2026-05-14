@@ -1743,27 +1743,37 @@ def _suggests_booking(text: str) -> bool:
     return any(k in t for k in ("book", "appointment", "reservation", "reserve", "schedule", "available", "slot", "time for"))
 
 def parse_booking(ai_text: str) -> Optional[dict]:
-    """If AI responded with BOOKING: name|phone|email|date|time|reason|staff_optional, return dict; else None."""
-    if not ai_text or "BOOKING:" not in ai_text:
+    """If AI responded with BOOKING: name|phone|email|date|time|reason|staff_optional, return dict; else None.
+
+    The marker may appear after prose on the same line or after newlines — not only at line start.
+    Empty fields are allowed (e.g. name|||date|time|reason with ||| for missing phone/email).
+    """
+    if not ai_text or "BOOKING:" not in ai_text.upper():
         return None
-    line = ai_text.strip()
-    for part in line.split("\n"):
-        part = part.strip()
-        if part.upper().startswith("BOOKING:"):
-            rest = part[len("BOOKING:"):].strip()
-            vals = [v.strip() for v in rest.split("|")]
-            if len(vals) >= 5:
-                return {
-                    "name": vals[0] if len(vals) > 0 else "",
-                    "phone": vals[1] if len(vals) > 1 else "",
-                    "email": vals[2] if len(vals) > 2 else "",
-                    "date": vals[3] if len(vals) > 3 else "",
-                    "time": vals[4] if len(vals) > 4 else "",
-                    "reason": vals[5] if len(vals) > 5 else "",
-                    "staff": vals[6] if len(vals) > 6 else "",
-                }
-            break
-    return None
+    m = re.search(r"(?is)BOOKING:\s*([^\n]+)", ai_text)
+    if not m:
+        return None
+    rest = (m.group(1) or "").strip()
+    vals = [v.strip() for v in rest.split("|")]
+    if len(vals) < 5:
+        return None
+    return {
+        "name": vals[0] if len(vals) > 0 else "",
+        "phone": vals[1] if len(vals) > 1 else "",
+        "email": vals[2] if len(vals) > 2 else "",
+        "date": vals[3] if len(vals) > 3 else "",
+        "time": vals[4] if len(vals) > 4 else "",
+        "reason": vals[5] if len(vals) > 5 else "",
+        "staff": vals[6] if len(vals) > 6 else "",
+    }
+
+
+def _strip_booking_directive_for_voice(ai_text: str) -> str:
+    """Remove BOOKING:... from model output so it is never read aloud by TTS."""
+    if not ai_text or "BOOKING:" not in ai_text.upper():
+        return (ai_text or "").strip()
+    cleaned = re.sub(r"(?is)\s*BOOKING:\s*[^\n]+", "", ai_text).strip()
+    return cleaned if cleaned else (ai_text or "").strip()
 
 
 def resolve_staff_id_from_booking_fragment(fragment: Optional[str]) -> Optional[str]:
@@ -2029,6 +2039,11 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             except Exception as e:
                 logger.exception("voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e)
                 ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
+        
+        # Never send BOOKING: machine line to TTS or conversation history
+        ai_text = _strip_booking_directive_for_voice(ai_text or "")
+        if not ai_text:
+            ai_text = "Thanks—we've noted that. Let us know if you need anything else."
         
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
@@ -2695,6 +2710,7 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
                 else:
                     ai_response = "That time slot just got booked. Would you like to try another time or another day?"
         
+        ai_response = _strip_booking_directive_for_voice(ai_response or "")
         if "schedule" in request.message.lower() or "appointment" in request.message.lower():
             action = action or "schedule_appointment"
         elif "message" in request.message.lower() or "leave a message" in request.message.lower():
