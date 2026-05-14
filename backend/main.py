@@ -502,6 +502,7 @@ try:
         db_tenant_update_subscription,
         db_tenant_set_billing_exempt,
         db_tenant_extend_trial,
+        db_tenant_set_twilio_phone,
         db_tenant_get_by_stripe_subscription_id,
         db_tenant_get_by_client_id,
         db_usage_get,
@@ -2549,6 +2550,9 @@ class AdminCreateTenantRequest(BaseModel):
     plan: Optional[str] = "starter"
     business_vertical: str = "salon_chair"
 
+class AdminTenantTwilioUpdate(BaseModel):
+    twilio_phone_number: str
+
 @app.get("/api/admin/session")
 async def admin_session(request: Request):
     """True if the bearer token user id is in ADMIN_CLERK_USER_IDS. No tenant required."""
@@ -2656,6 +2660,37 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
     if not USE_DB:
         return {"tenants": []}
     return {"tenants": db_tenant_list_all()}
+
+@app.patch("/api/admin/tenants/{tenant_id}/twilio-phone")
+async def admin_update_tenant_twilio_phone(
+    tenant_id: str,
+    req: AdminTenantTwilioUpdate,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
+    """Set the tenant's inbound Twilio number so SMS/voice webhooks resolve the tenant (E.164)."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    phone = (req.twilio_phone_number or "").strip()
+    if not phone.startswith("+"):
+        raise HTTPException(status_code=400, detail="twilio_phone_number must be E.164 (e.g. +15551234567)")
+    tenant = db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if not db_tenant_set_twilio_phone(tenant_id, phone):
+        raise HTTPException(status_code=500, detail="Failed to update Twilio number")
+    updated = db_tenant_get_by_id(tenant_id)
+    audit_log(
+        "admin",
+        "tenant_twilio_phone_updated",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"twilio_phone_number": phone},
+        request=request,
+    )
+    return {"success": True, "tenant": updated}
 
 @app.delete("/api/admin/tenants/{tenant_id}")
 async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: str = Depends(require_admin)):

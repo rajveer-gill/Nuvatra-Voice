@@ -49,6 +49,8 @@ export default function AdminPage() {
   const [exemptAction, setExemptAction] = useState<Record<string, string>>({})
   const [exemptUntilDate, setExemptUntilDate] = useState<Record<string, string>>({})
   const [sessionError, setSessionError] = useState<string | null>(null)
+  const [twilioDraft, setTwilioDraft] = useState<Record<string, string>>({})
+  const [twilioSaving, setTwilioSaving] = useState<string | null>(null)
 
   const listContainer = {
     hidden: {},
@@ -111,6 +113,16 @@ export default function AdminPage() {
     if (adminAllowed !== true) return
     fetchTenants()
   }, [adminAllowed, fetchTenants])
+
+  useEffect(() => {
+    setTwilioDraft((prev) => {
+      const next = { ...prev }
+      for (const t of tenants) {
+        if (next[t.id] === undefined) next[t.id] = t.twilio_phone_number
+      }
+      return next
+    })
+  }, [tenants])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -181,6 +193,27 @@ export default function AdminPage() {
       setError(err.response?.data?.detail || 'Failed to remove tenant')
     } finally {
       setDeleting(null)
+    }
+  }
+
+  const handleSaveTwilio = async (tenantId: string) => {
+    const phone = (twilioDraft[tenantId] || '').trim()
+    if (!phone.startsWith('+')) {
+      setError('Twilio number must be E.164 (start with +).')
+      return
+    }
+    setTwilioSaving(tenantId)
+    setError(null)
+    setSuccess(null)
+    try {
+      await api.patch(`/api/admin/tenants/${tenantId}/twilio-phone`, { twilio_phone_number: phone })
+      setSuccess('Twilio number saved. Inbound SMS/voice will match this number.')
+      await fetchTenants()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setError(err.response?.data?.detail || 'Failed to save Twilio number')
+    } finally {
+      setTwilioSaving(null)
     }
   }
 
@@ -363,6 +396,31 @@ export default function AdminPage() {
                           {t.subscription_status && (
                             <span className="text-xs text-zinc-500">status: {t.subscription_status}</span>
                           )}
+                        </div>
+                        <div className="mt-3 flex max-w-xl flex-wrap items-end gap-2">
+                          <div className="min-w-[200px] flex-1">
+                            <label className="mb-1 block text-xs font-medium text-zinc-500">
+                              Inbound Twilio number (E.164)
+                            </label>
+                            <input
+                              type="tel"
+                              autoComplete="tel"
+                              value={twilioDraft[t.id] ?? ''}
+                              onChange={(e) =>
+                                setTwilioDraft((d) => ({ ...d, [t.id]: e.target.value }))
+                              }
+                              placeholder="+15551234567"
+                              className={inputClass}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleSaveTwilio(t.id)}
+                            disabled={twilioSaving === t.id || !(twilioDraft[t.id] || '').trim()}
+                            className="rounded-lg bg-cyan-600/80 px-3 py-2 text-sm font-medium text-white motion-safe-transition hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {twilioSaving === t.id ? 'Saving…' : 'Save number'}
+                          </button>
                         </div>
                         {(t.trial_ends_at || t.billing_exempt_until) && (
                           <div className="mt-1 text-xs text-zinc-500">

@@ -640,6 +640,32 @@ def db_tenant_set_billing_exempt(tenant_id: str, exempt_until: Optional[datetime
         print(f"[DB] Failed to set billing exempt: {e}")
         return False
 
+def db_tenant_set_twilio_phone(tenant_id: str, twilio_phone_number: str) -> bool:
+    """Update tenant inbound Twilio number (E.164). Used when the live Twilio number was not stored at create time."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    phone = (twilio_phone_number or "").strip()
+    if not phone:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tenants SET twilio_phone_number = %s WHERE id = %s::uuid",
+            (phone, tenant_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to set tenant Twilio phone: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
 def db_tenant_extend_trial(tenant_id: str, trial_ends_at: datetime) -> bool:
     """Set trial_ends_at for a tenant (admin). Returns True on success."""
     conn = _get_conn()
