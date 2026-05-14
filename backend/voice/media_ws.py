@@ -1,0 +1,307 @@
+"""Twilio Media Streams WebSocket bridged to Deepgram live transcription."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Any, Optional
+
+import websockets
+from fastapi import WebSocket, WebSocketDisconnect
+
+from observability import voice_debug, voice_info
+from voice.deepgram_bridge import connect_deepgram_listen, parse_deepgram_transcript_message
+from voice.media_token import verify_media_stream_token
+from voice.stt_config import deepgram_max_frame_bytes, media_stream_max_sec, utterance_finalize_debounce_ms
+from voice.twilio_fallback_twiml import gather_process_speech_twiml
+from voice.twilio_media import parse_twilio_media_message, twilio_media_payload_bytes, twilio_start_meta
+from voice.utterance import apply_caller_utterance
+
+_log = logging.getLogger("nuvatra")
+
+
+class _UtteranceCollector:
+    """Accumulate Deepgram finals + last interim; commit once after debounce."""
+
+    def __init__(
+        self,
+        *,
+        call_sid: str,
+        base_url: str,
+        debounce_sec: float,
+        twilio_client: Any,
+        websocket: WebSocket,
+    ) -> None:
+        self.call_sid = call_sid
+        self.base_url = base_url
+        self.debounce_sec = debounce_sec
+        self.twilio_client = twilio_client
+        self.websocket = websocket
+        self.final_segments: list[str] = []
+        self.last_interim = ""
+        self.last_confidence = 0.0
+        self._debounce_task: Optional[asyncio.Task[None]] = None
+        self._committed = False
+
+    def _cancel_debounce(self) -> None:
+        if self._debounce_task and not self._debounce_task.done():
+            self._debounce_task.cancel()
+        self._debounce_task = None
+
+    def on_partial(self, text: str, confidence: float) -> None:
+        if self._committed:
+            return
+        if text:
+            self.last_interim = text
+            self.last_confidence = max(self.last_confidence, confidence)
+
+    def on_final_segment(self, text: str, confidence: float) -> None:
+        if self._committed:
+            return
+        if text:
+            self.final_segments.append(text)
+            self.last_confidence = max(self.last_confidence, confidence)
+        self._schedule_commit()
+
+    def _schedule_commit(self) -> None:
+        if self._committed:
+            return
+        self._cancel_debounce()
+        self._debounce_task = asyncio.create_task(self._debounced_commit())
+
+    async def _debounced_commit(self) -> None:
+        try:
+            await asyncio.sleep(self.debounce_sec)
+            await self.commit_now()
+        except asyncio.CancelledError:
+            return
+
+    def transcript(self) -> tuple[str, float]:
+        joined = " ".join(self.final_segments).strip()
+        if joined:
+            return joined, self.last_confidence
+        return (self.last_interim or "").strip(), self.last_confidence
+
+    async def commit_now(self) -> None:
+        if self._committed:
+            return
+        self._committed = True
+        self._cancel_debounce()
+        text, conf = self.transcript()
+        voice_info(
+            "utterance_final",
+            call_sid=self.call_sid,
+            transcript_len=len(text),
+            confidence=conf,
+        )
+        try:
+            result = await apply_caller_utterance(self.call_sid, text, conf, self.base_url)
+            if result.mode == "replace_call_twiml" and result.replacement_twiml and self.twilio_client:
+                try:
+                    await asyncio.to_thread(
+                        self.twilio_client.calls(self.call_sid).update,
+                        twiml=result.replacement_twiml,
+                    )
+                except Exception:
+                    _log.exception("twilio_calls_update_failed call_sid=%s", self.call_sid)
+        except Exception:
+            _log.exception("apply_caller_utterance_failed call_sid=%s", self.call_sid)
+        try:
+            await self.websocket.close()
+        except Exception:
+            pass
+
+
+async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any) -> None:
+    await websocket.accept()
+    voice_info("media_ws_open", path="/api/phone/media")
+    dg_ws: Any = None
+    collector: Optional[_UtteranceCollector] = None
+    call_sid: Optional[str] = None
+    base_url = ""
+    max_sec = media_stream_max_sec()
+    debounce_sec = utterance_finalize_debounce_ms() / 1000.0
+    stream_deadline: Optional[float] = None
+    audio_prebuffer = bytearray()
+    max_pre = 512 * 1024
+
+    async def fail_open_gather(reason: str) -> None:
+        voice_info("deepgram_connect_fail", reason=reason, call_sid=call_sid or "")
+        if twilio_client and call_sid and base_url:
+            try:
+                xml = gather_process_speech_twiml(call_sid, base_url)
+                await asyncio.to_thread(twilio_client.calls(call_sid).update, twiml=xml)
+            except Exception:
+                _log.exception("gather_fallback_calls_update_failed call_sid=%s", call_sid)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+    handshake_deadline = time.monotonic() + 25.0
+    try:
+        while time.monotonic() < handshake_deadline:
+            left = handshake_deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                raw_msg = await asyncio.wait_for(websocket.receive(), timeout=min(left, 5.0))
+            except asyncio.TimeoutError:
+                continue
+            mtype = raw_msg.get("type")
+            if mtype == "websocket.disconnect":
+                voice_info("media_ws_close", reason="client_disconnect", call_sid=call_sid or "")
+                return
+            if mtype != "websocket.receive":
+                continue
+            text = raw_msg.get("text")
+            if not isinstance(text, str):
+                continue
+            ev = parse_twilio_media_message(text)
+            if not ev:
+                voice_debug("frame_parse_errors", detail="invalid_json")
+                continue
+            kind = ev.get("event")
+            if kind == "connected":
+                voice_info("twilio_stream_connected")
+                continue
+            if kind == "media" and dg_ws is None:
+                payload = twilio_media_payload_bytes(ev, max_b64_len=deepgram_max_frame_bytes() * 2)
+                if payload and len(audio_prebuffer) + len(payload) <= max_pre:
+                    audio_prebuffer.extend(payload)
+                continue
+            if kind == "start":
+                cs, _ss, cp = twilio_start_meta(ev)
+                call_sid = cs
+                token = (cp or {}).get("token") or ""
+                if not call_sid or not verify_media_stream_token(token, call_sid):
+                    voice_info("media_ws_close", reason="invalid_token", call_sid=call_sid or "")
+                    await websocket.close(code=4401)
+                    return
+                import main as m
+
+                row = m.active_calls.get(call_sid) or {}
+                base_url = (row.get("twilio_public_base_url") or "").strip()
+                if not base_url:
+                    voice_info("media_ws_close", reason="missing_base_url", call_sid=call_sid)
+                    await websocket.close(code=4400)
+                    return
+                voice_info("twilio_stream_start", call_sid=call_sid)
+                stream_deadline = time.monotonic() + max_sec
+                try:
+                    dg_ws = await connect_deepgram_listen()
+                    voice_info("deepgram_connect_ok", call_sid=call_sid)
+                except Exception as e:
+                    await fail_open_gather(str(e))
+                    return
+                collector = _UtteranceCollector(
+                    call_sid=call_sid,
+                    base_url=base_url,
+                    debounce_sec=debounce_sec,
+                    twilio_client=twilio_client,
+                    websocket=websocket,
+                )
+                if audio_prebuffer:
+                    await dg_ws.send(bytes(audio_prebuffer))
+                    audio_prebuffer.clear()
+                break
+            voice_debug("twilio_unknown_event", event=str(kind))
+
+        if not dg_ws or not collector or not call_sid:
+            voice_info("media_ws_close", reason="handshake_timeout_or_invalid", call_sid=call_sid or "")
+            try:
+                await websocket.close(code=4408)
+            except Exception:
+                pass
+            return
+
+        async def pump_dg() -> None:
+            assert dg_ws is not None
+            assert collector is not None
+            try:
+                async for message in dg_ws:
+                    if isinstance(message, bytes):
+                        continue
+                    if not isinstance(message, str):
+                        continue
+                    parsed = parse_deepgram_transcript_message(message)
+                    if not parsed:
+                        continue
+                    t, is_final, conf = parsed
+                    if is_final:
+                        collector.on_final_segment(t, conf)
+                    else:
+                        collector.on_partial(t, conf)
+            except websockets.exceptions.ConnectionClosed:
+                voice_debug("deepgram_ws_closed", call_sid=call_sid)
+            except Exception:
+                _log.exception("pump_dg_failed call_sid=%s", call_sid)
+
+        dg_task = asyncio.create_task(pump_dg())
+
+        try:
+            while True:
+                if stream_deadline is not None:
+                    remaining = stream_deadline - time.monotonic()
+                    if remaining <= 0:
+                        voice_info("twilio_stream_stop", call_sid=call_sid, reason="max_duration")
+                        await collector.commit_now()
+                        break
+                    timeout = min(remaining, 1.0)
+                else:
+                    timeout = 30.0
+                try:
+                    raw_msg = await asyncio.wait_for(websocket.receive(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    continue
+                mtype = raw_msg.get("type")
+                if mtype == "websocket.disconnect":
+                    voice_info("media_ws_close", reason="client_disconnect", call_sid=call_sid)
+                    await collector.commit_now()
+                    break
+                if mtype != "websocket.receive":
+                    continue
+                wtext = raw_msg.get("text")
+                if not isinstance(wtext, str):
+                    continue
+                ev = parse_twilio_media_message(wtext)
+                if not ev:
+                    continue
+                kind = ev.get("event")
+                if kind == "media":
+                    payload = twilio_media_payload_bytes(ev)
+                    if payload and dg_ws:
+                        await dg_ws.send(payload)
+                elif kind == "stop":
+                    voice_info("twilio_stream_stop", call_sid=call_sid, reason="twilio_stop")
+                    await collector.commit_now()
+                    break
+        finally:
+            if collector and not collector._committed:
+                voice_info("twilio_stream_stop", call_sid=call_sid, reason="cleanup_pending")
+                await collector.commit_now()
+            dg_task.cancel()
+            try:
+                await dg_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await dg_ws.close()
+            except Exception:
+                pass
+    except WebSocketDisconnect:
+        voice_info("media_ws_close", reason="websocket_disconnect", call_sid=call_sid or "")
+        if collector and not collector._committed:
+            await collector.commit_now()
+    except Exception:
+        _log.exception("media_ws_unhandled")
+        if collector and not collector._committed:
+            try:
+                await collector.commit_now()
+            except Exception:
+                pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass

@@ -80,6 +80,17 @@ Do this in order (human steps—cannot be done from git alone):
 - `CALL_SUMMARY_MAX_DURATION_SEC` — optional cap (default `1800`); longer recordings skip summarization.
 - `TWILIO_INTELLIGENCE_SERVICE_SID` — optional; if set, logs that Intelligence is configured but Phase 1 still uses OpenAI for transcription/summary.
 
+### Voice streaming STT (Deepgram Nova-2, optional)
+
+- Default is Twilio `<Gather input="speech">` (`VOICE_STT_PROVIDER` unset or `twilio`).
+- Set **`VOICE_STT_PROVIDER=deepgram`** on Render to use **Twilio `<Connect><Stream>` → `wss://…/api/phone/media`** bridged to **Deepgram Nova-2** live transcription (8 kHz mu-law). When the media WebSocket closes, Twilio continues to the queued **got-it** audio and **`/api/phone/respond`** polling, matching the Gather path.
+- **`DEEPGRAM_API_KEY`** — required for the Deepgram path (Render secret; never log or expose client-side).
+- **`MEDIA_STREAM_SIGNING_SECRET`** — optional HMAC secret for stream URL tokens; if unset, **`TWILIO_AUTH_TOKEN`** is used for signing (must be set for the Deepgram path to activate).
+- **`PUBLIC_BASE_URL`** (HTTPS origin of the API) should be set in production so TwiML builds a stable **`wss://`** media URL (the app can derive from `Host` / `X-Forwarded-*` if unset).
+- Optional tuning: **`VOICE_MEDIA_STREAM_MAX_SEC`** (default `30`), **`VOICE_DEEPGRAM_FINAL_DEBOUNCE_MS`** (default `450`).
+- **Rollback**: set `VOICE_STT_PROVIDER=twilio` or remove it, redeploy; inbound calls use Gather again.
+- **Scaling**: media streams still rely on in-memory `active_calls` / `response_status`; multiple stateless workers without sticky sessions can mis-route streaming calls—prefer a single voice worker or external session affinity until Redis-backed state exists.
+
 Ensure your jurisdiction’s consent/recording rules are satisfied; the disclosure is part of the generated greeting audio when recording is enabled.
 
 ### Linting
@@ -116,13 +127,12 @@ Logs go to **stderr** with format `LEVEL|nuvatra|message`. Tune verbosity withou
 | **`LOG_LEVEL`** | `INFO` (default) or **`DEBUG`** — DEBUG shows more framework noise; pair with **`OBS_VERBOSE`** for app internals. |
 | **`OBS_VERBOSE=1`** | Extra **DEBUG** lines: slot availability, booking parser context, inbound SMS thread context. Does not log full SMS bodies at INFO (lengths only where relevant). |
 | **`OBS_TRACE_WEBHOOKS=1`** | **INFO** line for each **`/api/phone/*`** and **`/api/sms/*`** request: method, path, HTTP status, latency ms, **`X-Request-ID`**. Use this to match Twilio webhook delivery to your service in Render logs. |
-| **`OBS_TRACE_VOICE=1`** | **INFO** lines for Twilio audio debugging: **`greeting_audio_*`** (bytes, cache, source), **`incoming_call_twiml_returned`**, plus **`[HTTP]`** for **`/api/phone/*`** only (with query string on GETs). Use when debugging silent calls; pair with **`LOG_LEVEL=INFO`**. Remove after debugging. |
 | **`OBS_TRACE_SMS=1`** | **INFO** lines for each inbound SMS pipeline step on **`/api/sms/incoming`**: signature mode, tenant resolution, compliance keywords, staff commands, usage snapshot, session/history, OpenAI request/result (lengths and **`finish_reason`** only), outbound send result, DB persist, lead capture and **`after_inquiry`** automations. Pair with **`OBS_TRACE_WEBHOOKS`** to correlate **`request_id`**. Remove after debugging. |
 | **`SETTINGS_LOAD_DEBUG=1`** | **INFO** lines for Settings dashboard loads: **`GET /api/business-info`**, **`/api/subscription`**, **`/api/sms-automations`**, **`/api/setup-status`** — response **keys** and **types** for `services` / `specials` / `reservation_rules` / `staff` (no PII). Remove after debugging. |
 
 Front-end: **`NEXT_PUBLIC_DEBUG_SETTINGS=1`** logs which of those requests failed in the **browser console** (status / message only, no token).
 
-Structured prefixes (grep-friendly): **`[SMS]`** (outbound/inbound, Twilio result, staff commands; detailed pipeline steps when **`OBS_TRACE_SMS`** is on), **`[VOICE]`** (incoming call, tenant resolution, greeting/got-it bytes, GPT/booking branch; extra detail when **`OBS_TRACE_VOICE`** is on), **`[SYSTEM]`** (booking created/failed, slots), **`[USAGE]`** (plan cap, webhook rate limit), **`[AUTH]`** (invalid Twilio signature, subscription blocked), **`[HTTP]`** (webhook timing when **`OBS_TRACE_WEBHOOKS`** or **`OBS_TRACE_VOICE`** (phone routes only) is on). Caller/callee phones are **masked** in those lines.
+Structured prefixes (grep-friendly): **`[SMS]`** (outbound/inbound, Twilio result, staff commands; detailed pipeline steps when **`OBS_TRACE_SMS`** is on), **`[VOICE]`** (incoming call, tenant resolution, GPT/booking branch), **`[SYSTEM]`** (booking created/failed, slots), **`[USAGE]`** (plan cap, webhook rate limit), **`[AUTH]`** (invalid Twilio signature, subscription blocked), **`[HTTP]`** (webhook timing when **`OBS_TRACE_WEBHOOKS`** is on). Caller/callee phones are **masked** in those lines.
 
 After dependency updates, run **`pip install -r backend/requirements.txt`** on Render (includes **`email-validator`** for staff email validation).
 

@@ -1,6 +1,6 @@
 import sys
 
-from fastapi import FastAPI, HTTPException, Request, Form, Depends
+from fastapi import FastAPI, HTTPException, Request, Form, Depends, WebSocket
 from contextlib import asynccontextmanager
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +24,6 @@ import math
 import time
 import json
 import re
-import struct
 from pathlib import Path
 import shutil
 import io
@@ -49,14 +48,10 @@ except ImportError:
     get_plan_limits = None  # type: ignore
 
 try:
-    from voice_preview import add_sentence_pauses, TTS_VOICES
+    from voice_preview import add_sentence_pauses
 except ImportError:
     def add_sentence_pauses(text: str) -> str:
         return (text or "").strip()
-
-    TTS_VOICES = ["nova", "alloy", "echo", "fable", "onyx", "shimmer"]
-
-_TTS_VOICE_ALLOWLIST = frozenset(str(v).lower() for v in TTS_VOICES)
 
 try:
     import stripe
@@ -103,7 +98,6 @@ from observability import (
     usage_warning,
     voice_debug,
     voice_info,
-    voice_trace,
     webhook_timing_middleware,
 )
 
@@ -314,7 +308,7 @@ async def request_id_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def observability_webhook_timing(request: Request, call_next):
-    """Log /api/phone/* (and /api/sms/* when OBS_TRACE_WEBHOOKS) latency and status. OBS_TRACE_VOICE alone enables phone HTTP logs."""
+    """When OBS_TRACE_WEBHOOKS=1, log /api/phone/* and /api/sms/* latency and status."""
     return await webhook_timing_middleware(request, call_next)
 
 
@@ -424,6 +418,31 @@ elif not TWILIO_AVAILABLE:
     print("WARNING: Twilio not installed - phone features disabled. Install with: pip install twilio")
 elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
     print("WARNING: Twilio credentials not found - phone features will be disabled")
+
+
+def _voice_stt_use_deepgram() -> bool:
+    """Nova-2 live STT via Twilio Media Streams when env and credentials are present."""
+    try:
+        from voice.stt_config import voice_stt_provider, deepgram_api_key, media_stream_signing_secret
+    except ImportError:
+        return False
+    if voice_stt_provider() != "deepgram":
+        return False
+    if not deepgram_api_key():
+        logger.warning(
+            "[VOICE] VOICE_STT_PROVIDER=deepgram but DEEPGRAM_API_KEY is unset; falling back to Twilio Gather"
+        )
+        return False
+    if not media_stream_signing_secret():
+        logger.warning(
+            "[VOICE] VOICE_STT_PROVIDER=deepgram but MEDIA_STREAM_SIGNING_SECRET and TWILIO_AUTH_TOKEN "
+            "are unset; cannot sign media WebSocket; falling back to Twilio Gather"
+        )
+        return False
+    if not TWILIO_AVAILABLE or not twilio_client:
+        logger.warning("[VOICE] VOICE_STT_PROVIDER=deepgram but Twilio client is unavailable")
+        return False
+    return True
 
 # Project root (parent of backend) for client configs
 PROJECT_ROOT = _backend_dir.parent
@@ -866,8 +885,7 @@ def get_business_info() -> dict:
 
 def get_tts_voice() -> str:
     """Voice for TTS (phone/SMS). From business config or default fable."""
-    v = (get_business_info().get("voice", "fable") or "fable").strip().lower()
-    return v if v in _TTS_VOICE_ALLOWLIST else "fable"
+    return get_business_info().get("voice", "fable") or "fable"
 
 def get_tts_speed() -> float:
     """Speaking speed for TTS (OpenAI allows 0.25–4.0). From business config or default 1.0."""
@@ -3758,87 +3776,16 @@ def _restore_call_context(call_sid: str) -> bool:
 # Fallback when OpenAI/TTS fails - play this so caller does not get dead air
 TTS_FALLBACK_TEXT = "We're experiencing a brief technical issue. Please try again in a moment."
 
-
-def _pcm_wav_silence(*, duration_sec: float = 0.8, sample_rate: int = 8000) -> bytes:
-    """Short mono 16-bit PCM WAV Twilio can fetch when OpenAI TTS returns errors (avoids 500 on <Play>)."""
-    n_channels = 1
-    bits_per_sample = 16
-    n_samples = max(1, int(sample_rate * duration_sec))
-    block_align = n_channels * (bits_per_sample // 8)
-    byte_rate = sample_rate * block_align
-    data_size = n_samples * block_align
-    riff_chunk_size = 36 + data_size
-    return b"".join(
-        [
-            b"RIFF",
-            struct.pack("<I", riff_chunk_size),
-            b"WAVE",
-            b"fmt ",
-            struct.pack("<IHHIIHH", 16, 1, n_channels, sample_rate, byte_rate, block_align, bits_per_sample),
-            b"data",
-            struct.pack("<I", data_size),
-            b"\x00" * data_size,
-        ]
-    )
-
-
-def _response_twilio_silence_wav() -> Response:
-    body = _pcm_wav_silence()
-    return Response(
-        content=body,
-        media_type="audio/wav",
-        headers={
-            "Content-Disposition": "inline; filename=fallback.wav",
-            "Cache-Control": "no-cache",
-            "Content-Length": str(len(body)),
-        },
-    )
-
 # Response generation status (for 2-step flow to eliminate dead air)
 response_status = {}  # {call_sid: {"status": "pending"|"ready"|"error", "audio_url": str, "ai_text": str}}
 
 
 
-def _phone_audio_query(call_sid: Optional[str], client_id: Optional[str]) -> str:
-    """Query string for Twilio-fetched audio URLs (must survive multi-instance: pass client_id)."""
-    parts: List[str] = []
-    if call_sid:
-        parts.append(f"call_sid={quote(str(call_sid), safe='')}")
-    if client_id:
-        parts.append(f"client_id={quote(str(client_id), safe='')}")
-    return "&".join(parts)
-
-
-def _resolve_phone_audio_client_id(request: Request) -> str:
-    """
-    Resolve tenant for greeting / got-it TTS.
-    Prefer in-process active_calls; if missing (another Render instance), use client_id query param
-    when it matches a real tenant so Twilio's <Play> GET still loads the correct config.
-    """
-    call_sid = (request.query_params.get("call_sid") or "").strip()
-    q_cid = (request.query_params.get("client_id") or "").strip()
-
+def _get_client_id_from_call(request: Request) -> str:
+    """Resolve client_id from call_sid query param (active_calls). Fallback to env CLIENT_ID or default."""
+    call_sid = request.query_params.get("call_sid")
     if call_sid and call_sid in active_calls:
-        mem = active_calls[call_sid].get("client_id") or CLIENT_ID or "default"
-        if q_cid and q_cid != mem:
-            return mem
-        return mem
-
-    if q_cid:
-        if USE_DB and _db_imported:
-            try:
-                if db_tenant_get_by_client_id(q_cid):
-                    return q_cid
-            except Exception:
-                pass
-        env_cid = (CLIENT_ID or "").strip()
-        if env_cid and q_cid == env_cid:
-            return q_cid
-        if q_cid == "default":
-            return "default"
-        if not USE_DB and q_cid:
-            return q_cid
-
+        return active_calls[call_sid].get("client_id") or CLIENT_ID or "default"
     return CLIENT_ID or "default"
 
 
@@ -3902,44 +3849,15 @@ async def _schedule_recording_summary(call_sid: str, client_id: str, recording_u
         logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
 
 
-@app.get(
-    "/api/phone/greeting-audio",
-    response_class=Response,
-    responses={
-        200: {
-            "description": "Binary audio for Twilio Play (MP3 from OpenAI TTS, or WAV silence fallback).",
-            "content": {
-                "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
-                "audio/wav": {"schema": {"type": "string", "format": "binary"}},
-            },
-        }
-    },
-)
+@app.get("/api/phone/greeting-audio")
 async def get_greeting_audio(request: Request):
     """Serve greeting audio using the voice selected in Settings. Per-client cache."""
     global greeting_audio_cache
-    rid = getattr(request.state, "request_id", None)
-    client_id = _resolve_phone_audio_client_id(request)
+    client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
     cache_key = (client_id, _call_recording_enabled())
-    voice_trace(
-        "greeting_audio_begin",
-        request_id=rid,
-        client_id=client_id,
-        query_keys=",".join(sorted(request.query_params.keys())),
-        ua=(request.headers.get("user-agent") or "")[:140],
-        proto=(request.headers.get("x-forwarded-proto") or request.url.scheme or "")[:16],
-        host=(request.headers.get("host") or "")[:120],
-    )
     cached = greeting_audio_cache.get(cache_key)
     if cached:
-        voice_info(
-            "greeting_audio_response",
-            bytes=len(cached),
-            cached=True,
-            media="audio/mpeg",
-            source="cache",
-        )
         return Response(
             content=cached,
             media_type="audio/mpeg",
@@ -3952,12 +3870,6 @@ async def get_greeting_audio(request: Request):
     try:
         voice = get_tts_voice()
         greeting_text = add_sentence_pauses(get_greeting_text())
-        voice_trace(
-            "greeting_audio_openai_request",
-            voice=voice,
-            greeting_chars=len(greeting_text or ""),
-            recording_disclosure=_call_recording_enabled(),
-        )
         greeting_audio = client.audio.speech.create(
             model="tts-1-hd",
             voice=voice,
@@ -3967,13 +3879,6 @@ async def get_greeting_audio(request: Request):
         data = greeting_audio.content
         greeting_audio_cache[cache_key] = data
         print(f"🎵 Greeting audio generated for {client_id} (voice={voice})")
-        voice_info(
-            "greeting_audio_response",
-            bytes=len(data),
-            cached=False,
-            media="audio/mpeg",
-            source="openai_tts_hd",
-        )
         return Response(
             content=data,
             media_type="audio/mpeg",
@@ -3987,7 +3892,6 @@ async def get_greeting_audio(request: Request):
         print(f"❌ Failed to generate greeting audio: {e}")
         import traceback
         traceback.print_exc()
-        voice_trace("greeting_audio_openai_failed", error_type=type(e).__name__, error=str(e)[:200])
         try:
             fallback_audio = client.audio.speech.create(
                 model="tts-1-hd",
@@ -3997,53 +3901,19 @@ async def get_greeting_audio(request: Request):
             )
             data = fallback_audio.content
             greeting_audio_cache[cache_key] = data
-            voice_info(
-                "greeting_audio_response",
-                bytes=len(data),
-                cached=False,
-                media="audio/mpeg",
-                source="openai_fallback_phrase",
-            )
             return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
         except Exception as e2:
             print(f"❌ Fallback greeting audio failed: {e2}")
-            logger.warning("greeting_audio_openai_unavailable_returning_silence_wav")
-            bw = len(_pcm_wav_silence())
-            voice_info(
-                "greeting_audio_response",
-                bytes=bw,
-                cached=False,
-                media="audio/wav",
-                source="silence_wav",
-            )
-            return _response_twilio_silence_wav()
+            raise HTTPException(status_code=500, detail=f"Failed to generate greeting: {e}")
 
-@app.get(
-    "/api/phone/got-it-audio",
-    response_class=Response,
-    responses={
-        200: {
-            "description": "Binary MP3 (or WAV fallback) for Twilio Play.",
-            "content": {
-                "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
-                "audio/wav": {"schema": {"type": "string", "format": "binary"}},
-            },
-        }
-    },
-)
+@app.get("/api/phone/got-it-audio")
 async def get_got_it_audio(request: Request):
     """Serve 'Got it, one moment' audio using the voice selected in Settings. Per-client cache."""
     global got_it_audio_cache
-    client_id = _resolve_phone_audio_client_id(request)
+    client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
-    voice_trace(
-        "got_it_audio_begin",
-        client_id=client_id,
-        ua=(request.headers.get("user-agent") or "")[:140],
-    )
     cached = got_it_audio_cache.get(client_id)
     if cached:
-        voice_info("got_it_audio_response", bytes=len(cached), cached=True, media="audio/mpeg", source="cache")
         return Response(
             content=cached,
             media_type="audio/mpeg",
@@ -4065,7 +3935,6 @@ async def get_got_it_audio(request: Request):
         data = got_it_audio.content
         got_it_audio_cache[client_id] = data
         print(f"🎵 'Got it' audio generated for {client_id} (voice={voice})")
-        voice_info("got_it_audio_response", bytes=len(data), cached=False, media="audio/mpeg", source="openai_tts_hd")
         return Response(
             content=data,
             media_type="audio/mpeg",
@@ -4088,14 +3957,10 @@ async def get_got_it_audio(request: Request):
             )
             data = fallback_audio.content
             got_it_audio_cache[client_id] = data
-            voice_info("got_it_audio_response", bytes=len(data), cached=False, media="audio/mpeg", source="openai_fallback_phrase")
             return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
         except Exception as e2:
             print(f"❌ Fallback 'got it' audio failed: {e2}")
-            logger.warning("got_it_audio_openai_unavailable_returning_silence_wav")
-            bw = len(_pcm_wav_silence())
-            voice_info("got_it_audio_response", bytes=bw, cached=False, media="audio/wav", source="silence_wav")
-            return _response_twilio_silence_wav()
+            raise HTTPException(status_code=500, detail=f"Failed to generate 'got it' audio: {e}")
 
 
 @app.post("/api/sms/incoming")
@@ -4590,7 +4455,6 @@ async def handle_incoming_call(request: Request):
             "caller_memory": caller_memory,
         }
         
-        # Absolute HTTPS base for <Play> / <Gather> — Twilio rejects relative URLs (call ends immediately).
         base_url = _twilio_base_url(request)
         if not base_url:
             logger.error(
@@ -4606,58 +4470,77 @@ async def handle_incoming_call(request: Request):
             fail_twiml.hangup()
             return Response(content=str(fail_twiml), media_type="application/xml")
 
+        active_calls[call_sid]["twilio_public_base_url"] = base_url
+
         # Create TwiML response
         response = VoiceResponse()
 
         if TWILIO_AVAILABLE and VoiceResponse and _call_recording_enabled():
             cb = f"{base_url.rstrip('/')}/api/phone/recording-complete"
             start = response.start()
-            # <Start><Recording> (dual channel) — requires twilio>=9 (Start.recording missing in 8.x).
             start.recording(
                 channels="dual",
                 recording_status_callback=cb,
                 recording_status_callback_method="POST",
             )
 
-        # Greeting must be nested inside <Gather> so Twilio plays the prompt then listens.
-        # A standalone <Play> followed by an empty <Gather> can leave callers hearing nothing
-        # while speech recognition waits (especially across carriers / with <Start><Recording>).
-        greeting_audio_url = f"{base_url}/api/phone/greeting-audio?{_phone_audio_query(call_sid, client_id)}"
+        # Greeting audio uses voice from Settings; pass call_sid so we resolve client_id
+        greeting_audio_url = f"{base_url}/api/phone/greeting-audio?call_sid={call_sid}"
+
+        from voice.stt_config import deepgram_env_block_reason, voice_stt_provider
+
+        use_deepgram_stt = _voice_stt_use_deepgram()
+        voice_info(
+            "incoming_call_stt_provider",
+            provider="deepgram" if use_deepgram_stt else "twilio",
+            call_sid=call_sid,
+        )
+        if voice_stt_provider() == "deepgram" and not use_deepgram_stt:
+            env_r = deepgram_env_block_reason()
+            if env_r:
+                voice_info("deepgram_requested_but_disabled", reason=env_r, call_sid=call_sid)
+            else:
+                voice_info(
+                    "deepgram_requested_but_disabled",
+                    reason="twilio_client_unavailable_or_twilio_not_installed",
+                    call_sid=call_sid,
+                )
+
+        if use_deepgram_stt:
+            from twilio.twiml.voice_response import Connect, Stream
+
+            from voice.media_token import mint_media_stream_token
+            from voice.stt_config import http_to_ws_base
+
+            response.play(greeting_audio_url)
+            wss_base = http_to_ws_base(base_url)
+            stream_url = f"{wss_base}/api/phone/media"
+            token = mint_media_stream_token(call_sid)
+            connect = Connect()
+            stream = Stream(url=stream_url)
+            if token:
+                stream.parameter(name="token", value=token)
+            connect.append(stream)
+            response.append(connect)
+            got_it_audio_url = f"{base_url}/api/phone/got-it-audio?call_sid={call_sid}"
+            response.play(got_it_audio_url)
+            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            return Response(content=str(response), media_type="application/xml")
+
         gather = response.gather(
             input='speech',
             action=f"{base_url}/api/phone/process-speech",
             method='POST',
             speech_timeout='auto',
             language='en-US',  # Start with English, will be updated dynamically after first detection
-            hints='appointment, schedule, message, hours, contact, help',
+            hints='appointment, schedule, message, hours, contact, help'
         )
         gather.play(greeting_audio_url)
 
-        # If Gather times out without speech, continue the flow (same handler tolerates empty SpeechResult)
+        # If no input, redirect to process speech anyway
         response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
 
-        twxml = str(response)
-        nested_ok = (
-            "<Gather" in twxml
-            and "greeting-audio" in twxml
-            and twxml.find("<Gather") < twxml.find("greeting-audio") < twxml.find("</Gather>")
-        )
-        voice_info(
-            "incoming_call_twiml_returned",
-            call_sid=call_sid,
-            twiml_chars=len(twxml),
-            nested_greeting_in_gather=nested_ok,
-            recording_on=_call_recording_enabled(),
-        )
-        voice_trace(
-            "incoming_call_twiml_detail",
-            call_sid=call_sid,
-            client_id=client_id,
-            nested_greeting_in_gather=nested_ok,
-            twiml_tail=twxml[-400:] if len(twxml) > 400 else twxml,
-        )
-
-        return Response(content=twxml, media_type="application/xml")
+        return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
         print(f"❌ Error handling incoming call: {e}")
@@ -4670,13 +4553,18 @@ async def handle_incoming_call(request: Request):
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
             print(f"🔄 Error on incoming call - forwarding to business phone: {forwarding_phone}")
+            error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
+            error_encoded = quote(error_text)
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
+            response.play(tts_audio_url)
             response = forward_call_to_business(forwarding_phone, base_url, "English")
             return Response(content=str(response), media_type="application/xml")
         else:
-            response.say(
-                "I'm sorry, I'm having technical difficulties. Please try again later.",
-                voice="alice",
-            )
+            # Fallback: just say error message if no forwarding number
+            error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
+            error_encoded = quote(error_text)
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
+            response.play(tts_audio_url)
             response.hangup()
             return Response(content=str(response), media_type="application/xml")
 
@@ -4758,183 +4646,28 @@ async def process_speech(request: Request):
         call_sid = form_data.get("CallSid")
         speech_result = form_data.get("SpeechResult", "")
         confidence = form_data.get("Confidence", "0")
-        recording_url = form_data.get("RecordingUrl", "")  # Get recording URL if available
-        
+
         print(f"🎤 Speech received: {speech_result} (confidence: {confidence})")
-        
+
         _restore_call_context(call_sid or "")
-        if not call_sid or call_sid not in active_calls:
-            # Lost call session - forward to business phone if available
-            response = VoiceResponse()
-            base_url = _twilio_base_url(request)
-
-            forwarding_phone = get_business_info().get("forwarding_phone")
-            if forwarding_phone:
-                print(f"🔄 Lost call session - forwarding to business phone: {forwarding_phone}")
-                response = forward_call_to_business(forwarding_phone, base_url, "English")
-                return Response(content=str(response), media_type="application/xml")
-            else:
-                # Fallback: say error message
-                response.say("I'm sorry, I lost track of our conversation. Please call back.", voice='alice')
-                return Response(content=str(response), media_type="application/xml")
-        
-        call_data = active_calls[call_sid]
-        
-        # Detect language from speech input
-        current_detected_lang = detect_language(speech_result)
-        
-        # Check confidence and detect if this is first input
-        confidence_float = float(confidence) if confidence else 0.0
-        previous_lang = call_data.get("detected_language")
-        is_first_input = previous_lang is None
-        
-        # For non-Latin scripts, Twilio transcription is often poor
-        # If we detect non-Latin script AND (it's the first input OR confidence is low),
-        # immediately ask user to repeat using Record + Whisper for better accuracy
-        if uses_non_latin_script(current_detected_lang) and (is_first_input or confidence_float < 0.5):
-            print(f"🎙️ Non-Latin script detected ({current_detected_lang}) with poor transcription quality.")
-            print(f"🔄 Switching to Record + Whisper for better accuracy...")
-            
-            # Store the detected language
-            call_data["detected_language"] = current_detected_lang
-            
-            # Create response asking user to repeat using Record mode
-            response = VoiceResponse()
-            base_url = _twilio_base_url(request)
-
-            # Ask user to repeat using Record + Whisper
-            prompt_text = f"I detected you're speaking in {current_detected_lang}. For better accuracy, please speak again and press pound when done."
-            prompt_encoded = quote(prompt_text)
-            tts_url = f"{base_url}/api/phone/tts-audio?text={prompt_encoded}&voice={get_tts_voice()}"
-            response.play(tts_url)
-            
-            # Set up Record for Whisper transcription
-            record = response.record(
-                action=f"{base_url}/api/phone/process-recording",
-                method='POST',
-                max_length=15,
-                finish_on_key='#',
-                recording_status_callback=f"{base_url}/api/phone/recording-status"
-            )
-            
-            return Response(content=str(response), media_type="application/xml")
-        
-        # For languages with non-Latin scripts but good confidence on subsequent inputs
-        if uses_non_latin_script(current_detected_lang):
-            print(f"⚠️ Non-Latin script detected ({current_detected_lang}). Using transcription but will switch to Record + Whisper next.")
-        
-        # Check confidence - if very low, the transcription might be poor
-        if confidence_float < 0.3:
-            print(f"⚠️ Low confidence ({confidence}) - transcription may be inaccurate")
-
-        # Always detect language from current speech input to support dynamic language switching
-        # This allows the AI to adapt whenever the caller switches languages, no matter how many times
-        # (e.g., if someone hands the phone to another person who speaks a different language,
-        # or if the same person switches between languages)
-        previous_lang = call_data.get("detected_language")
-        
-        # Always use the currently detected language (not stored one) to ensure real-time switching
-        # Update stored language whenever it changes (supports unlimited language switches)
-        if previous_lang != current_detected_lang:
-            if previous_lang:
-                print(f"🌍 Language switched: {previous_lang} -> {current_detected_lang} from text: {speech_result[:50]}")
-            else:
-                print(f"🌍 Detected language: {current_detected_lang} from text: {speech_result[:50]}")
-            call_data["detected_language"] = current_detected_lang
-        else:
-            print(f"🌍 Using language: {current_detected_lang} (unchanged)")
-        
-        # Always use the freshly detected language (not the stored one) to ensure immediate switching
-        detected_lang = current_detected_lang
-        
-        # Get base URL for TTS and forwarding
         base_url = _twilio_base_url(request)
 
-        # Add user message to conversation
-        user_message = {
-            "role": "user",
-            "content": speech_result
-        }
-        call_data["conversation_history"].append(user_message)
-        
-        # Check if user wants to talk to a real person - check BEFORE generating response
-        # We'll check the speech directly for forwarding keywords
-        if should_forward_to_human(speech_result, ""):  # Pass empty string since we don't have AI response yet
-            print(f"🔄 Forwarding call to business phone: {get_business_info().get('forwarding_phone')}")
-            forwarding_phone = get_business_info().get("forwarding_phone")
-            if forwarding_phone:
-                call_data["outcome"] = "forwarded"
-                call_log_set_outcome(call_sid, "forwarded")
-                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
-                return Response(content=str(response), media_type="application/xml")
-        
-        # Initialize response status as pending
-        response_status[call_sid] = {
-            "status": "pending",
-            "audio_url": None,
-            "ai_text": None
-        }
-        
-        # Start background task to generate GPT response + TTS
-        asyncio.create_task(generate_response_async(call_sid, call_data, detected_lang, base_url))
-        
-        # Immediately return "got it" message and redirect to respond endpoint
-        # Uses voice from Settings; pass call_sid so we resolve client_id
+        from voice.utterance import apply_caller_utterance
+
+        outcome = await apply_caller_utterance(
+            call_sid or "",
+            speech_result or "",
+            float(confidence or 0),
+            base_url,
+        )
+        if outcome.mode == "replace_call_twiml" and outcome.replacement_twiml:
+            return Response(content=outcome.replacement_twiml, media_type="application/xml")
+
         response = VoiceResponse()
-        got_it_audio_url = f"{base_url}/api/phone/got-it-audio?{_phone_audio_query(call_sid, call_data.get('client_id'))}"
+        got_it_audio_url = f"{base_url}/api/phone/got-it-audio?call_sid={call_sid}"
         response.play(got_it_audio_url)
-        response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
-        
-        return Response(content=str(response), media_type="application/xml")
-        
-        # Use the same base_url for next input - set language dynamically based on detected language
-        # For non-Latin scripts, we'll use Record + Whisper for better accuracy
-        twilio_lang_code = get_twilio_language_code(detected_lang)
-        print(f"🌍 Setting Twilio language to: {twilio_lang_code} (for {detected_lang})")
-        
-        # For non-Latin scripts, use Record + Whisper instead of Gather for better transcription
-        if uses_non_latin_script(detected_lang):
-            print(f"🎙️ Using Record + Whisper for {detected_lang} (non-Latin script)")
-            # Use Record verb to get audio, then transcribe with Whisper
-            record = response.record(
-                action=f"{base_url}/api/phone/process-recording",
-                method='POST',
-                max_length=10,  # 10 seconds max
-                finish_on_key='#',
-                recording_status_callback=f"{base_url}/api/phone/recording-status"
-            )
-            # Add a prompt to let user know to speak
-            response.say("Please speak now, then press pound when done.", language='en-US')
-        else:
-            # For Latin scripts, use Gather (faster and works well)
-            gather = response.gather(
-                input='speech',
-                action=f"{base_url}/api/phone/process-speech",
-                method='POST',
-                speech_timeout='auto',
-                language=twilio_lang_code  # Set language dynamically for better transcription
-            )
-        
-        # If no input, prompt once then goodbye (same TTS voice as receptionist)
-        try:
-            still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
-            response.play(still_there_url)
-            gather2 = response.gather(
-                input='speech',
-                action=f"{base_url}/api/phone/process-speech",
-                method='POST',
-                speech_timeout='auto',
-                language=twilio_lang_code
-            )
-            goodbye_text = "Thanks for calling! Have a wonderful day!"
-            goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
-            response.play(goodbye_url)
-            response.hangup()
-        except Exception as e:
-            logger.warning("process-speech goodbye block failed: %s: %s", type(e).__name__, e)
-            response = VoiceResponse()
-            response.hangup()
-        
+        response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
@@ -5044,15 +4777,26 @@ async def handle_call_status(request: Request):
         print(f"Error handling call status: {e}")
         return Response(content="OK", media_type="text/plain")
 
+@app.websocket("/api/phone/media")
+async def phone_media_websocket(websocket: WebSocket):
+    """Twilio Media Streams → Deepgram Nova-2 live STT (when VOICE_STT_PROVIDER=deepgram)."""
+    if not TWILIO_AVAILABLE or not twilio_client:
+        await websocket.close(code=1011)
+        return
+    from voice.media_ws import handle_phone_media_websocket
+
+    await handle_phone_media_websocket(websocket, twilio_client)
+
+
 @app.post("/api/phone/stream")
 async def handle_media_stream(request: Request):
     """
-    WebSocket endpoint for Twilio Media Streams.
-    This handles real-time bidirectional audio streaming.
+    Legacy placeholder. Real-time media uses WebSocket ``GET /api/phone/media`` (Twilio Media Streams).
     """
-    # This is a simplified version - full implementation requires WebSocket handling
-    # For production, you'd use a WebSocket library like 'websockets' or 'fastapi-websocket'
-    return {"message": "Media stream endpoint - requires WebSocket implementation"}
+    return {
+        "message": "Use WebSocket wss://…/api/phone/media for Twilio Media Streams (VOICE_STT_PROVIDER=deepgram).",
+        "websocket_path": "/api/phone/media",
+    }
 
 @app.post("/api/phone/respond")
 async def respond_with_audio(request: Request):
@@ -5231,14 +4975,11 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
     Generate HD TTS audio for Twilio phone calls (ultra-smooth, no choppiness).
     Used specifically for the initial greeting to ensure perfect quality.
     """
-    vn = (voice or "fable").strip().lower()
-    if vn not in _TTS_VOICE_ALLOWLIST:
-        vn = "fable"
     try:
         # Use tts-1-hd for ultra-smooth, natural speech (no choppiness)
         response = client.audio.speech.create(
             model="tts-1-hd",  # HD model for ultra-smooth, natural speech
-            voice=vn,
+            voice=voice,
             input=add_sentence_pauses(text),
             speed=get_tts_speed()
         )
@@ -5258,8 +4999,7 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
         )
     except Exception as e:
         print(f"Error generating HD TTS audio: {e}")
-        logger.warning("tts_hd_openai_failed_returning_silence_wav")
-        return _response_twilio_silence_wav()
+        raise HTTPException(status_code=500, detail=f"Failed to generate HD TTS audio: {str(e)}")
 
 @app.get("/api/phone/tts-audio")
 async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
@@ -5267,15 +5007,12 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     Generate TTS audio for phone calls.
     This endpoint is called by Twilio to play OpenAI TTS audio.
     """
-    vn = (voice or "fable").strip().lower()
-    if vn not in _TTS_VOICE_ALLOWLIST:
-        vn = "fable"
     try:
         # Use tts-1 for faster generation while maintaining quality
         # tts-1 is faster than tts-1-hd but still sounds natural and smooth
         response = client.audio.speech.create(
             model="tts-1",  # Faster generation, still high quality
-            voice=vn,
+            voice=voice,
             input=add_sentence_pauses(text),
             speed=get_tts_speed()
         )
@@ -5299,7 +5036,7 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
         try:
             response = client.audio.speech.create(
                 model="tts-1",
-                voice="fable",
+                voice=voice,
                 input=add_sentence_pauses(TTS_FALLBACK_TEXT),
                 speed=1.0,
             )
@@ -5315,8 +5052,7 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             )
         except Exception as e2:
             print(f"TTS fallback also failed: {e2}")
-            logger.warning("tts_audio_openai_unavailable_returning_silence_wav")
-            return _response_twilio_silence_wav()
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/phone/process-recording")
 async def process_recording(request: Request):
