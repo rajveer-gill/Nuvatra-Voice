@@ -58,10 +58,44 @@ async def apply_caller_utterance(
                 voice_info("utterance_lost_session_forward", call_sid=call_sid)
                 xml = str(m.forward_call_to_business(forwarding_phone, base_url, "English"))
                 return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
-            vr.say("I'm sorry, I lost track of our conversation. Please call back.", voice="alice")
-            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(vr))
+            # Use a fresh variable name per branch so Python never treats TwiML locals as one shared `vr`
+            # (assignments later in this function would otherwise make `vr` local for the whole body → UnboundLocalError).
+            lost_twiml = m.VoiceResponse()
+            lost_twiml.say("I'm sorry, I lost track of our conversation. Please call back.", voice="alice")
+            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(lost_twiml))
 
         call_data = m.active_calls[call_sid]
+
+        if not (speech_result or "").strip():
+            n = int(call_data.get("empty_speech_turns") or 0) + 1
+            call_data["empty_speech_turns"] = n
+            voice_info("utterance_empty_transcript", call_sid=call_sid, attempt=n)
+            empty_twiml = m.VoiceResponse()
+            action_url = f"{base_url}/api/phone/process-speech"
+            lang_code = m.get_twilio_language_code(call_data.get("detected_language") or "English")
+            if n >= 4:
+                empty_twiml.say(
+                    "I'm still not hearing anything. Please try calling again from a quieter spot. Goodbye.",
+                    voice="alice",
+                )
+                empty_twiml.hangup()
+                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(empty_twiml))
+            empty_twiml.say(
+                "I didn't quite catch that. After the tone, please say that again in a few words.",
+                voice="alice",
+            )
+            gather = empty_twiml.gather(
+                input="speech",
+                action=action_url,
+                method="POST",
+                speech_timeout="auto",
+                timeout=10,
+                language=lang_code,
+            )
+            gather.say("Go ahead.", voice="alice")
+            empty_twiml.say("We didn't hear anything. Goodbye for now.", voice="alice")
+            empty_twiml.hangup()
+            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(empty_twiml))
 
         current_detected_lang = m.detect_language(speech_result)
         confidence_float = float(confidence) if confidence else 0.0
@@ -77,22 +111,22 @@ async def apply_caller_utterance(
                 confidence=confidence_float,
             )
             call_data["detected_language"] = current_detected_lang
-            vr = m.VoiceResponse()
+            record_twiml = m.VoiceResponse()
             prompt_text = (
                 f"I detected you're speaking in {current_detected_lang}. "
                 "For better accuracy, please speak again and press pound when done."
             )
             prompt_encoded = quote(prompt_text)
             tts_url = f"{base_url}/api/phone/tts-audio?text={prompt_encoded}&voice={m.get_tts_voice()}"
-            vr.play(tts_url)
-            vr.record(
+            record_twiml.play(tts_url)
+            record_twiml.record(
                 action=f"{base_url}/api/phone/process-recording",
                 method="POST",
                 max_length=15,
                 finish_on_key="#",
                 recording_status_callback=f"{base_url}/api/phone/recording-status",
             )
-            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(vr))
+            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(record_twiml))
 
         if m.uses_non_latin_script(current_detected_lang):
             voice_debug(
