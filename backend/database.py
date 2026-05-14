@@ -1579,28 +1579,67 @@ def db_caller_memory_get(phone: str) -> Optional[dict]:
             data = {}
     return {"name": row[0], "call_count": row[1], "last_call_iso": row[2], "last_reason": row[3], **(data or {})}
 
-def db_caller_memory_upsert(phone: str, name: Optional[str] = None, last_reason: Optional[str] = None, increment_count: bool = True) -> None:
+def db_caller_memory_upsert(
+    phone: str,
+    name: Optional[str] = None,
+    last_reason: Optional[str] = None,
+    increment_count: bool = True,
+    data_patch: Optional[dict] = None,
+) -> None:
     conn = _get_conn()
     if not conn:
         return
     key = _normalize_phone(phone)
     if not key:
         return
+    try:
+        from psycopg2.extras import Json
+    except ImportError:
+        Json = None  # type: ignore
     cur = conn.cursor()
-    cur.execute("SELECT call_count FROM caller_memory WHERE phone = %s AND client_id = %s", (key, _client_id()))
+    cur.execute(
+        "SELECT call_count, data FROM caller_memory WHERE phone = %s AND client_id = %s",
+        (key, _client_id()),
+    )
     row = cur.fetchone()
     now = datetime.now().isoformat()
+
+    def _parse_data(raw: Any) -> dict:
+        if isinstance(raw, dict):
+            return dict(raw)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                return dict(json.loads(raw))
+            except Exception:
+                return {}
+        return {}
+
     if row:
-        count = row[0] + (1 if increment_count else 0)
-        cur.execute("""
-            UPDATE caller_memory SET name = COALESCE(%s, name), call_count = %s, last_call_iso = %s, last_reason = COALESCE(%s, last_reason), updated_at = NOW()
+        base_count, raw_data = row[0], row[1]
+        count = int(base_count or 0) + (1 if increment_count else 0)
+        merged = _parse_data(raw_data)
+        if data_patch:
+            merged = {**merged, **data_patch}
+        payload = Json(merged) if Json else json.dumps(merged, default=str)
+        cur.execute(
+            """
+            UPDATE caller_memory SET name = COALESCE(%s, name), call_count = %s, last_call_iso = %s,
+                last_reason = COALESCE(%s, last_reason), data = %s::jsonb, updated_at = NOW()
             WHERE phone = %s AND client_id = %s
-        """, (name, count, now, last_reason, key, _client_id()))
+            """,
+            (name, count, now, last_reason, payload, key, _client_id()),
+        )
     else:
-        cur.execute("""
-            INSERT INTO caller_memory (phone, client_id, name, call_count, last_call_iso, last_reason)
-            VALUES (%s, %s, %s, 1, %s, %s)
-        """, (key, _client_id(), name or "", now, last_reason or ""))
+        merged = dict(data_patch or {})
+        payload = Json(merged) if Json else json.dumps(merged, default=str)
+        start_count = 1 if increment_count else 0
+        cur.execute(
+            """
+            INSERT INTO caller_memory (phone, client_id, name, call_count, last_call_iso, last_reason, data)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (key, _client_id(), name or "", start_count, now, last_reason or "", payload),
+        )
     conn.commit()
     cur.close()
 

@@ -1331,14 +1331,40 @@ def get_caller_memory(phone: str) -> Optional[dict]:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         key = normalize_phone(phone)
-        return data.get(key)
+        raw = data.get(key)
+        if not raw or not isinstance(raw, dict):
+            return None
+        base = {
+            "name": raw.get("name"),
+            "call_count": raw.get("call_count", 0),
+            "last_call_iso": raw.get("last_call_iso"),
+            "last_reason": raw.get("last_reason"),
+        }
+        mem = raw.get("data")
+        if isinstance(mem, dict):
+            for mk, mv in mem.items():
+                if mv is not None and mv != "":
+                    base[mk] = mv
+        return base
     except Exception:
         return None
 
-def update_caller_memory(phone: str, name: Optional[str] = None, last_reason: Optional[str] = None):
+def update_caller_memory(
+    phone: str,
+    name: Optional[str] = None,
+    last_reason: Optional[str] = None,
+    increment_count: bool = True,
+    data_patch: Optional[dict] = None,
+):
     """Update caller memory after a call (increment count, set last call time and optional reason)."""
     if USE_DB:
-        db_caller_memory_upsert(phone, name=name, last_reason=last_reason)
+        db_caller_memory_upsert(
+            phone,
+            name=name,
+            last_reason=last_reason,
+            increment_count=increment_count,
+            data_patch=data_patch,
+        )
         return
     data_dir = get_client_data_dir()
     if not data_dir:
@@ -1352,13 +1378,21 @@ def update_caller_memory(phone: str, name: Optional[str] = None, last_reason: Op
         except Exception:
             pass
     key = normalize_phone(phone)
-    entry = data.setdefault(key, {"name": "", "call_count": 0, "last_call_iso": "", "last_reason": ""})
-    entry["call_count"] = entry.get("call_count", 0) + 1
+    entry = data.setdefault(
+        key,
+        {"name": "", "call_count": 0, "last_call_iso": "", "last_reason": "", "data": {}},
+    )
+    if increment_count:
+        entry["call_count"] = entry.get("call_count", 0) + 1
     entry["last_call_iso"] = datetime.now().isoformat()
     if name:
         entry["name"] = name
     if last_reason is not None:
         entry["last_reason"] = last_reason
+    if data_patch:
+        mem = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+        mem = {**mem, **data_patch}
+        entry["data"] = mem
     data[key] = entry
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -1537,7 +1571,8 @@ def _get_all_booked_slots_merged() -> List[dict]:
         for a in apts:
             if not a.get("date") or not a.get("time"):
                 continue
-            if a.get("status") in ("accepted", "confirmed", "completed", "pending", "pending_review", "pending_customer"):
+            # pending_customer: details texted to caller; slot is not held until they SMS-confirm (see handle_incoming_sms).
+            if a.get("status") in ("accepted", "confirmed", "completed", "pending", "pending_review"):
                 sk = _staff_slot_key(a.get("staff_id"))
                 k = (a["date"], a["time"], sk)
                 if k not in seen:
@@ -1802,9 +1837,15 @@ def _optional_staff_id_validated(raw: Optional[str]) -> Optional[str]:
     raise HTTPException(status_code=400, detail="Invalid staff_id for this business.")
 
 
-def _create_appointment_from_booking(booking: dict, client_id_override: Optional[str] = None) -> Optional[dict]:
+def _create_appointment_from_booking(
+    booking: dict,
+    client_id_override: Optional[str] = None,
+    reserve_slot_immediately: bool = True,
+) -> Optional[dict]:
     """Create appointment from parsed BOOKING; check slot; return appointment_data or None (slot taken).
-    Pass client_id_override from voice flow so appointment is stored under correct tenant (async task may not have context)."""
+    Pass client_id_override from voice flow so appointment is stored under correct tenant (async task may not have context).
+    When reserve_slot_immediately is False (voice), the row is created as pending_customer but the calendar slot
+    is only reserved after the customer SMS-confirms (see handle_incoming_sms)."""
     date = (booking.get("date") or "").strip()
     time_raw = (booking.get("time") or "").strip()
     time = _normalize_time_to_hhmm(time_raw) or time_raw  # e.g. "10" -> "10:00"
@@ -1842,7 +1883,8 @@ def _create_appointment_from_booking(booking: dict, client_id_override: Optional
         appointment_data["id"] = apt_id
         appointment_data["created_at"] = datetime.now().isoformat()
         appointments.append(appointment_data)
-    reserve_slot(date, time, apt_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
+    if reserve_slot_immediately:
+        reserve_slot(date, time, apt_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
     appointment_data["id"] = apt_id
     appointment_data.setdefault("created_at", datetime.now().isoformat())
     system_info(
@@ -1853,6 +1895,7 @@ def _create_appointment_from_booking(booking: dict, client_id_override: Optional
         date=date,
         time=time,
         staff_id=staff_key,
+        slot_reserved_immediately=reserve_slot_immediately,
     )
     return appointment_data
 
@@ -1970,10 +2013,15 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 if from_num:
                     booking["phone"] = (booking.get("phone") or "").strip() or from_num
                 cid = (call_data.get("client_id") or "").strip() or None
-                apt = _create_appointment_from_booking(booking, client_id_override=cid)
+                apt = _create_appointment_from_booking(
+                    booking, client_id_override=cid, reserve_slot_immediately=False
+                )
                 if apt:
                     call_data["appointment_created"] = True
-                    ai_text = f"You're all set! We have you down for {apt['date']} at {_hhmm_to_ampm(apt.get('time', '') or '')}. The store will confirm shortly."
+                    ai_text = (
+                        "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
+                        "The time is not finalized until you confirm by text."
+                    )
                     # Ensure we have caller phone (backfill from Twilio if missing) so SMS goes out and dashboard shows it
                     if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
                         apt["phone"] = call_data["from_number"]
@@ -1986,14 +2034,15 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     phone_display = (apt.get("phone") or "").strip() or "Not provided"
                     email_display = (apt.get("email") or "").strip() or "Not provided"
                     thanks_msg = (
-                        f"Hey! Your reservation is pending. Here's what we have:\n"
+                        f"Hey! Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:\n"
                         f"Name: {apt.get('name', '')}\n"
                         f"Phone: {phone_display}\n"
                         f"Email: {email_display}\n"
                         f"Date: {apt.get('date', '')}\n"
                         f"Time: {_hhmm_to_ampm(apt.get('time', '') or '')}\n"
                         f"Service: {apt.get('reason', '')}\n\n"
-                        f"Reply to confirm or tell us any changes. Once you confirm, we'll send this to the store and text you when they confirm!\n\n"
+                        f"Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
+                        f"You can also reply with changes.\n\n"
                         f"Msg & data rates may apply. Reply STOP to opt out."
                     )
                     # Prefer caller number from live call so confirmation SMS always goes to the right person
@@ -2017,6 +2066,27 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         )
                     else:
                         sms_info("post_booking_confirmation_skipped", reason="no_caller_phone", client_id=cid)
+                    fn_mem = (call_data.get("from_number") or "").strip()
+                    if fn_mem:
+                        dp = {
+                            "last_voice_booking_date": apt.get("date"),
+                            "last_voice_booking_time": apt.get("time"),
+                            "last_service": ((apt.get("reason") or "").strip()[:120] or None),
+                        }
+                        em_patch = (apt.get("email") or "").strip()
+                        if em_patch:
+                            dp["email_on_file"] = em_patch
+                        dp = {k: v for k, v in dp.items() if v}
+                        try:
+                            update_caller_memory(
+                                fn_mem,
+                                name=(booking.get("name") or "").strip() or None,
+                                last_reason="appointment details texted (pending SMS confirmation)",
+                                increment_count=False,
+                                data_patch=dp if dp else None,
+                            )
+                        except Exception:
+                            pass
                 else:
                     # Failed: either slot taken or missing/invalid data (name, date)
                     name_ok = bool((booking.get("name") or "").strip())
@@ -4229,8 +4299,49 @@ async def handle_incoming_sms(request: Request):
             )
             apt_after = apt
             if USE_DB and apt.get("id"):
-                db_appointments_update(apt["id"], status="pending_review")
-                apt_after = db_appointments_get_by_id(apt["id"]) or apt
+                aid = int(apt["id"])
+                apt_full = db_appointments_get_by_id(aid) or apt
+                date = (apt_full.get("date") or "").strip()
+                time_raw = (apt_full.get("time") or "").strip()
+                time_hhmm = _normalize_time_to_hhmm(time_raw) or time_raw
+                staff_for = (apt_full.get("staff_id") or "").strip() or None
+                if not is_slot_available(date, time_hhmm, DEFAULT_SLOT_DURATION_MINUTES, staff_for):
+                    sorry = (
+                        "Sorry — that time was just taken and we can't hold it anymore. "
+                        "Text us another time that works or call the shop. Msg & data rates may apply. Reply STOP to opt out."
+                    )
+                    send_ok = send_sms(from_number, sorry, from_override=to_number)
+                    sms_trace(
+                        "inbound_customer_confirm_slot_unavailable",
+                        request_id=rid,
+                        apt_id=aid,
+                        send_sms_ok=send_ok,
+                    )
+                    messages.append({"role": "assistant", "content": sorry})
+                    try:
+                        db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+                    except Exception as upsert_err:
+                        sms_info(
+                            "inbound_session_persist_failed",
+                            request_id=rid,
+                            client_id=tenant["client_id"],
+                            error_type=type(upsert_err).__name__,
+                            phase="pending_customer_confirm_slot_taken",
+                        )
+                        logger.warning("db_sms_session_upsert failed (slot taken path): %s", upsert_err, exc_info=True)
+                    return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+                reserve_slot(date, time_hhmm, aid, DEFAULT_SLOT_DURATION_MINUTES, staff_for)
+                db_appointments_update(aid, status="pending_review")
+                apt_after = db_appointments_get_by_id(aid) or apt_full
+            try:
+                update_caller_memory(
+                    from_number,
+                    last_reason="details confirmed; awaiting store approval",
+                    increment_count=False,
+                    data_patch={"last_pending_review_apt_id": apt.get("id")},
+                )
+            except Exception:
+                pass
             _notify_staff_pending_review(apt_after, tenant, to_number)
             sms_info(
                 "customer_confirmed_pending_to_review",
@@ -4782,12 +4893,21 @@ async def process_speech(request: Request):
             response = forward_call_to_business(forwarding_phone, base_url, "English")
             return Response(content=str(response), media_type="application/xml")
         else:
-            # No forwarding number - just ask to repeat
+            # Avoid redirect-only loops on errors: prompt once inside Gather, then end the call.
             error_text = "I'm sorry, I didn't catch that. Could you repeat?"
             error_encoded = quote(error_text)
             tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
             response.play(tts_audio_url)
-            response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+            gather = response.gather(
+                input="speech",
+                action=f"{base_url}/api/phone/process-speech",
+                method="POST",
+                speech_timeout="auto",
+                timeout=10,
+            )
+            gather.say("Please speak after the tone.", voice="alice")
+            response.say("We're having trouble on this line. Goodbye.", voice="alice")
+            response.hangup()
             return Response(content=str(response), media_type="application/xml")
 
 @app.post("/api/phone/status")

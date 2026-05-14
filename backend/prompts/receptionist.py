@@ -110,9 +110,21 @@ def build_system_prompt(
         mem_name = caller_memory.get("name") or "there"
         count = caller_memory.get("call_count", 0)
         last = caller_memory.get("last_reason") or "general inquiry"
+        extras: List[str] = []
+        if caller_memory.get("email_on_file"):
+            extras.append(f"email they gave before: {caller_memory.get('email_on_file')}")
+        ld = caller_memory.get("last_voice_booking_date")
+        lt = caller_memory.get("last_voice_booking_time")
+        if ld and lt:
+            extras.append(f"last visit request discussed: {ld} at {lt}")
+        elif ld:
+            extras.append(f"last visit date discussed: {ld}")
+        if caller_memory.get("last_service"):
+            extras.append(f"last service mentioned: {caller_memory.get('last_service')}")
+        extra_txt = (" " + " ".join(extras)) if extras else ""
         memory_block = (
             f"\n- This is a REPEAT CALLER. Greet them warmly; you may say welcome back. "
-            f"Name if we have it: {mem_name}. They have called {count} time(s) before; last time: {last}."
+            f"Name if we have it: {mem_name}. They have called {count} time(s) before; last time: {last}.{extra_txt}"
         )
 
     slots_block = ""
