@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
+import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 
 interface Tenant {
@@ -505,9 +506,9 @@ export default function AdminPage() {
                         </div>
                         {(t.trial_ends_at || t.billing_exempt_until) && (
                           <div className="mt-1 text-xs text-zinc-500">
-                            {t.trial_ends_at && <>Trial ends: {new Date(t.trial_ends_at).toLocaleDateString()}</>}
+                            {t.trial_ends_at && <>Trial ends: {formatTrialEndDate(t.trial_ends_at)}</>}
                             {t.trial_ends_at && t.billing_exempt_until && ' · '}
-                            {t.billing_exempt_until && <>Exempt until: {new Date(t.billing_exempt_until).toLocaleDateString()}</>}
+                            {t.billing_exempt_until && <>Exempt until: {formatTrialEndDate(t.billing_exempt_until)}</>}
                           </div>
                         )}
                       </div>

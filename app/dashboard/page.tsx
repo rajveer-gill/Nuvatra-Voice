@@ -7,6 +7,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
+import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { PlanPicker } from '@/components/PlanPicker'
 import { AppChrome } from '@/components/layout/AppChrome'
 
@@ -55,8 +56,9 @@ export default function DashboardPage() {
     setAccess('denied')
   }, [])
 
-  const fetchSubscription = () => {
-    api.get<SubscriptionState>('/api/subscription')
+  const fetchSubscription = useCallback(() => {
+    api
+      .get<SubscriptionState>('/api/subscription')
       .then((res) => {
         if (res.data.can_use_app) {
           setAccess('granted')
@@ -66,7 +68,7 @@ export default function DashboardPage() {
         setSubscription(res.data)
       })
       .catch(applySubscriptionError)
-  }
+  }, [api, applySubscriptionError])
 
   useEffect(() => {
     let cancelled = false
@@ -141,6 +143,19 @@ export default function DashboardPage() {
 
     return () => { cancelled = true }
   }, [api, router, applySubscriptionError])
+
+  useEffect(() => {
+    if (access !== 'granted' && access !== 'subscription_required') return
+    const refresh = () => {
+      if (document.visibilityState === 'visible') fetchSubscription()
+    }
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [access, fetchSubscription])
 
   useEffect(() => {
     if (!subscription?.limits?.has_lead_capture && activeTab === 'leads') {
@@ -247,12 +262,7 @@ export default function DashboardPage() {
           {subscription?.subscription_status === 'trialing' && subscription?.trial_ends_at && (
             <div className="mb-6 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-center text-sm text-amber-100">
               Your free trial ends on{' '}
-              {new Date(subscription.trial_ends_at).toLocaleDateString(undefined, {
-                weekday: 'short',
-                month: 'short',
-                day: 'numeric',
-                year: 'numeric',
-              })}
+              {formatTrialEndDate(subscription.trial_ends_at)}
               .
               {Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) > 0 && (
                 <>
