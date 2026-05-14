@@ -4190,6 +4190,13 @@ async def handle_incoming_sms(request: Request):
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         tenant = db_tenant_get_by_phone(to_number)
         if not tenant:
+            # Match voice inbound: allow CLIENT_ID / default tenant when Twilio "To" is not in tenants.twilio_phone_number yet.
+            cid_fb = (CLIENT_ID or "").strip()
+            if cid_fb:
+                tenant = db_tenant_get_by_client_id(cid_fb)
+            if not tenant:
+                tenant = db_tenant_get_by_client_id("default")
+        if not tenant:
             sms_info("inbound_skipped", reason="unknown_to_number", to_number=to_number, message_sid=msg_sid or None)
             sms_trace(
                 "inbound_tenant_not_found",
@@ -4199,6 +4206,13 @@ async def handle_incoming_sms(request: Request):
                 hint="ensure_twilio_to_matches_tenant_twilio_phone_number",
             )
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        if tenant.get("twilio_phone_number", "").strip() != (to_number or "").strip():
+            sms_info(
+                "inbound_tenant_resolved_by_client_id_fallback",
+                client_id=tenant.get("client_id"),
+                to_number=to_number,
+                message_sid=msg_sid or None,
+            )
         set_request_client_id(tenant["client_id"])
         sms_info(
             "inbound_received",
