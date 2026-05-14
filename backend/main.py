@@ -1562,11 +1562,60 @@ def _staff_slot_key(sid: Optional[str]) -> str:
     return s if s else "__unassigned__"
 
 
+# Appointment must be in one of these statuses for a booked_slots row (or merged row) to block the calendar.
+# pending_customer: voice/SMS draft — slot is not held until customer SMS-confirm (reserve_slot then).
+# rejected / missing appointment: orphan booked_slots rows must not block forever.
+_CALENDAR_HOLDING_STATUSES = frozenset(
+    {"accepted", "confirmed", "completed", "pending", "pending_review"}
+)
+
+
+def _appointment_rows_for_calendar_merge() -> List[dict]:
+    if USE_DB:
+        return db_appointments_get_all()
+    return list(appointments)
+
+
+def _appointment_by_id_map(rows: List[dict]) -> dict[int, dict]:
+    m: dict[int, dict] = {}
+    for a in rows:
+        aid = a.get("id")
+        if aid is None:
+            continue
+        try:
+            m[int(aid)] = a
+        except (TypeError, ValueError):
+            continue
+    return m
+
+
+def _booked_slot_rows_that_hold_calendar(raw_slots: List[dict], apt_by_id: dict[int, dict]) -> List[dict]:
+    """Keep persisted booked_slots entries only when the linked appointment still holds the slot."""
+    kept: List[dict] = []
+    for s in raw_slots:
+        aid = s.get("appointment_id")
+        if aid is None:
+            continue
+        try:
+            aid_int = int(aid)
+        except (TypeError, ValueError):
+            continue
+        apt = apt_by_id.get(aid_int)
+        if not apt:
+            continue
+        st = (apt.get("status") or "").strip()
+        if st not in _CALENDAR_HOLDING_STATUSES:
+            continue
+        kept.append(s)
+    return kept
+
+
 def _get_all_booked_slots_merged() -> List[dict]:
     """Merge booked_slots table with appointments (accepted/pending) so AI sees all taken times."""
-    slots = _load_booked_slots()
+    apts = _appointment_rows_for_calendar_merge()
+    apt_by_id = _appointment_by_id_map(apts)
+    slots = _booked_slot_rows_that_hold_calendar(_load_booked_slots(), apt_by_id)
     if USE_DB:
-        apts = db_appointments_get_all()
         seen = {(s.get("date"), s.get("time"), _staff_slot_key(s.get("staff_id"))) for s in slots}
         for a in apts:
             if not a.get("date") or not a.get("time"):
