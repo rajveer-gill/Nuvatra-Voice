@@ -2672,8 +2672,8 @@ async def admin_update_tenant_twilio_phone(
     if not USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     phone = (req.twilio_phone_number or "").strip()
-    if not phone.startswith("+"):
-        raise HTTPException(status_code=400, detail="twilio_phone_number must be E.164 (e.g. +15551234567)")
+    if not any(c.isdigit() for c in phone):
+        raise HTTPException(status_code=400, detail="twilio_phone_number must contain digits (E.164 or US local is fine)")
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -2687,7 +2687,7 @@ async def admin_update_tenant_twilio_phone(
         resource_type="tenant",
         resource_id=tenant_id,
         client_id=tenant.get("client_id"),
-        details={"twilio_phone_number": phone},
+        details={"twilio_phone_number": (updated or {}).get("twilio_phone_number") or phone},
         request=request,
     )
     return {"success": True, "tenant": updated}

@@ -198,8 +198,8 @@ export default function AdminPage() {
 
   const handleSaveTwilio = async (tenantId: string) => {
     const phone = (twilioDraft[tenantId] || '').trim()
-    if (!phone.startsWith('+')) {
-      setError('Twilio number must be E.164 (start with +).')
+    if (!/\d/.test(phone)) {
+      setError('Enter a phone number with digits.')
       return
     }
     setTwilioSaving(tenantId)
@@ -341,7 +341,9 @@ export default function AdminPage() {
                   className={inputClass}
                 />
                 <p className="mt-1 text-xs text-zinc-500">
-                  Buy the number in Twilio Console, then add it here. In Twilio, set Voice webhook to your-backend/api/phone/incoming and Messaging webhook to your-backend/api/sms/incoming.
+                  Buy the number in Twilio Console, then enter it here (any common US format is fine — we store E.164 to
+                  match webhooks). In Twilio, set Voice webhook to your-backend/api/phone/incoming and Messaging webhook
+                  to your-backend/api/sms/incoming.
                 </p>
               </div>
               <div>

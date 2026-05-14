@@ -333,6 +333,10 @@ def db_tenant_create(
     conn = _get_conn()
     if not conn:
         return None
+    phone_store = _normalize_e164((twilio_phone_number or "").strip())
+    if not phone_store or not any(c.isdigit() for c in phone_store):
+        print("[DB] db_tenant_create: invalid twilio_phone_number")
+        return None
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -341,7 +345,7 @@ def db_tenant_create(
             ON CONFLICT (client_id) DO NOTHING
             RETURNING id, client_id, name, twilio_phone_number, plan, created_at,
                 trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, business_vertical
-        """, (client_id, name, twilio_phone_number, plan, business_vertical))
+        """, (client_id, name, phone_store, plan, business_vertical))
         row = cur.fetchone()
         conn.commit()
         cur.close()
@@ -383,12 +387,17 @@ def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
     if not conn:
         return None
     cur = conn.cursor()
-    normalized = _normalize_e164(twilio_phone_number or "")
+    raw = (twilio_phone_number or "").strip()
+    normalized = _normalize_e164(raw)
+    digits_in = "".join(c for c in raw if c.isdigit())
+    digits_norm = "".join(c for c in normalized if c.isdigit())
     cur.execute(f"""
         SELECT {_tenant_select_cols()}
-        FROM tenants WHERE twilio_phone_number IN (%s, %s)
+        FROM tenants
+        WHERE twilio_phone_number IN (%s, %s)
+           OR regexp_replace(coalesce(twilio_phone_number, ''), '[^0-9]', '', 'g') IN (%s, %s)
         LIMIT 1
-    """, (twilio_phone_number or "", normalized))
+    """, (raw, normalized, digits_in, digits_norm))
     row = cur.fetchone()
     cur.close()
     if not row:
@@ -646,13 +655,14 @@ def db_tenant_set_twilio_phone(tenant_id: str, twilio_phone_number: str) -> bool
     if not conn:
         return False
     phone = (twilio_phone_number or "").strip()
-    if not phone:
+    phone_store = _normalize_e164(phone)
+    if not phone_store or not any(c.isdigit() for c in phone_store):
         return False
     try:
         cur = conn.cursor()
         cur.execute(
             "UPDATE tenants SET twilio_phone_number = %s WHERE id = %s::uuid",
-            (phone, tenant_id),
+            (phone_store, tenant_id),
         )
         ok = cur.rowcount > 0
         conn.commit()
