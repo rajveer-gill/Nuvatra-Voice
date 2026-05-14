@@ -26,6 +26,68 @@ const inputClass =
 const selectClass =
   'rounded-lg border border-white/15 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/25'
 
+/** US A2P / Twilio numbers on this admin flow are NANP (+1). */
+const US_E164_PREFIX = '+1'
+
+function digitsOnly(s: string): string {
+  return s.replace(/\D/g, '')
+}
+
+function fullUsE164FromNationalInput(nationalRaw: string): string {
+  return US_E164_PREFIX + digitsOnly(nationalRaw).slice(0, 10)
+}
+
+function nationalDigitsForUsTwilioInput(full: string): string {
+  const p = full.trim()
+  if (p.startsWith(US_E164_PREFIX)) return digitsOnly(p.slice(US_E164_PREFIX.length)).slice(0, 10)
+  const d = digitsOnly(p)
+  if (d.length === 11 && d.startsWith('1')) return d.slice(1, 11)
+  return d.slice(0, 10)
+}
+
+function isUsTenantTwilioDraft(raw: string | undefined): boolean {
+  return raw === undefined || raw === '' || raw.startsWith(US_E164_PREFIX)
+}
+
+function UsTwilioPhoneInput({
+  value,
+  onChange,
+  placeholderNational = '5551234567',
+  required,
+  minNationalLength,
+  autoComplete,
+}: {
+  value: string
+  onChange: (fullE164: string) => void
+  placeholderNational?: string
+  required?: boolean
+  minNationalLength?: number
+  autoComplete?: string
+}) {
+  const national = nationalDigitsForUsTwilioInput(value)
+  return (
+    <div className="flex w-full overflow-hidden rounded-lg border border-white/15 bg-zinc-950 focus-within:border-cyan-500/50 focus-within:outline-none focus-within:ring-2 focus-within:ring-cyan-500/25">
+      <span
+        className="flex shrink-0 items-center border-r border-white/15 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-400 tabular-nums"
+        aria-hidden
+      >
+        {US_E164_PREFIX}
+      </span>
+      <input
+        type="tel"
+        required={required}
+        minLength={minNationalLength}
+        autoComplete={autoComplete}
+        inputMode="numeric"
+        placeholder={placeholderNational}
+        className="min-w-0 flex-1 border-0 bg-transparent px-3 py-2 text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+        value={national}
+        onChange={(e) => onChange(fullUsE164FromNationalInput(e.target.value))}
+      />
+    </div>
+  )
+}
+
 export default function AdminPage() {
   const router = useRouter()
   const { isLoaded, isSignedIn } = useAuth()
@@ -41,7 +103,7 @@ export default function AdminPage() {
   const [form, setForm] = useState({
     client_id: '',
     name: '',
-    twilio_phone_number: '',
+    twilio_phone_number: US_E164_PREFIX,
     email: '',
     business_vertical: 'salon_chair',
   })
@@ -132,7 +194,13 @@ export default function AdminPage() {
     try {
       await api.post('/api/admin/tenants', { ...form, plan: 'free' })
       setSuccess(`Tenant "${form.name}" created. Invite sent to ${form.email}.`)
-      setForm({ client_id: '', name: '', twilio_phone_number: '', email: '', business_vertical: 'salon_chair' })
+      setForm({
+        client_id: '',
+        name: '',
+        twilio_phone_number: US_E164_PREFIX,
+        email: '',
+        business_vertical: 'salon_chair',
+      })
       fetchTenants()
     } catch (e: unknown) {
       const err = e as { response?: { status?: number; data?: { detail?: string } } }
@@ -331,19 +399,18 @@ export default function AdminPage() {
                 <p className="mt-1 text-xs text-zinc-500">More industries later; this sets AI defaults for booking-style businesses.</p>
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium text-zinc-400">Twilio phone number (E.164)</label>
-                <input
-                  type="tel"
+                <label className="mb-1 block text-sm font-medium text-zinc-400">Twilio US number (E.164)</label>
+                <UsTwilioPhoneInput
                   required
-                  placeholder="e.g. +15551234567"
+                  minNationalLength={10}
                   value={form.twilio_phone_number}
-                  onChange={(e) => setForm({ ...form, twilio_phone_number: e.target.value })}
-                  className={inputClass}
+                  onChange={(full) => setForm({ ...form, twilio_phone_number: full })}
+                  placeholderNational="5551234567"
                 />
                 <p className="mt-1 text-xs text-zinc-500">
-                  Buy the number in Twilio Console, then enter it here (any common US format is fine — we store E.164 to
-                  match webhooks). In Twilio, set Voice webhook to your-backend/api/phone/incoming and Messaging webhook
-                  to your-backend/api/sms/incoming.
+                  US A2P–approved numbers only: country code +1 is fixed. Enter the 10-digit number after +1. Buy the
+                  number in Twilio Console, then enter it here (we store full E.164 to match webhooks). In Twilio, set
+                  Voice webhook to your-backend/api/phone/incoming and Messaging webhook to your-backend/api/sms/incoming.
                 </p>
               </div>
               <div>
@@ -383,7 +450,12 @@ export default function AdminPage() {
                 initial={reduceMotion ? false : 'hidden'}
                 animate="visible"
               >
-                {tenants.map((t) => (
+                {tenants.map((t) => {
+                  const twilioDraftVal = twilioDraft[t.id] ?? ''
+                  const canSaveTwilioNumber = isUsTenantTwilioDraft(twilioDraftVal)
+                    ? nationalDigitsForUsTwilioInput(twilioDraftVal).length > 0
+                    : twilioDraftVal.trim().length > 0
+                  return (
                   <motion.li key={t.id} variants={listItem} className="py-6 first:pt-0 last:pb-0">
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div>
@@ -402,23 +474,30 @@ export default function AdminPage() {
                         <div className="mt-3 flex max-w-xl flex-wrap items-end gap-2">
                           <div className="min-w-[200px] flex-1">
                             <label className="mb-1 block text-xs font-medium text-zinc-500">
-                              Inbound Twilio number (E.164)
+                              Inbound Twilio US number (E.164)
                             </label>
-                            <input
-                              type="tel"
-                              autoComplete="tel"
-                              value={twilioDraft[t.id] ?? ''}
-                              onChange={(e) =>
-                                setTwilioDraft((d) => ({ ...d, [t.id]: e.target.value }))
-                              }
-                              placeholder="+15551234567"
-                              className={inputClass}
-                            />
+                            {isUsTenantTwilioDraft(twilioDraft[t.id]) ? (
+                              <UsTwilioPhoneInput
+                                autoComplete="tel-national"
+                                value={twilioDraft[t.id] ?? US_E164_PREFIX}
+                                onChange={(full) => setTwilioDraft((d) => ({ ...d, [t.id]: full }))}
+                                placeholderNational="5551234567"
+                              />
+                            ) : (
+                              <input
+                                type="tel"
+                                autoComplete="tel"
+                                value={twilioDraft[t.id] ?? ''}
+                                onChange={(e) => setTwilioDraft((d) => ({ ...d, [t.id]: e.target.value }))}
+                                placeholder="+15551234567"
+                                className={inputClass}
+                              />
+                            )}
                           </div>
                           <button
                             type="button"
                             onClick={() => handleSaveTwilio(t.id)}
-                            disabled={twilioSaving === t.id || !(twilioDraft[t.id] || '').trim()}
+                            disabled={twilioSaving === t.id || !canSaveTwilioNumber}
                             className="rounded-lg bg-cyan-600/80 px-3 py-2 text-sm font-medium text-white motion-safe-transition hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {twilioSaving === t.id ? 'Saving…' : 'Save number'}
@@ -477,7 +556,8 @@ export default function AdminPage() {
                       </div>
                     </div>
                   </motion.li>
-                ))}
+                  )
+                })}
               </motion.ul>
             )}
           </section>
