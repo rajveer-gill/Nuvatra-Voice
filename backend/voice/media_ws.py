@@ -59,10 +59,14 @@ class _UtteranceCollector:
     def on_final_segment(self, text: str, confidence: float) -> None:
         if self._committed:
             return
-        if text:
-            self.final_segments.append(text)
+        t = (text or "").strip()
+        if t:
+            self.final_segments.append(t)
             self.last_confidence = max(self.last_confidence, confidence)
-        self._schedule_commit()
+            self._schedule_commit()
+        elif self.final_segments or (self.last_interim or "").strip():
+            # Empty final but we still have text to flush (e.g. endpointing after interim).
+            self._schedule_commit()
 
     def _schedule_commit(self) -> None:
         if self._committed:
@@ -95,6 +99,15 @@ class _UtteranceCollector:
             transcript_len=len(text),
             confidence=conf,
         )
+        if not (text or "").strip():
+            # Deepgram often sends an empty final on stream end; do not replace live TwiML or
+            # hit Gather/process-speech with silence — let Twilio continue to play/got-it/respond.
+            voice_info("utterance_commit_skipped_empty", call_sid=self.call_sid)
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
+            return
         try:
             result = await apply_caller_utterance(self.call_sid, text, conf, self.base_url)
             if result.mode == "replace_call_twiml" and result.replacement_twiml and self.twilio_client:

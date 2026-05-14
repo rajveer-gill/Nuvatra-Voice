@@ -6,7 +6,7 @@ import os
 import json
 import contextvars
 from datetime import datetime, date
-from typing import Optional, List, Tuple
+from typing import Any, Optional, List, Tuple
 from pathlib import Path
 
 # Request-scoped client_id (set by auth middleware or webhook)
