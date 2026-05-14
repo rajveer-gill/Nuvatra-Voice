@@ -1078,14 +1078,18 @@ def get_tenant_subscription_state(tenant: Optional[dict]) -> dict:
         except Exception:
             pass
     trial_active = False
-    if trial_ends_at and subscription_status == "trialing":
-        try:
-            trial_dt = datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00")) if isinstance(trial_ends_at, str) else trial_ends_at
-            if trial_dt.tzinfo is None:
-                trial_dt = trial_dt.replace(tzinfo=timezone.utc)
-            trial_active = now < trial_dt
-        except Exception:
-            pass
+    if subscription_status == "trialing":
+        if not trial_ends_at:
+            # Trialing without an end date (legacy / partial row): still allow app use.
+            trial_active = True
+        else:
+            try:
+                trial_dt = datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00")) if isinstance(trial_ends_at, str) else trial_ends_at
+                if trial_dt.tzinfo is None:
+                    trial_dt = trial_dt.replace(tzinfo=timezone.utc)
+                trial_active = now < trial_dt
+            except Exception:
+                trial_active = True
     paid_active = subscription_status == "active"
     can_use_app = exempt_active or trial_active or paid_active
     return {
@@ -2037,7 +2041,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.8,
-            max_tokens=80,
+            max_tokens=200,
             stream=False
         )
         
@@ -2068,11 +2072,6 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 )
                 if apt:
                     call_data["appointment_created"] = True
-                    ai_text = (
-                        "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
-                        "The time is not finalized until you confirm by text."
-                    )
-                    # Ensure we have caller phone (backfill from Twilio if missing) so SMS goes out and dashboard shows it
                     if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
                         apt["phone"] = call_data["from_number"]
                         if USE_DB and apt.get("id"):
@@ -2080,7 +2079,6 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                                 db_appointments_update(apt["id"], phone=apt["phone"])
                             except Exception:
                                 pass
-                    # Send caller a text: full details (name, phone, email, date, time, service) so they can confirm or request changes before we send to store
                     phone_display = (apt.get("phone") or "").strip() or "Not provided"
                     email_display = (apt.get("email") or "").strip() or "Not provided"
                     thanks_msg = (
@@ -2095,27 +2093,46 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         f"You can also reply with changes.\n\n"
                         f"Msg & data rates may apply. Reply STOP to opt out."
                     )
-                    # Prefer caller number from live call so confirmation SMS always goes to the right person
-                    to_number = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
-                    from_number = (call_data.get("to_number") or "").strip() if call_data else None
-                    if not from_number and cid and USE_DB:
-                        tenant = db_tenant_get_by_client_id(cid)
-                        if tenant:
-                            from_number = (tenant.get("twilio_phone_number") or "").strip()
+                    to_number_sms = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
+                    from_number_sms = (call_data.get("to_number") or "").strip() or None
+                    if not from_number_sms and cid and USE_DB:
+                        tenant_row = db_tenant_get_by_client_id(cid)
+                        if tenant_row:
+                            from_number_sms = (tenant_row.get("twilio_phone_number") or "").strip()
                             sms_info("confirmation_sms_from_tenant_lookup", client_id=cid)
                         else:
                             sms_info("confirmation_sms_tenant_missing_for_from_override", client_id=cid)
-                    if to_number:
-                        ok = send_sms(to_number, thanks_msg, from_override=from_number or None)
+                    if not from_number_sms:
+                        from_number_sms = _tenant_sms_from_number()
+                    sms_info(
+                        "post_booking_confirmation_dispatch",
+                        client_id=cid,
+                        to_set=bool(to_number_sms),
+                        from_set=bool(from_number_sms),
+                    )
+                    if to_number_sms:
+                        ok = send_sms(to_number_sms, thanks_msg, from_override=from_number_sms or None)
                         sms_info(
                             "post_booking_confirmation_sms",
                             client_id=cid,
-                            to_number=to_number,
-                            from_number=from_number,
+                            to_number=to_number_sms,
+                            from_number=from_number_sms,
                             success=ok,
                         )
+                        if ok:
+                            ai_text = (
+                                "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
+                                "The time is not finalized until you confirm by text."
+                            )
+                        else:
+                            ai_text = (
+                                "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
+                            )
                     else:
                         sms_info("post_booking_confirmation_skipped", reason="no_caller_phone", client_id=cid)
+                        ai_text = (
+                            "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
+                        )
                     fn_mem = (call_data.get("from_number") or "").strip()
                     if fn_mem:
                         dp = {

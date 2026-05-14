@@ -68,6 +68,21 @@ def test_subscription_state_trialing():
     assert state["can_use_app"] is True
 
 
+def test_subscription_state_trialing_no_end_date():
+    """Trialing without trial_ends_at (legacy row): still allow app use."""
+    from unittest.mock import patch
+
+    tenant = {
+        "trial_ends_at": None,
+        "subscription_status": "trialing",
+        "plan": "free",
+        "billing_exempt_until": None,
+    }
+    with patch("main.USE_DB", True):
+        state = get_tenant_subscription_state(tenant)
+    assert state["can_use_app"] is True
+
+
 def test_subscription_state_trial_ended_no_subscription():
     """When trial ended and no active subscription, can_use_app False."""
     from datetime import datetime, timezone, timedelta
