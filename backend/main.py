@@ -92,14 +92,20 @@ if not logger.handlers:
 
 from observability import (
     auth_warning,
+    mask_phone,
     sms_debug,
     sms_info,
     sms_trace,
     system_debug,
     system_info,
     usage_warning,
+    voice_call_phase,
     voice_debug,
+    voice_forward,
     voice_info,
+    voice_respond_branch,
+    voice_trace,
+    voice_warning,
     webhook_timing_middleware,
 )
 
@@ -2162,7 +2168,13 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         if transfer_name:
             staff_phone = get_staff_phone_by_name(transfer_name)
             if staff_phone:
-                print(f"🔄 Transferring to staff: {transfer_name} -> {staff_phone}")
+                voice_forward(
+                    "staff_transfer_by_name",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                    forward_kind="staff_named",
+                    staff_name=transfer_name,
+                )
                 call_data["outcome"] = "forwarded"
                 call_log_set_outcome(call_sid, "forwarded")
                 response_status[call_sid] = {
@@ -2172,12 +2184,29 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     "forwarding_phone": staff_phone
                 }
                 return
+            voice_warning(
+                "staff_transfer_name_not_found",
+                call_sid=call_sid,
+                client_id_prefix=str(call_data.get("client_id") or "")[:12],
+                staff_name=transfer_name[:80],
+            )
         
         # Check if user wants to talk to a real person - forward if needed
-        if should_forward_to_human("", ai_text):  # Check AI response for forwarding intent
-            print(f"🔄 Forwarding call to business phone: {get_business_info().get('forwarding_phone')}")
+        if should_forward_to_human(
+            "",
+            ai_text,
+            call_sid=call_sid,
+            client_id=str(call_data.get("client_id") or ""),
+        ):
             forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
+                voice_forward(
+                    "ai_transfer_intent_in_reply",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                    forward_kind="fallback",
+                    has_fallback_configured=True,
+                )
                 call_data["outcome"] = "forwarded"
                 call_log_set_outcome(call_sid, "forwarded")
                 response_status[call_sid] = {
@@ -2198,12 +2227,21 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             "audio_url": tts_audio_url,
             "ai_text": ai_text
         }
-        print(f"✅ Response ready for call {call_sid}")
+        voice_call_phase(
+            "gpt_response_ready",
+            call_sid=call_sid,
+            client_id=str(call_data.get("client_id") or ""),
+            reply_len=len(ai_text or ""),
+        )
         
     except Exception as e:
-        print(f"❌ Error generating response for call {call_sid}: {e}")
-        import traceback
-        traceback.print_exc()
+        voice_warning(
+            "gpt_response_failed",
+            call_sid=call_sid,
+            client_id_prefix=str(call_data.get("client_id") or "")[:12],
+            error_type=type(e).__name__,
+        )
+        logger.exception("generate_response_async failed call_sid=%s", call_sid)
         # Graceful fallback: play fallback message so caller does not get dead air
         fallback_encoded = quote(TTS_FALLBACK_TEXT)
         fallback_tts_url = f"{base_url}/api/phone/tts-audio?text={fallback_encoded}&voice={get_tts_voice()}"
@@ -2213,9 +2251,19 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             "ai_text": TTS_FALLBACK_TEXT,
             "error": str(e)
         }
-        print(f"⚠️ Using fallback message for call {call_sid}")
+        voice_info(
+            "gpt_response_fallback_tts",
+            call_sid=call_sid,
+            client_id_prefix=str(call_data.get("client_id") or "")[:12],
+        )
 
-def should_forward_to_human(user_input: str, ai_response: str) -> bool:
+def should_forward_to_human(
+    user_input: str,
+    ai_response: str,
+    *,
+    call_sid: str = "",
+    client_id: str = "",
+) -> bool:
     """
     Detect if the user wants to talk to a real person or if we should forward the call.
     Checks both user input and AI response for forwarding signals.
@@ -2251,12 +2299,25 @@ def should_forward_to_human(user_input: str, ai_response: str) -> bool:
     # Check user input
     for keyword in forward_keywords:
         if keyword in user_lower:
-            print(f"🔄 Forwarding requested: User said '{keyword}'")
+            voice_forward(
+                "caller_requested_human",
+                call_sid=call_sid,
+                client_id=client_id,
+                forward_kind="fallback",
+                matched_keyword=keyword,
+                input_len=len(user_input or ""),
+            )
             return True
     
     # Check AI response for forwarding signals (AI might detect intent)
     if "transfer" in ai_lower and ("you" in ai_lower or "connect" in ai_lower):
-        print(f"🔄 Forwarding requested: AI detected transfer intent")
+        voice_forward(
+            "ai_transfer_intent_in_reply",
+            call_sid=call_sid,
+            client_id=client_id,
+            forward_kind="fallback",
+            reply_preview=(ai_response or "")[:80],
+        )
         return True
     
     return False
@@ -2288,7 +2349,7 @@ def append_forward_call_verbs(
         else:
             clean_phone = f"+1{clean_phone}"
 
-    print(f"📞 Forwarding call to business: {clean_phone}")
+    voice_trace("dial_fallback_appended", dial_to=mask_phone(clean_phone))
     response.dial(clean_phone, timeout=30, record=False)
     response.say(
         "I'm sorry, no one is available right now. Please try again later or leave a message.",
@@ -4881,6 +4942,13 @@ async def handle_incoming_call(request: Request):
                     call_sid=call_sid,
                 )
 
+        voice_call_phase(
+            "incoming_greeting",
+            call_sid=call_sid or "",
+            client_id=client_id,
+            stt="deepgram" if use_deepgram_stt else "twilio",
+        )
+
         if use_deepgram_stt:
             from voice.twiml_stt import append_connect_stream, next_media_stream_generation
 
@@ -4908,16 +4976,24 @@ async def handle_incoming_call(request: Request):
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
-        print(f"❌ Error handling incoming call: {e}")
-        import traceback
-        traceback.print_exc()
+        voice_warning(
+            "incoming_call_failed",
+            error_type=type(e).__name__,
+        )
+        logger.exception("incoming_call_failed")
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
 
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
-            print(f"🔄 Error on incoming call - forwarding to business phone: {forwarding_phone}")
+            voice_forward(
+                "incoming_error_forward",
+                call_sid=str(form_data.get("CallSid") if "form_data" in dir() else ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
             error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
             error_encoded = quote(error_text)
             tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
@@ -5021,7 +5097,12 @@ async def process_speech(request: Request):
         speech_result = form_data.get("SpeechResult", "")
         confidence = form_data.get("Confidence", "0")
 
-        print(f"🎤 Speech received: {speech_result} (confidence: {confidence})")
+        voice_info(
+            "speech_received",
+            call_sid=call_sid or "",
+            transcript_len=len(speech_result or ""),
+            confidence=confidence,
+        )
 
         _restore_call_context(call_sid or "")
         base_url = _twilio_base_url(request)
@@ -5045,9 +5126,12 @@ async def process_speech(request: Request):
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
-        print(f"❌ Error processing speech: {e}")
-        import traceback
-        traceback.print_exc()
+        voice_warning(
+            "process_speech_failed",
+            call_sid=str(call_sid if "call_sid" in dir() else ""),
+            error_type=type(e).__name__,
+        )
+        logger.exception("process_speech_failed")
         
         # On error, offer to forward to a real person
         response = VoiceResponse()
@@ -5056,7 +5140,13 @@ async def process_speech(request: Request):
         # Check if we have a forwarding number - if so, forward on error
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
-            print(f"🔄 Error occurred - forwarding to business phone: {forwarding_phone}")
+            voice_forward(
+                "process_speech_error_forward",
+                call_sid=str(call_sid if "call_sid" in dir() else ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
             error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
             error_encoded = quote(error_text)
             tts_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
@@ -5091,7 +5181,11 @@ async def handle_call_status(request: Request):
         call_sid = form_data.get("CallSid")
         call_status = form_data.get("CallStatus")
         
-        print(f"📞 Call status update: {call_sid} -> {call_status}")
+        voice_call_phase(
+            "call_status",
+            call_sid=call_sid or "",
+            status=call_status or "",
+        )
         _restore_call_context(call_sid or "")
         
         # Clean up when call ends + Pro: persist call log and customer memory
@@ -5131,7 +5225,13 @@ async def handle_call_status(request: Request):
                     update_caller_memory(from_number)
                 call_log_end(call_sid)
                 del active_calls[call_sid]
-                print(f"Cleaned up call session: {call_sid}")
+                voice_call_phase(
+                    "call_session_cleaned",
+                    call_sid=call_sid or "",
+                    client_id=str(client_id_before or ""),
+                    outcome=outcome or "",
+                    duration_sec=duration_sec,
+                )
             elif call_sid in call_log_entries:
                 # Call was logged but not in active_calls (e.g. quick hangup)
                 call_log_set_outcome(call_sid, "missed" if call_status == "completed" else call_status)
@@ -5157,7 +5257,8 @@ async def handle_call_status(request: Request):
         return Response(content="OK", media_type="text/plain")
     
     except Exception as e:
-        print(f"Error handling call status: {e}")
+        voice_warning("call_status_handler_failed", error_type=type(e).__name__)
+        logger.exception("call_status_handler_failed")
         return Response(content="OK", media_type="text/plain")
 
 @app.websocket("/api/phone/media")
@@ -5198,20 +5299,26 @@ async def handle_no_speech(request: Request):
         detected_lang = call_data.get("detected_language", "English")
         forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
 
-        voice_info(
-            "no_speech_timeout",
-            call_sid=call_sid or "",
-            will_forward=bool(forwarding_phone),
-            client_id_prefix=(str(call_data.get("client_id") or "")[:12]),
-        )
-
         if forwarding_phone:
+            voice_forward(
+                "no_speech_timeout",
+                call_sid=call_sid or "",
+                client_id=str(call_data.get("client_id") or ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+            )
             if call_sid and call_sid in active_calls:
                 active_calls[call_sid]["outcome"] = "forwarded"
             if call_sid:
                 call_log_set_outcome(call_sid, "forwarded")
             response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
         else:
+            voice_respond_branch(
+                "no_speech_goodbye",
+                call_sid=call_sid or "",
+                client_id=str(call_data.get("client_id") or ""),
+                status="hangup",
+            )
             response = VoiceResponse()
             goodbye_text = "Thanks for calling! Have a wonderful day!"
             goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
@@ -5219,7 +5326,12 @@ async def handle_no_speech(request: Request):
             response.hangup()
         return Response(content=str(response), media_type="application/xml")
     except Exception as e:
-        logger.exception("no_speech_handler_failed: %s", e)
+        voice_warning(
+            "no_speech_handler_failed",
+            call_sid=(form_data.get("CallSid") if "form_data" in dir() else "") or "",
+            error_type=type(e).__name__,
+        )
+        logger.exception("no_speech_handler_failed")
         response = VoiceResponse()
         response.say("Thanks for calling. Goodbye.", voice="alice")
         response.hangup()
@@ -5243,9 +5355,12 @@ async def respond_with_audio(request: Request):
         base_url = _twilio_base_url(request)
         if not call_sid or call_sid not in response_status:
             # GPT still processing or caller has not spoken yet — keep polling; never auto-forward.
-            voice_info(
-                "respond_poll_no_status_yet",
+            call_data_poll = active_calls.get(call_sid, {}) if call_sid else {}
+            voice_respond_branch(
+                "poll_no_status",
                 call_sid=call_sid or "",
+                client_id=str(call_data_poll.get("client_id") or ""),
+                status="pending",
                 has_active_call=bool(call_sid and call_sid in active_calls),
             )
             response = VoiceResponse()
@@ -5262,13 +5377,20 @@ async def respond_with_audio(request: Request):
         response = VoiceResponse()
         
         if status == "ready":
+            call_data = active_calls.get(call_sid, {})
+            voice_respond_branch(
+                "play_ai_reply",
+                call_sid=call_sid or "",
+                client_id=str(call_data.get("client_id") or ""),
+                status="ready",
+                stt_provider="deepgram" if _voice_stt_use_deepgram() else "twilio",
+            )
             # Audio is ready - play it
             audio_url = status_data.get("audio_url")
             if audio_url:
                 response.play(audio_url)
                 try:
                     # After playing, set up next input gathering
-                    call_data = active_calls.get(call_sid, {})
                     detected_lang = call_data.get("detected_language", "English")
                     twilio_lang_code = get_twilio_language_code(detected_lang)
                     
@@ -5321,7 +5443,12 @@ async def respond_with_audio(request: Request):
                             )
                     # No-input fallback (forward OR goodbye) is chained after listen windows in twiml_stt.
                 except Exception as e:
-                    logger.warning("respond ready/goodbye block failed: %s: %s", type(e).__name__, e)
+                    voice_warning(
+                        "respond_ready_listen_setup_failed",
+                        call_sid=call_sid or "",
+                        client_id=str(call_data.get("client_id") or "")[:12],
+                        error_type=type(e).__name__,
+                    )
                     response = VoiceResponse()
                     response.hangup()
                 
@@ -5335,6 +5462,13 @@ async def respond_with_audio(request: Request):
             # Forward to business phone
             forwarding_phone = status_data.get("forwarding_phone")
             if forwarding_phone:
+                voice_forward(
+                    "respond_status_forward",
+                    call_sid=call_sid or "",
+                    client_id=str(active_calls.get(call_sid, {}).get("client_id") or ""),
+                    forward_kind="fallback_or_staff",
+                    has_fallback_configured=True,
+                )
                 detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
                 response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
                 # Clean up status
@@ -5346,7 +5480,13 @@ async def respond_with_audio(request: Request):
             # Error occurred - forward to business phone if available
             forwarding_phone = get_business_info().get("forwarding_phone")
             if forwarding_phone:
-                print(f"🔄 Error generating response - forwarding to business phone: {forwarding_phone}")
+                voice_forward(
+                    "respond_status_error_forward",
+                    call_sid=call_sid or "",
+                    client_id=str(active_calls.get(call_sid, {}).get("client_id") or ""),
+                    forward_kind="fallback",
+                    has_fallback_configured=True,
+                )
                 detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
                 response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
                 # Clean up status
@@ -5354,6 +5494,11 @@ async def respond_with_audio(request: Request):
                     del response_status[call_sid]
                 return Response(content=str(response), media_type="application/xml")
             else:
+                voice_respond_branch(
+                    "error_no_fallback",
+                    call_sid=call_sid or "",
+                    status="error",
+                )
                 # Fallback: return error message if no forwarding number
                 response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
                 response.hangup()
@@ -5363,6 +5508,12 @@ async def respond_with_audio(request: Request):
                 return Response(content=str(response), media_type="application/xml")
         
         else:
+            voice_respond_branch(
+                "poll_pending",
+                call_sid=call_sid or "",
+                client_id=str(active_calls.get(call_sid, {}).get("client_id") or ""),
+                status=status,
+            )
             # Still pending - play filler and redirect again
             # Use OpenAI TTS (Fable voice) for consistency
             filler_text = "One sec."
@@ -5382,7 +5533,14 @@ async def respond_with_audio(request: Request):
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
-            print(f"🔄 Error in respond endpoint - forwarding to business phone: {forwarding_phone}")
+            voice_forward(
+                "respond_endpoint_exception_forward",
+                call_sid=str(call_sid or ""),
+                client_id=str(active_calls.get(call_sid or "", {}).get("client_id") or ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
             # Try to get call data for language
             call_data = active_calls.get(call_sid, {})
             detected_lang = call_data.get("detected_language", "English")
@@ -5392,6 +5550,12 @@ async def respond_with_audio(request: Request):
                 del response_status[call_sid]
             return Response(content=str(response), media_type="application/xml")
         else:
+            voice_respond_branch(
+                "respond_endpoint_exception",
+                call_sid=str(call_sid or ""),
+                status="error",
+                error_type=type(e).__name__,
+            )
             # Fallback: return error message if no forwarding number
             response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
             response.hangup()
@@ -5640,16 +5804,25 @@ async def process_recording(request: Request):
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
-        print(f"❌ Error processing recording: {e}")
-        import traceback
-        traceback.print_exc()
+        voice_warning(
+            "process_recording_failed",
+            call_sid=str(call_sid if "call_sid" in dir() else ""),
+            error_type=type(e).__name__,
+        )
+        logger.exception("process_recording_failed")
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
 
         # On error, forward to business phone if available
         forwarding_phone = get_business_info().get("forwarding_phone")
         if forwarding_phone:
-            print(f"🔄 Error processing recording - forwarding to business phone: {forwarding_phone}")
+            voice_forward(
+                "process_recording_error_forward",
+                call_sid=str(call_sid if "call_sid" in dir() else ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
             # Try to get call data for language
             call_data = active_calls.get(call_sid, {})
             detected_lang = call_data.get("detected_language", "English")

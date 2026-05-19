@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 from urllib.parse import quote
 
-from observability import voice_debug, voice_info
+from observability import voice_call_phase, voice_debug, voice_forward, voice_info, voice_warning
 from voice.stt_runtime import deepgram_stt_active
 from voice.twiml_stt import empty_retry_twiml
 
@@ -57,7 +57,12 @@ async def apply_caller_utterance(
         if not call_sid or call_sid not in m.active_calls:
             forwarding_phone = m.get_business_info().get("forwarding_phone")
             if forwarding_phone:
-                voice_info("utterance_lost_session_forward", call_sid=call_sid)
+                voice_forward(
+                    "utterance_lost_session_forward",
+                    call_sid=call_sid,
+                    forward_kind="fallback",
+                    has_fallback_configured=True,
+                )
                 xml = str(m.forward_call_to_business(forwarding_phone, base_url, "English"))
                 return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
             # Use a fresh variable name per branch so Python never treats TwiML locals as one shared `vr`
@@ -74,12 +79,18 @@ async def apply_caller_utterance(
             voice_info("utterance_empty_transcript", call_sid=call_sid, attempt=n)
             lang_code = m.get_twilio_language_code(call_data.get("detected_language") or "English")
             if n >= 4:
-                empty_twiml.say(
+                goodbye_twiml = m.VoiceResponse()
+                goodbye_twiml.say(
                     "I'm still not hearing anything. Please try calling again from a quieter spot. Goodbye.",
                     voice="alice",
                 )
-                empty_twiml.hangup()
-                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(empty_twiml))
+                goodbye_twiml.hangup()
+                voice_warning(
+                    "utterance_empty_give_up",
+                    call_sid=call_sid,
+                    attempt=n,
+                )
+                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(goodbye_twiml))
             use_deepgram = deepgram_stt_active(
                 twilio_available=bool(m.TWILIO_AVAILABLE),
                 twilio_client=m.twilio_client,
@@ -148,9 +159,21 @@ async def apply_caller_utterance(
         user_message = {"role": "user", "content": speech_result}
         call_data["conversation_history"].append(user_message)
 
-        if m.should_forward_to_human(speech_result, ""):
+        if m.should_forward_to_human(
+            speech_result,
+            "",
+            call_sid=call_sid,
+            client_id=str(call_data.get("client_id") or ""),
+        ):
             forwarding_phone = m.get_business_info().get("forwarding_phone")
             if forwarding_phone:
+                voice_forward(
+                    "caller_requested_human",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                    forward_kind="fallback",
+                    has_fallback_configured=True,
+                )
                 call_data["outcome"] = "forwarded"
                 m.call_log_set_outcome(call_sid, "forwarded")
                 xml = str(m.forward_call_to_business(forwarding_phone, base_url, detected_lang))
@@ -162,5 +185,10 @@ async def apply_caller_utterance(
             "ai_text": None,
         }
         asyncio.create_task(m.generate_response_async(call_sid, call_data, detected_lang, base_url))
-        voice_info("utterance_scheduled_gpt", call_sid=call_sid, client_id=call_data.get("client_id"))
+        voice_call_phase(
+            "gpt_scheduled",
+            call_sid=call_sid,
+            client_id=str(call_data.get("client_id") or ""),
+            lang=detected_lang,
+        )
         return UtteranceResult(mode="tail_play_respond")

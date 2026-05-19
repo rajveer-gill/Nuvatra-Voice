@@ -144,6 +144,16 @@ For hello-world / smoke-test validation, use the production deployments rather t
 - **Frontend**: `https://nuvatra-voice.vercel.app/`
 - **Backend**: `https://nuvatra-voice.onrender.com/` (health check at `/api/health`)
 
+### Voice call debugging (Render logs)
+
+Set on the backend when tracing live calls: **`OBS_TRACE_VOICE=1`** (pipeline phases at INFO when combined with trace helpers), **`OBS_TRACE_WEBHOOKS=1`** (HTTP timing for `/api/phone/*`), **`OBS_VERBOSE=1`** (extra DEBUG branches). Search logs for stable event names:
+
+- **`forward_decision`** — every transfer to fallback/staff with `reason=` (e.g. `no_speech_timeout`, `caller_requested_human`, `incoming_error_forward`)
+- **`respond_branch`** — each `/api/phone/respond` TwiML path (`poll_no_status`, `play_ai_reply`, `poll_pending`, …)
+- **`[VOICE] call_phase`** — lifecycle (`incoming_greeting`, `gpt_scheduled`, `call_session_cleaned`, …) when `OBS_TRACE_VOICE=1`
+
+Transfers and respond branches always log at INFO even without `OBS_TRACE_VOICE`; enable the flag for deeper step-by-step traces (media WS, STT, listen windows).
+
 ### Gotchas
 
 - The backend's `main.py` hard-crashes at import time if `OPENAI_API_KEY` is unset. Always provide at least a placeholder in `backend/.env`.

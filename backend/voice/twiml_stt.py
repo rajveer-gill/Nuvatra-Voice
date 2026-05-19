@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Optional
 from urllib.parse import quote
 
+from observability import voice_trace
 from voice.media_token import mint_media_stream_token
 from voice.stt_config import http_to_ws_base
 
@@ -147,6 +148,11 @@ def append_post_ai_listen_with_still_there(
             hints=GATHER_HINTS,
         )
 
+    voice_trace(
+        "listen_windows_complete_redirect_no_speech",
+        call_sid=call_sid,
+        stt="deepgram" if use_deepgram else "twilio",
+    )
     response.redirect(f"{base_url.rstrip('/')}{NO_SPEECH_PATH}", method="POST")
 
 

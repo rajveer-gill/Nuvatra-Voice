@@ -6,6 +6,7 @@ Environment:
   OBS_VERBOSE=1            — Extra DEBUG logs inside SMS/voice/chat paths (slot checks, branches).
   OBS_TRACE_WEBHOOKS=1     — INFO log for each /api/phone/* and /api/sms/* request (timing + status).
   OBS_TRACE_SMS=1          — INFO logs each inbound SMS pipeline step (tenant resolve, compliance, AI, DB); use when debugging delivery or replies.
+  OBS_TRACE_VOICE=1        — INFO logs each voice pipeline step (incoming, respond branches, transfers, STT); recommended when debugging calls on Render.
   VOICE_STT_PROVIDER=twilio|deepgram — Default twilio (Gather). deepgram uses Media Streams on every listen turn (/api/phone/media + Deepgram Nova-2); Gather remains fail-open fallback.
   DEEPGRAM_API_KEY         — Required when VOICE_STT_PROVIDER=deepgram.
   MEDIA_STREAM_SIGNING_SECRET — Optional HMAC secret for stream tokens; falls back to TWILIO_AUTH_TOKEN.
@@ -34,6 +35,7 @@ def _truthy(name: str) -> bool:
 OBS_VERBOSE: bool = _truthy("OBS_VERBOSE")
 OBS_TRACE_WEBHOOKS: bool = _truthy("OBS_TRACE_WEBHOOKS")
 OBS_TRACE_SMS: bool = _truthy("OBS_TRACE_SMS")
+OBS_TRACE_VOICE: bool = _truthy("OBS_TRACE_VOICE")
 
 
 def mask_phone(raw: Optional[str]) -> str:
@@ -117,6 +119,89 @@ def voice_debug(event: str, **fields: Any) -> None:
     if not OBS_VERBOSE:
         return
     voice_event(logging.DEBUG, event, **fields)
+
+
+def voice_trace(event: str, **fields: Any) -> None:
+    """Detailed voice pipeline steps at INFO when OBS_TRACE_VOICE=1 (Render-friendly)."""
+    if not OBS_TRACE_VOICE:
+        return
+    voice_event(logging.INFO, event, **fields)
+
+
+def voice_warning(event: str, **fields: Any) -> None:
+    voice_event(logging.WARNING, event, **fields)
+
+
+def _client_prefix(client_id: Optional[str]) -> str:
+    cid = (client_id or "").strip()
+    return cid[:12] if cid else "(none)"
+
+
+def voice_forward(
+    reason: str,
+    *,
+    call_sid: str = "",
+    client_id: str = "",
+    forward_kind: str = "fallback",
+    staff_name: str = "",
+    has_fallback_configured: Optional[bool] = None,
+    **extra: Any,
+) -> None:
+    """
+    Log every live call transfer at INFO with a stable reason code (search Render logs for forward_decision).
+
+    reason examples: staff_transfer_by_name, caller_requested_human, no_speech_timeout,
+    respond_status_forward, incoming_error_forward, utterance_lost_session_forward.
+    """
+    fields: dict[str, Any] = {
+        "reason": reason,
+        "call_sid": call_sid or "",
+        "client_id_prefix": _client_prefix(client_id),
+        "forward_kind": forward_kind,
+        **extra,
+    }
+    if staff_name:
+        fields["staff_name"] = staff_name[:80]
+    if has_fallback_configured is not None:
+        fields["has_fallback_configured"] = has_fallback_configured
+    voice_event(logging.INFO, "forward_decision", **fields)
+
+
+def voice_respond_branch(
+    branch: str,
+    *,
+    call_sid: str = "",
+    client_id: str = "",
+    status: str = "",
+    **extra: Any,
+) -> None:
+    """Log /api/phone/respond TwiML branch (always INFO — critical for debugging stuck/early transfers)."""
+    voice_event(
+        logging.INFO,
+        "respond_branch",
+        branch=branch,
+        call_sid=call_sid or "",
+        client_id_prefix=_client_prefix(client_id),
+        status=status or "",
+        **extra,
+    )
+
+
+def voice_call_phase(
+    phase: str,
+    *,
+    call_sid: str = "",
+    client_id: str = "",
+    **extra: Any,
+) -> None:
+    """High-level call lifecycle (incoming, greeting, utterance, gpt_ready, etc.)."""
+    voice_trace(
+        "call_phase",
+        phase=phase,
+        call_sid=call_sid or "",
+        client_id_prefix=_client_prefix(client_id),
+        **extra,
+    )
 
 
 def system_info(event: str, **fields: Any) -> None:
