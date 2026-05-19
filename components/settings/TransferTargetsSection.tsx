@@ -372,7 +372,7 @@ export function TransferTargetsSection({
         >
           <Plus className="w-4 h-4" /> Custom number
         </motion.button>
-      </motion.div>
+      </div>
       {!canAdd && (
         <motion.p
           className="text-xs text-amber-800 mt-2 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2"
@@ -466,7 +466,7 @@ export function TransferTargetsSection({
                         This person has no phone on their roster profile — add one in Team roster, or use Custom with a number.
                       </p>
                     )}
-                  </motion.div>
+                  </div>
                 ) : null}
                 {(addMode === 'custom' || mode === 'edit') && (
                   <>
@@ -499,7 +499,7 @@ export function TransferTargetsSection({
                     </motion.div>
                   </>
                 )}
-    </div>
+              </motion.div>
               <div className="flex flex-wrap justify-end gap-2 border-t border-violet-100 px-5 py-4 bg-violet-50/50">
                 <button type="button" onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-medium bg-gray-100">
                   Cancel
@@ -513,11 +513,11 @@ export function TransferTargetsSection({
                 >
                   {saving ? 'Saving…' : 'Save'}
                 </motion.button>
-              </motion.div>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
       </dialog>
-    </motion.div>
+    </div>
   )
 }

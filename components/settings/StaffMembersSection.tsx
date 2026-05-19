@@ -369,7 +369,7 @@ export function StaffMembersSection({
                     placeholder="you@business.com"
                     maxLength={254}
                   />
-                </motion.div>
+                </div>
                 <motion.div layout>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Notes for the AI</label>
                   <textarea
@@ -380,7 +380,7 @@ export function StaffMembersSection({
                     maxLength={4000}
                   />
                 </motion.div>
-              </motion.div>
+              </div>
               <motion.div
                 className="flex flex-wrap items-center justify-end gap-2 border-t border-gray-100 px-5 py-4 bg-gray-50/80"
                 layout
@@ -410,11 +410,11 @@ export function StaffMembersSection({
                 >
                   {saving ? 'Saving…' : 'Save'}
                 </motion.button>
-    </div>
+              </motion.div>
             </motion.div>
           )}
         </AnimatePresence>
       </dialog>
-    </motion.div>
+    </div>
   )
 }
