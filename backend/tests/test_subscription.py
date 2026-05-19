@@ -31,6 +31,7 @@ def test_subscription_includes_limits(client):
         assert "plan" in limits
         assert "minutes_cap" in limits
         assert "staff_max" in limits
+        assert "transfer_max" in limits
         assert "call_log_days" in limits
         assert "has_reminders" in limits
         assert "has_lead_capture" in limits

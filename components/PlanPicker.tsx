@@ -10,21 +10,21 @@ const PLANS = [
     name: 'Starter',
     price: '$149',
     description: 'Essential AI receptionist',
-    features: ['500 min/mo', '1 staff', '24/7 answering', 'Appointments', 'Basic call log (30 days)'],
+    features: ['500 min/mo', '1 call transfer', 'Unlimited team roster', '24/7 answering', 'Appointments', 'Basic call log (30 days)'],
   },
   {
     id: 'growth' as const,
     name: 'Growth',
     price: '$249',
     description: 'More capacity & features',
-    features: ['1,500 min/mo', '5 staff', 'Appointment reminders', 'Lead capture', 'SMS automations (2)', 'Call log export', '90 days history'],
+    features: ['1,500 min/mo', '5 call transfers', 'Unlimited team roster', 'Appointment reminders', 'Lead capture', 'SMS automations (2)', 'Call log export', '90 days history'],
   },
   {
     id: 'pro' as const,
     name: 'Pro',
     price: '$399',
     description: 'Full capability & priority',
-    features: ['3,500 min/mo', 'Unlimited staff', 'All Growth features', 'Full analytics', 'Dedicated support'],
+    features: ['3,500 min/mo', 'Unlimited call transfers', 'Unlimited team roster', 'All Growth features', 'Full analytics', 'Dedicated support'],
   },
 ]
 

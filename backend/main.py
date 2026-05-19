@@ -722,6 +722,7 @@ def load_client_config(client_id: Optional[str] = None):
             "specials": _normalize_special_entries(data.get("specials", [])),
             "reservation_rules": _normalize_rule_entries(data.get("reservation_rules", [])),
             "staff": data.get("staff", []),
+            "transfer_targets": data.get("transfer_targets", []),
             "locations": data.get("locations", []),
             "greeting": data.get("greeting", ""),
             "plan": data.get("plan", "starter"),
@@ -752,6 +753,7 @@ _DEMO_BUSINESS_INFO = {
         "specials": [],
         "reservation_rules": [],
         "staff": [],
+        "transfer_targets": [],
         "locations": [],
         "greeting": "",
         "plan": "starter",
@@ -779,6 +781,7 @@ def _minimal_business_info_from_tenant_dict(tenant: dict) -> dict:
         "specials": [],
         "reservation_rules": [],
         "staff": [],
+        "transfer_targets": [],
         "locations": [],
         "greeting": "",
         "plan": plan,
@@ -865,6 +868,7 @@ def _default_client_config_data(client_id: str, plan: str = "free") -> dict:
         "menu_link": "",
         "greeting": "",
         "staff": [],
+        "transfer_targets": [],
         "locations": [],
         "voice": "fable",
         "speed": 1.0,
@@ -1379,16 +1383,10 @@ def update_caller_memory(
         print(f"Failed to save caller memory: {e}")
 
 def get_staff_phone_by_name(name: str) -> Optional[str]:
-    """Return E.164 phone for staff member by name (case-insensitive match).
-    Duplicate names under one tenant: deterministic first match in configured order."""
-    staff = get_business_info().get("staff") or []
-    name_clean = name.strip().lower()
-    for s in staff:
-        if s.get("name", "").strip().lower() == name_clean:
-            phone = (s.get("phone") or "").strip()
-            if phone:
-                return phone
-    return None
+    """Return E.164 for a plan-authorized transfer destination by name (not the full staff roster)."""
+    from staff_transfers import get_transfer_phone_by_name
+
+    return get_transfer_phone_by_name(name, get_business_info())
 
 def parse_transfer_to(ai_text: str) -> Optional[str]:
     """If AI responded with TRANSFER_TO: Name, return the name; else None."""
@@ -3650,6 +3648,9 @@ def finalize_staff_records_for_storage(members: List[StaffMember]) -> List[dict]
     return out
 
 
+from staff_transfers import TransferTarget  # noqa: E402 — after StaffMember; shared with PATCH validation
+
+
 class BusinessInfoUpdate(BaseModel):
     name: Optional[str] = None
     hours: Optional[str] = None
@@ -3668,6 +3669,7 @@ class BusinessInfoUpdate(BaseModel):
     receptionist_name: Optional[str] = None
     business_type: Optional[str] = None
     staff: Optional[List[StaffMember]] = None
+    transfer_targets: Optional[List[TransferTarget]] = None
 
 @app.patch("/api/business-info")
 async def api_update_business_info(update: BusinessInfoUpdate, request: Request, tenant: Optional[dict] = Depends(require_active_subscription)):
@@ -3728,13 +3730,40 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         if not (USE_DB and tid and tid.get("business_vertical")):
             data["business_type"] = update.business_type
     if update.staff is not None:
-        tenant_limits = db_tenant_get_by_client_id(cid)
+        from staff_transfers import STAFF_ROSTER_MAX, prune_transfer_targets_for_removed_staff
+
+        new_staff = finalize_staff_records_for_storage(update.staff)
+        if len(new_staff) > STAFF_ROSTER_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Staff roster cannot exceed {STAFF_ROSTER_MAX} members. Contact support if you need more.",
+            )
+        old_ids = {str(s.get("id")) for s in (data.get("staff") or []) if s.get("id")}
+        new_ids = {s["id"] for s in new_staff}
+        removed_ids = old_ids - new_ids
+        data["staff"] = new_staff
+        if removed_ids and data.get("transfer_targets"):
+            data["transfer_targets"] = prune_transfer_targets_for_removed_staff(
+                list(data["transfer_targets"]), removed_ids
+            )
+    if update.transfer_targets is not None:
+        from staff_transfers import TransferTarget, finalize_transfer_targets_for_storage
+
+        tenant_limits = db_tenant_get_by_client_id(cid) or tid
+        transfer_max = 1
         if tenant_limits and get_plan_limits:
-            limits = get_plan_limits(tenant_limits)
-            staff_max = limits.get("staff_max", 1)
-            if len(update.staff) > staff_max:
-                raise HTTPException(status_code=403, detail=f"Plan allows up to {staff_max} staff member(s). Upgrade to add more.")
-        data["staff"] = finalize_staff_records_for_storage(update.staff)
+            transfer_max = int(get_plan_limits(tenant_limits).get("transfer_max") or 1)
+        try:
+            data["transfer_targets"] = finalize_transfer_targets_for_storage(
+                update.transfer_targets,
+                data.get("staff") or [],
+                transfer_max=transfer_max,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if msg.startswith("Plan allows"):
+                raise HTTPException(status_code=403, detail=msg) from e
+            raise HTTPException(status_code=400, detail=msg) from e
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w", encoding="utf-8") as f:

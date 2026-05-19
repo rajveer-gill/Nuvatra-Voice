@@ -22,7 +22,7 @@ export type SubscriptionState = {
   subscription_status: string | null
   plan: string
   billing_exempt_until: string | null
-  limits?: { has_lead_capture?: boolean; staff_max?: number; minutes_cap?: number; sms_automations_max?: number; has_export?: boolean }
+  limits?: { has_lead_capture?: boolean; staff_max?: number; transfer_max?: number; minutes_cap?: number; sms_automations_max?: number; has_export?: boolean }
 }
 
 export default function DashboardPage() {

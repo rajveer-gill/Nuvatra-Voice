@@ -10,7 +10,8 @@ from plans import (
     PLAN_HAS_REMINDERS,
     PLAN_MINUTES,
     PLAN_SMS_AUTOMATIONS,
-    PLAN_STAFF_MAX,
+    PLAN_TRANSFER_MAX,
+    STAFF_ROSTER_UNLIMITED,
     get_plan_limits,
 )
 
@@ -21,7 +22,8 @@ def test_get_plan_limits_starter():
     limits = get_plan_limits(tenant)
     assert limits["plan"] == "starter"
     assert limits["minutes_cap"] == 500
-    assert limits["staff_max"] == 1
+    assert limits["staff_max"] == STAFF_ROSTER_UNLIMITED
+    assert limits["transfer_max"] == PLAN_TRANSFER_MAX["starter"]
     assert limits["call_log_days"] == 30
     assert limits["has_reminders"] is False
     assert limits["has_lead_capture"] is False
@@ -38,7 +40,8 @@ def test_get_plan_limits_growth():
     limits = get_plan_limits(tenant)
     assert limits["plan"] == "growth"
     assert limits["minutes_cap"] == 1500
-    assert limits["staff_max"] == 5
+    assert limits["staff_max"] == STAFF_ROSTER_UNLIMITED
+    assert limits["transfer_max"] == PLAN_TRANSFER_MAX["growth"]
     assert limits["call_log_days"] == 90
     assert limits["has_reminders"] is True
     assert limits["has_lead_capture"] is True
@@ -52,7 +55,8 @@ def test_get_plan_limits_pro():
     limits = get_plan_limits(tenant)
     assert limits["plan"] == "pro"
     assert limits["minutes_cap"] == 3500
-    assert limits["staff_max"] == 999
+    assert limits["staff_max"] == STAFF_ROSTER_UNLIMITED
+    assert limits["transfer_max"] == PLAN_TRANSFER_MAX["pro"]
     assert limits["call_log_days"] == 9999
     assert limits["has_reminders"] is True
     assert limits["has_lead_capture"] is True
@@ -66,7 +70,8 @@ def test_get_plan_limits_free_maps_to_starter():
     limits = get_plan_limits(tenant)
     assert limits["plan"] == "starter"
     assert limits["minutes_cap"] == 500
-    assert limits["staff_max"] == 1
+    assert limits["staff_max"] == STAFF_ROSTER_UNLIMITED
+    assert limits["transfer_max"] == PLAN_TRANSFER_MAX["starter"]
     assert limits["has_reminders"] is False
 
 
@@ -92,7 +97,8 @@ def test_trial_gets_pro_limits():
     assert limits["plan"] == "starter"  # plan field shows actual plan
     assert limits["is_trial"] is True
     assert limits["minutes_cap"] == PLAN_MINUTES["pro"]
-    assert limits["staff_max"] == PLAN_STAFF_MAX["pro"]
+    assert limits["staff_max"] == STAFF_ROSTER_UNLIMITED
+    assert limits["transfer_max"] == PLAN_TRANSFER_MAX["pro"]
     assert limits["call_log_days"] == PLAN_CALL_LOG_DAYS["pro"]
     assert limits["has_reminders"] is True
     assert limits["has_lead_capture"] is True
@@ -115,7 +121,7 @@ def test_plan_constants_have_all_plans():
     """All plan constant dicts have starter, growth, pro."""
     for name, d in [
         ("PLAN_MINUTES", PLAN_MINUTES),
-        ("PLAN_STAFF_MAX", PLAN_STAFF_MAX),
+        ("PLAN_TRANSFER_MAX", PLAN_TRANSFER_MAX),
         ("PLAN_HAS_REMINDERS", PLAN_HAS_REMINDERS),
         ("PLAN_HAS_LEAD_CAPTURE", PLAN_HAS_LEAD_CAPTURE),
         ("PLAN_HAS_EXPORT", PLAN_HAS_EXPORT),

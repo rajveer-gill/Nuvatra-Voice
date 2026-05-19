@@ -80,12 +80,28 @@ def build_system_prompt(
 
     staff_block = ""
     if staff:
-        staff_names = [s.get("name", "") for s in staff if s.get("name")]
-        staff_block = (
-            f"\n- Staff you can transfer to: {', '.join(staff_names)}. "
-            "When the caller asks to speak to one of these people by name, reply with EXACTLY: "
-            "TRANSFER_TO: [Name] (use the exact name from the list). Otherwise do not use TRANSFER_TO."
-        )
+        try:
+            from staff_transfers import transfer_names_for_prompt
+
+            transfer_names = transfer_names_for_prompt(business_info)
+        except ImportError:
+            transfer_names = [
+                s.get("name", "")
+                for s in staff
+                if s.get("name") and (s.get("phone") or "").strip()
+            ]
+        all_names = [s.get("name", "") for s in staff if s.get("name")]
+        if transfer_names:
+            staff_block = (
+                f"\n- Staff you can transfer to: {', '.join(transfer_names)}. "
+                "When the caller asks to speak to one of these people by name, reply with EXACTLY: "
+                "TRANSFER_TO: [Name] (use the exact name from the list). Otherwise do not use TRANSFER_TO."
+            )
+        elif all_names:
+            staff_block = (
+                f"\n- Staff on file (no live transfer configured): {', '.join(all_names)}. "
+                "Do not use TRANSFER_TO. Offer to take a message or use the business forwarding number if appropriate."
+            )
         # Optional context from business (not email/phone — reduces PII exposure in the model).
         notes_cap = 400
         fact_lines: List[str] = []

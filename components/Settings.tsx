@@ -17,6 +17,11 @@ import {
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
 import { StaffMembersSection, normalizeStaffFromApi, type StaffRow } from '@/components/settings/StaffMembersSection'
 import {
+  TransferTargetsSection,
+  normalizeTransferFromApi,
+  type TransferRow,
+} from '@/components/settings/TransferTargetsSection'
+import {
   normalizeServices,
   normalizeSpecials,
   normalizeRules,
@@ -63,7 +68,8 @@ export default function Settings() {
   const [industryLocked, setIndustryLocked] = useState(false)
   const [verticalLabel, setVerticalLabel] = useState('')
   const [staff, setStaff] = useState<StaffRow[]>([])
-  const [staffMax, setStaffMax] = useState<number | null>(null)
+  const [transferTargets, setTransferTargets] = useState<TransferRow[]>([])
+  const [transferMax, setTransferMax] = useState<number | null>(null)
   const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
   const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
   const [setupStatus, setSetupStatus] = useState<{ complete: boolean; missing: string[]; warnings: string[] } | null>(null)
@@ -124,8 +130,8 @@ export default function Settings() {
         if (cancelled) return
         setMessage(null)
         try {
-          const limits = (subRes?.data as { limits?: { staff_max?: number; sms_automations_max?: number } } | null)?.limits
-          if (limits?.staff_max != null) setStaffMax(limits.staff_max)
+          const limits = (subRes?.data as { limits?: { transfer_max?: number; sms_automations_max?: number } } | null)?.limits
+          if (limits?.transfer_max != null) setTransferMax(limits.transfer_max)
           if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
           setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
           setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
@@ -141,6 +147,7 @@ export default function Settings() {
           }
           setVoice((d.voice as string) || 'fable')
           setStaff(normalizeStaffFromApi(d.staff ?? []))
+          setTransferTargets(normalizeTransferFromApi(d.transfer_targets ?? []))
           const spd = typeof d.speed === 'number' ? d.speed : 1.0
           setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
           setReceptionistName((d.receptionist_name as string) || '')
@@ -630,7 +637,15 @@ export default function Settings() {
           <StaffMembersSection
             staff={staff}
             onStaffChange={setStaff}
-            staffMax={staffMax}
+            api={api}
+            onNotify={setMessage}
+            onAfterSave={refreshSetupStatus}
+          />
+          <TransferTargetsSection
+            transfers={transferTargets}
+            staff={staff}
+            transferMax={transferMax}
+            onTransfersChange={setTransferTargets}
             api={api}
             onNotify={setMessage}
             onAfterSave={refreshSetupStatus}
