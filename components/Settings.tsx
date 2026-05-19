@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import * as Sentry from '@sentry/nextjs'
 import { useAuth } from '@clerk/nextjs'
 import {
@@ -49,9 +50,48 @@ import {
 } from '@/components/settings/StructuredListEditors'
 import { BusinessHoursModal } from '@/components/settings/BusinessHoursModal'
 import { parseHoursToWeekly, summarizeSchedule } from '@/lib/businessHours'
+import { fadeUpChild, staggerContainer } from '@/components/motion'
 
 /** Set NEXT_PUBLIC_DEBUG_SETTINGS=1 in .env.local (or Vercel) to log per-endpoint load outcomes — no tokens. */
 const DEBUG_SETTINGS = process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1'
+
+function SettingsSection({
+  children,
+  className = '',
+  delay = 0,
+  ...rest
+}: {
+  children: ReactNode
+  className?: string
+  delay?: number
+} & React.ComponentPropsWithoutRef<'section'>) {
+  const reduceMotion = useReducedMotion()
+  return (
+    <motion.section
+      variants={fadeUpChild}
+      custom={delay}
+      whileHover={reduceMotion ? undefined : { y: -3, transition: { type: 'spring', stiffness: 420, damping: 26 } }}
+      className={`relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-8 shadow-xl shadow-slate-900/10 ring-1 ring-slate-900/[0.04] ${className}`}
+      {...rest}
+    >
+      <motion.div
+        aria-hidden
+        className="pointer-events-none absolute -right-16 -top-16 h-36 w-36 rounded-full bg-gradient-to-br from-primary-400/25 via-cyan-300/10 to-transparent blur-2xl"
+        animate={reduceMotion ? undefined : { scale: [1, 1.12, 1], opacity: [0.35, 0.65, 0.35] }}
+        transition={{ duration: 5.5, repeat: Infinity, ease: 'easeInOut' }}
+      />
+      <motion.div
+        aria-hidden
+        className="pointer-events-none absolute -bottom-12 -left-12 h-28 w-28 rounded-full bg-gradient-to-tr from-violet-400/15 to-transparent blur-2xl"
+        animate={reduceMotion ? undefined : { x: [0, 8, 0], y: [0, -6, 0] }}
+        transition={{ duration: 7, repeat: Infinity, ease: 'easeInOut' }}
+      />
+      <motion.div className="relative z-10" layout>
+        {children}
+      </motion.div>
+    </motion.section>
+  )
+}
 
 export default function Settings() {
   const { isLoaded, isSignedIn } = useAuth()
@@ -89,6 +129,8 @@ export default function Settings() {
   const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
   const [setupStatus, setSetupStatus] = useState<{ complete: boolean; missing: string[]; warnings: string[] } | null>(null)
   const [hoursModalOpen, setHoursModalOpen] = useState(false)
+  const saveBarRef = useRef<HTMLDivElement>(null)
+  const reduceMotion = useReducedMotion()
 
   const hoursSummaryPreview = useMemo(() => {
     const { schedule } = parseHoursToWeekly(form.hours || '')
@@ -208,6 +250,11 @@ export default function Settings() {
       cancelled = true
     }
   }, [api, isLoaded, isSignedIn])
+
+  useEffect(() => {
+    if (!message || !saveBarRef.current) return
+    saveBarRef.current.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' })
+  }, [message, reduceMotion])
 
   const randomizeName = () => {
     const current = receptionistName.trim().toLowerCase()
@@ -342,9 +389,24 @@ export default function Settings() {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600" />
-      </div>
+      <motion.div
+        className="flex h-64 flex-col items-center justify-center gap-4"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+      >
+        <motion.div
+          className="h-12 w-12 rounded-full border-2 border-primary-200 border-t-primary-600"
+          animate={reduceMotion ? undefined : { rotate: 360 }}
+          transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}
+        />
+        <motion.p
+          className="text-sm font-medium text-gray-500"
+          animate={reduceMotion ? undefined : { opacity: [0.45, 1, 0.45] }}
+          transition={{ duration: 1.6, repeat: Infinity }}
+        >
+          Loading settings…
+        </motion.p>
+      </motion.div>
     )
   }
 
@@ -353,15 +415,14 @@ export default function Settings() {
   const warnings = setupStatus?.warnings ?? []
 
   return (
-    <div className="mx-auto max-w-4xl space-y-8 text-gray-900">
-      {message && (
-        <div className={`rounded-lg px-4 py-3 text-sm ${message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-          {message.text}
-        </div>
-      )}
-
+    <motion.div
+      className="mx-auto max-w-4xl space-y-8 pb-44 text-gray-900"
+      variants={staggerContainer}
+      initial="hidden"
+      animate="visible"
+    >
       {/* Setup checklist: ensure AI has correct business info before taking calls */}
-      <div className="bg-white rounded-2xl shadow-xl p-8">
+      <SettingsSection delay={0}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2">
           {setupComplete ? <CheckCircle2 className="w-6 h-6 text-green-600" /> : <AlertTriangle className="w-6 h-6 text-amber-500" />}
           Setup checklist
@@ -380,13 +441,20 @@ export default function Settings() {
           ).map(({ key, label }) => {
             const done = !missing.includes(label)
             return (
-            <li key={key} className="flex items-center gap-2 text-sm">
+            <motion.li
+              key={key}
+              layout
+              initial={reduceMotion ? false : { opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.05 * (['name', 'hours', 'phone', 'address'].indexOf(key) + 1) }}
+              className="flex items-center gap-2 text-sm"
+            >
               {done ? <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" /> : <Circle className="w-4 h-4 text-gray-300 shrink-0" />}
               <span className={done ? 'text-gray-700' : 'text-gray-500'}>{label}</span>
               {key === 'phone' && (
                 <span className="text-gray-400 text-xs font-normal">(where callers go when they ask for a person)</span>
               )}
-            </li>
+            </motion.li>
             )
           })}
         </ul>
@@ -401,10 +469,10 @@ export default function Settings() {
             Fill in the required fields below and save. Your AI will work better with complete business info.
           </p>
         )}
-      </div>
+      </SettingsSection>
 
       {/* AI Receptionist Identity */}
-      <div className="bg-white rounded-2xl shadow-xl p-8">
+      <SettingsSection delay={1}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <User className="w-6 h-6 text-primary-600" />
           AI Receptionist
@@ -421,15 +489,17 @@ export default function Settings() {
                 className="cs-field flex-1 min-w-0"
                 placeholder="Give your AI receptionist a name"
               />
-              <button
+              <motion.button
                 type="button"
                 onClick={randomizeName}
+                whileHover={reduceMotion ? undefined : { scale: 1.03 }}
+                whileTap={reduceMotion ? undefined : { scale: 0.97 }}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
                 title="Random name"
               >
                 <Shuffle className="w-4 h-4" />
                 Random
-              </button>
+              </motion.button>
             </div>
             <p className="text-xs text-gray-500 mt-1">This name is used when your AI introduces itself to callers.</p>
           </div>
@@ -446,10 +516,10 @@ export default function Settings() {
             <p className="text-xs text-gray-500 mt-1">Calls and texts work when your number&apos;s Voice and Messaging webhooks are set in Twilio. If calls or texts aren&apos;t working, contact your administrator.</p>
           </div>
         </div>
-      </div>
+      </SettingsSection>
 
       {/* Voice Settings */}
-      <div className="bg-white rounded-2xl shadow-xl p-8">
+      <SettingsSection delay={2}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <Volume2 className="w-6 h-6 text-primary-600" />
           Voice settings
@@ -521,9 +591,15 @@ export default function Settings() {
           ))}
         </div>
         {previewing && (
-          <p className="text-xs text-gray-500 mt-2 animate-pulse">Playing {previewing} voice sample...</p>
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="mt-2 text-xs font-medium text-primary-600"
+          >
+            Playing {previewing} voice sample…
+          </motion.p>
         )}
-      </div>
+      </SettingsSection>
 
       {/* SMS Automations (Growth/Pro) */}
       {smsAutomationsMax != null && smsAutomationsMax > 0 && (
@@ -537,7 +613,7 @@ export default function Settings() {
       )}
 
       {/* Billing */}
-      <div className="bg-white rounded-2xl shadow-xl p-8">
+      <SettingsSection delay={3}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <CreditCard className="w-6 h-6 text-primary-600" />
           Billing
@@ -568,10 +644,10 @@ export default function Settings() {
         >
           Cancel service
         </button>
-      </div>
+      </SettingsSection>
 
       {/* Business info — any type: restaurant, salon, HVAC, real estate, etc. */}
-      <div className="bg-white rounded-2xl shadow-xl p-8">
+      <SettingsSection delay={4}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <Store className="w-6 h-6 text-primary-600" />
           Business info &amp; AI customizations
@@ -702,20 +778,9 @@ export default function Settings() {
           <RulesEditor items={ruleItems} onChange={setRuleItems} />
         </div>
 
-        <div className="mt-6 flex items-center gap-3">
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
-          >
-            <Save className="w-4 h-4" />
-            {saving ? 'Saving…' : 'Save changes'}
-          </button>
-        </div>
-      </div>
+      </SettingsSection>
 
-      <section className="bg-white rounded-2xl shadow-xl p-8" aria-labelledby="team-roster-settings-heading">
+      <SettingsSection delay={5} aria-labelledby="team-roster-settings-heading">
         <h2
           id="team-roster-settings-heading"
           className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"
@@ -735,9 +800,9 @@ export default function Settings() {
           onNotify={setMessage}
           onAfterSave={refreshSetupStatus}
         />
-      </section>
+      </SettingsSection>
 
-      <section className="bg-white rounded-2xl shadow-xl p-8" aria-labelledby="call-transfers-settings-heading">
+      <SettingsSection delay={6} aria-labelledby="call-transfers-settings-heading">
         <h2
           id="call-transfers-settings-heading"
           className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"
@@ -758,7 +823,67 @@ export default function Settings() {
           onNotify={setMessage}
           onAfterSave={refreshSetupStatus}
         />
-      </section>
-    </div>
+      </SettingsSection>
+
+      <motion.div
+        ref={saveBarRef}
+        initial={reduceMotion ? false : { y: 28, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ type: 'spring', stiffness: 380, damping: 32, delay: 0.15 }}
+        className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/10 bg-gradient-to-t from-zinc-950 via-zinc-950/95 to-zinc-950/85 px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-xl"
+      >
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-400/70 to-transparent"
+          animate={reduceMotion ? undefined : { opacity: [0.35, 1, 0.35] }}
+          transition={{ duration: 2.8, repeat: Infinity, ease: 'easeInOut' }}
+        />
+        <motion.div className="mx-auto flex w-full max-w-4xl flex-col gap-3">
+          <AnimatePresence mode="wait">
+            {message && (
+              <motion.div
+                key={`${message.type}-${message.text}`}
+                role="alert"
+                initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={reduceMotion ? undefined : { opacity: 0, y: 8, scale: 0.98 }}
+                transition={{ type: 'spring', stiffness: 500, damping: 28 }}
+                className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm shadow-lg ${
+                  message.type === 'success'
+                    ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-50'
+                    : 'border-red-500/35 bg-red-500/15 text-red-50'
+                }`}
+              >
+                {message.type === 'success' ? (
+                  <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
+                ) : (
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
+                )}
+                <span>{message.text}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <motion.button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            whileHover={reduceMotion ? undefined : { scale: 1.01 }}
+            whileTap={reduceMotion ? undefined : { scale: 0.98 }}
+            className="relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl bg-gradient-to-r from-cyan-600 via-primary-600 to-indigo-600 px-6 py-4 text-base font-semibold text-white shadow-lg shadow-cyan-900/35 disabled:opacity-55"
+          >
+            {!reduceMotion && !saving && (
+              <motion.span
+                aria-hidden
+                className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0"
+                animate={{ x: ['-120%', '120%'] }}
+                transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut', repeatDelay: 0.8 }}
+              />
+            )}
+            <Save className="relative h-5 w-5" />
+            <span className="relative">{saving ? 'Saving…' : 'Save changes'}</span>
+          </motion.button>
+        </motion.div>
+      </motion.div>
+    </motion.div>
   )
 }
