@@ -298,6 +298,7 @@ export default function Settings() {
             phone: s.phone.trim(),
             email: s.email.trim() || undefined,
             notes: s.notes || undefined,
+            service_ids: s.service_ids.length ? s.service_ids : undefined,
           })),
         services: serviceItems.length ? serviceItems : undefined,
         specials: specialItems.length ? specialItems : undefined,
@@ -725,6 +726,7 @@ export default function Settings() {
         </p>
         <StaffMembersSection
           staff={staff}
+          availableServices={serviceItems}
           onStaffChange={setStaff}
           api={api}
           onNotify={setMessage}

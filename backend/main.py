@@ -3641,6 +3641,7 @@ class StaffMember(BaseModel):
     phone: str = Field(default="", max_length=32)
     email: str = Field(default="", max_length=254)
     notes: str = Field(default="", max_length=4000)
+    service_ids: List[str] = Field(default_factory=list)
 
     @field_validator("id", mode="before")
     @classmethod
@@ -3693,19 +3694,56 @@ class StaffMember(BaseModel):
         except ValidationError as e:
             raise ValueError("Invalid email address.") from e
 
+    @field_validator("service_ids", mode="before")
+    @classmethod
+    def normalize_service_ids(cls, v):
+        if not v:
+            return []
+        if not isinstance(v, list):
+            return []
+        out: List[str] = []
+        for item in v:
+            raw = str(item).strip()
+            if not raw:
+                continue
+            try:
+                out.append(str(uuid.UUID(raw)))
+            except ValueError:
+                continue
+        return out[:50]
 
-def finalize_staff_records_for_storage(members: List[StaffMember]) -> List[dict]:
+
+def _valid_service_id_set(services_raw: Any) -> set[str]:
+    return {s["id"] for s in _normalize_service_entries(services_raw or []) if s.get("id")}
+
+
+def finalize_staff_records_for_storage(
+    members: List[StaffMember],
+    *,
+    valid_service_ids: Optional[set[str]] = None,
+) -> List[dict]:
     """Serialize staff for config.json; assign UUID when id omitted (backward compatible rows)."""
     out: List[dict] = []
     for m in members:
         sid = (m.id or "").strip() or str(uuid.uuid4())
-        out.append({
+        svc_ids: List[str] = []
+        for raw_id in m.service_ids or []:
+            rid = str(raw_id).strip()
+            if not rid:
+                continue
+            if valid_service_ids is not None and rid not in valid_service_ids:
+                continue
+            svc_ids.append(rid)
+        row: dict = {
             "id": sid,
             "name": m.name,
             "phone": m.phone,
             "email": m.email,
             "notes": m.notes,
-        })
+        }
+        if svc_ids:
+            row["service_ids"] = svc_ids
+        out.append(row)
     return out
 
 
@@ -3771,6 +3809,15 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         data["departments"] = update.departments
     if update.services is not None:
         data["services"] = _normalize_service_entries(update.services)
+        valid_svc = _valid_service_id_set(data["services"])
+        if data.get("staff"):
+            data["staff"] = [
+                {
+                    **s,
+                    "service_ids": [x for x in (s.get("service_ids") or []) if x in valid_svc],
+                }
+                for s in data["staff"]
+            ]
     if update.specials is not None:
         data["specials"] = _normalize_special_entries(update.specials)
     if update.reservation_rules is not None:
@@ -3793,7 +3840,10 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     if update.staff is not None:
         from staff_transfers import STAFF_ROSTER_MAX, prune_transfer_targets_for_removed_staff
 
-        new_staff = finalize_staff_records_for_storage(update.staff)
+        new_staff = finalize_staff_records_for_storage(
+            update.staff,
+            valid_service_ids=_valid_service_id_set(data.get("services")),
+        )
         if len(new_staff) > STAFF_ROSTER_MAX:
             raise HTTPException(
                 status_code=400,

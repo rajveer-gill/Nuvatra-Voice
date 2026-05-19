@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import type { AxiosInstance } from 'axios'
-import { Calendar, ChevronRight, Mail, Pencil, Phone, Plus, Trash2, User, X } from 'lucide-react'
+import { Calendar, ChevronRight, Mail, Pencil, Phone, Plus, Tag, Trash2, User, X } from 'lucide-react'
+import type { ServiceRow } from '@/components/settings/StructuredListEditors'
 import { fadeUpChild, staggerContainer } from '@/components/motion'
 
 export type StaffRow = {
@@ -12,6 +13,7 @@ export type StaffRow = {
   phone: string
   email: string
   notes: string
+  service_ids: string[]
 }
 
 export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
@@ -19,12 +21,17 @@ export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
   return raw.map((item) => {
     const o = item as Record<string, unknown>
     const id = typeof o.id === 'string' && o.id.trim() ? o.id.trim() : crypto.randomUUID()
+    const rawSvc = o.service_ids
+    const service_ids = Array.isArray(rawSvc)
+      ? rawSvc.map((x) => String(x).trim()).filter(Boolean)
+      : []
     return {
       id,
       name: String(o.name ?? '').trim(),
       phone: String(o.phone ?? '').trim(),
       email: String(o.email ?? '').trim(),
       notes: String(o.notes ?? ''),
+      service_ids,
     }
   })
 }
@@ -39,12 +46,14 @@ type Notify = (msg: { type: 'success' | 'error'; text: string } | null) => void
 
 export function StaffMembersSection({
   staff,
+  availableServices,
   onStaffChange,
   api,
   onNotify,
   onAfterSave,
 }: {
   staff: StaffRow[]
+  availableServices: ServiceRow[]
   onStaffChange: (next: StaffRow[]) => void
   api: AxiosInstance
   onNotify: Notify
@@ -57,7 +66,7 @@ export function StaffMembersSection({
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<'add' | 'edit'>('add')
   const [editId, setEditId] = useState<string | null>(null)
-  const [draft, setDraft] = useState({ name: '', phone: '', email: '', notes: '' })
+  const [draft, setDraft] = useState({ name: '', phone: '', email: '', notes: '', service_ids: [] as string[] })
   const [draftError, setDraftError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -76,7 +85,7 @@ export function StaffMembersSection({
     setMode(opts.mode)
     if (opts.mode === 'add') {
       setEditId(null)
-      setDraft({ name: '', phone: '', email: '', notes: '' })
+      setDraft({ name: '', phone: '', email: '', notes: '', service_ids: [] })
     } else if (opts.row) {
       setEditId(opts.row.id)
       setDraft({
@@ -84,6 +93,7 @@ export function StaffMembersSection({
         phone: opts.row.phone,
         email: opts.row.email,
         notes: opts.row.notes,
+        service_ids: [...opts.row.service_ids],
       })
     }
     setOpen(true)
@@ -140,6 +150,7 @@ export function StaffMembersSection({
                 phone: draft.phone.trim(),
                 email: draft.email.trim(),
                 notes: draft.notes,
+                service_ids: draft.service_ids,
               },
             ]
           : staff.map((s) =>
@@ -150,6 +161,7 @@ export function StaffMembersSection({
                     phone: draft.phone.trim(),
                     email: draft.email.trim(),
                     notes: draft.notes,
+                    service_ids: draft.service_ids,
                   }
                 : s,
             )
@@ -161,6 +173,7 @@ export function StaffMembersSection({
           phone: s.phone || undefined,
           email: s.email || undefined,
           notes: s.notes || undefined,
+          service_ids: s.service_ids.length ? s.service_ids : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)
@@ -187,6 +200,7 @@ export function StaffMembersSection({
           phone: s.phone || undefined,
           email: s.email || undefined,
           notes: s.notes || undefined,
+          service_ids: s.service_ids.length ? s.service_ids : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)
@@ -230,7 +244,11 @@ export function StaffMembersSection({
               No team members yet. Add stylists or staff so callers can book with a specific person.
             </motion.li>
           ) : (
-            staff.map((s, i) => (
+            staff.map((s, i) => {
+              const svcLabels = s.service_ids
+                .map((id) => availableServices.find((svc) => svc.id === id)?.name)
+                .filter(Boolean) as string[]
+              return (
               <motion.li
                 key={s.id}
                 layout
@@ -269,6 +287,21 @@ export function StaffMembersSection({
                           </span>
                         ) : null}
                       </span>
+                      {svcLabels.length > 0 ? (
+                        <span className="flex flex-wrap gap-1 mt-1.5">
+                          {svcLabels.map((label) => (
+                            <span
+                              key={label}
+                              className="inline-flex items-center gap-0.5 rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-medium text-teal-800 border border-teal-100"
+                            >
+                              <Tag className="w-2.5 h-2.5" />
+                              {label}
+                            </span>
+                          ))}
+                        </span>
+                      ) : availableServices.length > 0 ? (
+                        <span className="text-[10px] text-gray-400 mt-1 block">All services (none selected)</span>
+                      ) : null}
                     </span>
                     <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-teal-600 shrink-0" />
                   </button>
@@ -293,7 +326,7 @@ export function StaffMembersSection({
                   </motion.div>
                 </motion.div>
               </motion.li>
-            ))
+            )})
           )}
         </AnimatePresence>
       </motion.ul>
@@ -370,13 +403,61 @@ export function StaffMembersSection({
                     maxLength={254}
                   />
                 </div>
+                {availableServices.length > 0 ? (
+                  <motion.div layout>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Services they provide</label>
+                    <p className="text-xs text-gray-500 mb-2">
+                      Optional. Leave none checked to allow any service on your menu. The AI uses this when booking with a
+                      specific person.
+                    </p>
+                    <div className="max-h-40 overflow-y-auto rounded-xl border border-teal-100 bg-teal-50/40 p-3 space-y-2">
+                      {availableServices.map((svc) => {
+                        const checked = draft.service_ids.includes(svc.id)
+                        return (
+                          <label
+                            key={svc.id}
+                            className="flex items-start gap-2 text-sm text-gray-800 cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              className="mt-1 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                              checked={checked}
+                              onChange={() => {
+                                setDraft((d) => ({
+                                  ...d,
+                                  service_ids: checked
+                                    ? d.service_ids.filter((id) => id !== svc.id)
+                                    : [...d.service_ids, svc.id],
+                                }))
+                              }}
+                            />
+                            <span>
+                              <span className="font-medium">{svc.name}</span>
+                              {(svc.duration_minutes > 0 || svc.price > 0) && (
+                                <span className="text-gray-500 text-xs block">
+                                  {svc.duration_minutes > 0 ? `${svc.duration_minutes} min` : ''}
+                                  {svc.duration_minutes > 0 && svc.price > 0 ? ' · ' : ''}
+                                  {svc.price > 0 ? `$${svc.price}` : ''}
+                                </span>
+                              )}
+                            </span>
+                          </label>
+                        )
+                      })}
+                    </motion.div>
+                  </motion.div>
+                ) : (
+                  <p className="text-xs text-gray-500 rounded-lg border border-dashed border-gray-200 px-3 py-2">
+                    Add services in the <strong>Services</strong> section above to link them to team members here.
+                  </p>
+                )}
                 <motion.div layout>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Notes for the AI</label>
                   <textarea
                     value={draft.notes}
                     onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
                     className="cs-field w-full min-h-[100px]"
-                    placeholder="Services, chair, specialties — helps booking and Q&A…"
+                    placeholder="Chair, specialties, schedule — helps booking and Q&A…"
                     maxLength={4000}
                   />
                 </motion.div>

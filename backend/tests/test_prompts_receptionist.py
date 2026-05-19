@@ -47,6 +47,8 @@ def test_prompt_repeat_caller_memory(minimal_business):
 
 
 def test_prompt_staff_transfer_instruction(minimal_business):
+    minimal_business["staff"] = [{"id": "s1", "name": "Jamie", "phone": "+15551110001"}]
+    minimal_business["transfer_targets"] = [{"staff_id": "s1", "phone": "+15551110001"}]
     p = build_system_prompt(business_info=minimal_business, include_booked_slots=False)
     assert "TRANSFER_TO:" in p
     assert "Jamie" in p
@@ -70,6 +72,38 @@ def test_prompt_non_english_locks_language(minimal_business):
     )
     assert "Spanish" in p
     assert "MUST respond ONLY in Spanish" in p
+
+
+def test_prompt_no_services_skips_service_questions():
+    biz = {
+        "name": "Test Spa",
+        "hours": "9-5",
+        "services": [],
+        "staff": [{"name": "Jamie"}],
+    }
+    p = build_system_prompt(
+        business_info=biz,
+        include_booked_slots=True,
+        booked_slots_prompt_text="",
+    )
+    assert "NOT configured a service menu" in p
+    assert "Do NOT ask callers to choose a service" in p
+    assert "- Services:" not in p.split("You can help with:")[1].split("staff")[0]
+
+
+def test_prompt_staff_linked_services(minimal_business):
+    minimal_business["services"] = [
+        {"id": "svc-a", "name": "Haircut", "price": 40, "duration_minutes": 30},
+        {"id": "svc-b", "name": "Color", "price": 80, "duration_minutes": 90},
+    ]
+    minimal_business["staff"] = [
+        {"name": "Jamie", "service_ids": ["svc-a"]},
+        {"name": "Alex", "service_ids": []},
+    ]
+    p = build_system_prompt(business_info=minimal_business, include_booked_slots=False)
+    assert "Staff and which services they provide" in p
+    assert "Jamie: Haircut" in p
+    assert "Alex: any listed service" in p
 
 
 def test_prompt_empty_slots_branch(minimal_business):
