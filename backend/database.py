@@ -174,6 +174,13 @@ def init_db() -> bool:
                 PRIMARY KEY (clerk_user_id, tenant_id)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tenant_invites (
+                email TEXT PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tenants_twilio_phone ON tenants(twilio_phone_number)")
         for col, typ in [
             ("recording_sid", "TEXT"),
@@ -473,6 +480,76 @@ def db_tenant_member_add(clerk_user_id: str, tenant_id: str) -> bool:
     except Exception as e:
         print(f"[DB] Failed to add tenant member: {e}")
         return False
+
+
+def _normalize_invite_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def db_tenant_invite_upsert(email: str, tenant_id: str) -> bool:
+    """Record a pending invite so first login can link by email if Clerk metadata is missing."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    em = _normalize_invite_email(email)
+    if not em or not tenant_id:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO tenant_invites (email, tenant_id)
+            VALUES (%s, %s)
+            ON CONFLICT (email) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, created_at = NOW()
+            """,
+            (em, tenant_id),
+        )
+        cur.close()
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to upsert tenant invite: {e}")
+        return False
+
+
+def db_tenant_invite_delete(email: str) -> None:
+    conn = _get_conn()
+    if not conn:
+        return
+    em = _normalize_invite_email(email)
+    if not em:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tenant_invites WHERE email = %s", (em,))
+        cur.close()
+        conn.commit()
+    except Exception as e:
+        print(f"[DB] Failed to delete tenant invite: {e}")
+
+
+def db_tenant_invite_consume(email: str) -> Optional[str]:
+    """Return tenant_id for a pending invite email and remove the row."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    em = _normalize_invite_email(email)
+    if not em:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM tenant_invites WHERE email = %s RETURNING tenant_id",
+            (em,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.commit()
+        return str(row[0]) if row else None
+    except Exception as e:
+        print(f"[DB] Failed to consume tenant invite: {e}")
+        return None
+
 
 def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
     """Get the tenant for a Clerk user (from tenant_members). Returns first tenant if multiple."""

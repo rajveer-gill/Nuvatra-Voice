@@ -520,6 +520,9 @@ try:
         db_archive_purge_and_delete_tenant,
         db_tenant_get_members,
         db_tenant_member_add,
+        db_tenant_invite_upsert,
+        db_tenant_invite_delete,
+        db_tenant_invite_consume,
         db_tenant_list_all,
         db_tenant_update_subscription,
         db_tenant_set_billing_exempt,
@@ -1028,9 +1031,8 @@ def _ensure_db_ready():
     except Exception:
         pass
 
-def _clerk_fetch_user_tenant_id(clerk_user_id: str) -> Optional[str]:
-    """Call Clerk Backend API to get tenant_id from the user's public_metadata.
-    Used as a fallback when the JWT doesn't contain public_metadata."""
+def _clerk_fetch_user_link(clerk_user_id: str) -> Optional[dict]:
+    """Clerk Backend API: public_metadata.tenant_id and verified email addresses."""
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     if not clerk_secret:
         return None
@@ -1041,12 +1043,44 @@ def _clerk_fetch_user_tenant_id(clerk_user_id: str) -> Optional[str]:
             headers={"Authorization": f"Bearer {clerk_secret}"},
             timeout=5.0,
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            return (data.get("public_metadata") or {}).get("tenant_id")
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        emails: List[str] = []
+        for item in data.get("email_addresses") or []:
+            addr = (item.get("email_address") or "").strip()
+            if addr:
+                emails.append(addr)
+        primary_id = data.get("primary_email_address_id")
+        if primary_id:
+            for item in data.get("email_addresses") or []:
+                if item.get("id") == primary_id:
+                    addr = (item.get("email_address") or "").strip()
+                    if addr and addr not in emails:
+                        emails.insert(0, addr)
+        tenant_id = (data.get("public_metadata") or {}).get("tenant_id")
+        return {"tenant_id": tenant_id, "emails": emails}
     except Exception as e:
         print(f"[Auth] Clerk user lookup failed for {clerk_user_id}: {e}")
     return None
+
+
+def _clerk_patch_user_tenant_metadata(clerk_user_id: str, tenant_id: str) -> bool:
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if not clerk_secret:
+        return False
+    try:
+        import httpx
+        resp = httpx.patch(
+            f"https://api.clerk.com/v1/users/{clerk_user_id}",
+            headers={"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"},
+            json={"public_metadata": {"tenant_id": tenant_id}},
+            timeout=10.0,
+        )
+        return resp.status_code < 400
+    except Exception as e:
+        print(f"[Auth] Clerk metadata patch failed for {clerk_user_id}: {e}")
+        return False
 
 def require_tenant(request: Request):
     """
@@ -1070,17 +1104,35 @@ def require_tenant(request: Request):
     if not tenant and USE_DB:
         tenant = db_tenant_get_for_user(user_id)
     if not tenant and USE_DB:
-        # JWT didn't have metadata and user isn't in tenant_members yet.
-        # Fetch tenant_id from Clerk Backend API (one-time for new invites).
-        api_tenant_id = _clerk_fetch_user_tenant_id(user_id)
-        if api_tenant_id:
-            tenant = db_tenant_get_by_id(api_tenant_id)
-            if tenant:
-                db_tenant_member_add(user_id, tenant["id"])
-                print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via Clerk API")
+        # JWT often omits public_metadata; resolve via Clerk API + pending invite email.
+        link = _clerk_fetch_user_link(user_id)
+        if link:
+            api_tenant_id = link.get("tenant_id")
+            if api_tenant_id:
+                tenant = db_tenant_get_by_id(str(api_tenant_id))
+                if tenant:
+                    db_tenant_member_add(user_id, tenant["id"])
+                    print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via Clerk metadata")
+            if not tenant:
+                for em in link.get("emails") or []:
+                    invited_tid = db_tenant_invite_consume(em)
+                    if not invited_tid:
+                        continue
+                    tenant = db_tenant_get_by_id(invited_tid)
+                    if tenant:
+                        db_tenant_member_add(user_id, tenant["id"])
+                        _clerk_patch_user_tenant_metadata(user_id, tenant["id"])
+                        print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via invite email {em}")
+                        break
     if not tenant:
         audit_log("user", "auth_failure", actor_id=user_id, details={"reason": "no_tenant"}, request=request)
-        raise HTTPException(status_code=403, detail="No tenant assigned to your account")
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "No tenant assigned to your account. Open the invite link from your email to finish sign-up, "
+                "or ask your administrator to resend the invite."
+            ),
+        )
     set_request_client_id(tenant["client_id"])
     return tenant
 
@@ -2618,6 +2670,10 @@ class AdminCreateTenantRequest(BaseModel):
     plan: Optional[str] = "starter"
     business_vertical: str = "salon_chair"
 
+class AdminResendInviteRequest(BaseModel):
+    email: str
+
+
 class AdminTenantTwilioUpdate(BaseModel):
     twilio_phone_number: str
 
@@ -2673,8 +2729,9 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
         # Check if user already exists in Clerk
         existing_user_id = None
         try:
+            email_q = quote(req.email.strip(), safe="")
             users_resp = httpx.get(
-                f"https://api.clerk.com/v1/users?email_address={req.email}",
+                f"https://api.clerk.com/v1/users?email_address[]={email_q}",
                 headers=headers,
                 timeout=10.0,
             )
@@ -2696,12 +2753,14 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
                     timeout=10.0,
                 )
                 db_tenant_member_add(existing_user_id, tenant["id"])
+                db_tenant_invite_delete(req.email)
                 user_relinked = True
                 print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant['id']}")
             except Exception as e:
                 print(f"[Admin] Error re-linking user: {e}")
         else:
             # New user — send Clerk invitation
+            db_tenant_invite_upsert(req.email, tenant["id"])
             try:
                 resp = httpx.post(
                     "https://api.clerk.com/v1/invitations",
@@ -2721,6 +2780,59 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
                 print(f"[Admin] Clerk invite error: {e}")
     audit_log("admin", "tenant_created", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant["id"], client_id=tenant["client_id"], details={"name": req.name}, request=request)
     return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked}
+
+
+@app.post("/api/admin/tenants/{tenant_id}/resend-invite")
+async def admin_resend_invite(
+    tenant_id: str,
+    req: AdminResendInviteRequest,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
+    """Re-queue pending invite by email and send a new Clerk invitation (existing tenants)."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required for multi-tenant")
+    tenant = db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    email = (req.email or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    db_tenant_invite_upsert(email, tenant_id)
+    invite_sent = False
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if clerk_secret:
+        import httpx
+        headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+        try:
+            resp = httpx.post(
+                "https://api.clerk.com/v1/invitations",
+                headers=headers,
+                json={
+                    "email_address": email,
+                    "public_metadata": {"tenant_id": tenant_id},
+                    "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/",
+                },
+                timeout=10.0,
+            )
+            if resp.status_code < 400:
+                invite_sent = True
+            else:
+                print(f"[Admin] Clerk resend invite failed: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"[Admin] Clerk resend invite error: {e}")
+    audit_log(
+        "admin",
+        "tenant_invite_resent",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"email": email, "invite_sent": invite_sent},
+        request=request,
+    )
+    return {"success": True, "invite_sent": invite_sent, "pending_invite_stored": True}
+
 
 @app.get("/api/admin/tenants")
 async def admin_list_tenants(_: str = Depends(require_admin)):
