@@ -64,6 +64,12 @@ def test_prompt_staff_notes_reference_block(minimal_business):
     assert "massage" in p.lower()
 
 
+def test_prompt_includes_receptionist_name(minimal_business):
+    minimal_business["receptionist_name"] = "Ava"
+    p = build_system_prompt(business_info=minimal_business, include_booked_slots=False)
+    assert "Your name is Ava" in p
+
+
 def test_prompt_non_english_locks_language(minimal_business):
     p = build_system_prompt(
         business_info=minimal_business,

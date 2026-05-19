@@ -692,7 +692,10 @@ export default function Settings() {
               className="cs-field w-full"
               placeholder="Thank you for calling {business_name}. How can I help?"
             />
-            <p className="text-xs text-gray-500 mt-1">Use {'{business_name}'} for your business name.</p>
+            <p className="text-xs text-gray-500 mt-1">
+              Use {'{business_name}'} for your business name and {'{receptionist_name}'} for the AI name above. If you
+              leave the name out of this text, we prepend “Hi, I&apos;m [name].” on the phone greeting automatically.
+            </p>
           </div>
           <ServicesEditor items={serviceItems} onChange={setServiceItems} />
           <SpecialsEditor items={specialItems} onChange={setSpecialItems} />

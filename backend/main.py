@@ -923,24 +923,41 @@ def get_tts_speed() -> float:
         return 1.0
 
 def invalidate_voice_cache(client_id: Optional[str] = None) -> None:
-    """Clear per-client greeting/got-it audio cache when voice or speed changes in Settings."""
+    """Clear per-client greeting/got-it audio cache when voice, speed, greeting, or name changes."""
     global greeting_audio_cache, got_it_audio_cache
     if client_id:
-        greeting_audio_cache.pop((client_id, True), None)
-        greeting_audio_cache.pop((client_id, False), None)
+        prefix = (client_id,)
+        for key in list(greeting_audio_cache.keys()):
+            if isinstance(key, tuple) and key and key[0] == client_id:
+                greeting_audio_cache.pop(key, None)
         got_it_audio_cache.pop(client_id, None)
     else:
         greeting_audio_cache.clear()
         got_it_audio_cache.clear()
 
+def _format_greeting_template(raw: str, info: dict) -> str:
+    """Substitute {business_name} and {receptionist_name} in custom greeting text."""
+    business_name = (info.get("name") or "us").strip() or "us"
+    receptionist_name = (info.get("receptionist_name") or "").strip()
+    subs = {"business_name": business_name, "receptionist_name": receptionist_name}
+    try:
+        return raw.format(**subs)
+    except KeyError:
+        out = raw
+        for key, val in subs.items():
+            out = out.replace("{" + key + "}", val)
+        return out
+
+
 def get_greeting_text() -> str:
     """Greeting for phone (uses client config if set)."""
     info = get_business_info()
-    raw = info.get("greeting") or "Thank you for calling. How can I help you today?"
-    try:
-        base = raw.format(business_name=info.get("name", "us"))
-    except KeyError:
-        base = raw
+    raw = info.get("greeting") or "Thank you for calling {business_name}. How can I help you today?"
+    receptionist_name = (info.get("receptionist_name") or "").strip()
+    base = _format_greeting_template(raw, info).strip()
+    # When a receptionist name is configured, say it on answer unless the custom greeting already uses it.
+    if receptionist_name and receptionist_name.lower() not in base.lower():
+        base = f"Hi, I'm {receptionist_name}. {base}"
     if _call_recording_enabled_for_tenant(_tenant_for_call_recording()):
         base = f"{base.strip()} This call may be recorded for quality and training."
     return base
@@ -3826,6 +3843,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         data["menu_link"] = update.menu_link
     if update.greeting is not None:
         data["greeting"] = update.greeting
+        invalidate_voice_cache(cid)
     if update.voice is not None:
         data["voice"] = update.voice
         invalidate_voice_cache(cid)
@@ -3834,6 +3852,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         invalidate_voice_cache(cid)
     if update.receptionist_name is not None:
         data["receptionist_name"] = update.receptionist_name
+        invalidate_voice_cache(cid)
     if update.business_type is not None:
         if not (USE_DB and tid and tid.get("business_vertical")):
             data["business_type"] = update.business_type
@@ -4190,13 +4209,25 @@ async def _schedule_recording_summary(call_sid: str, client_id: str, recording_u
         logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
 
 
+def _greeting_audio_cache_key(client_id: str) -> tuple:
+    """Cache busts when greeting copy, receptionist name, or recording disclosure changes."""
+    info = get_business_info()
+    return (
+        client_id,
+        _call_recording_enabled_for_tenant(_tenant_for_call_recording()),
+        (info.get("receptionist_name") or "").strip(),
+        (info.get("greeting") or "").strip(),
+        (info.get("name") or "").strip(),
+    )
+
+
 @app.get("/api/phone/greeting-audio")
 async def get_greeting_audio(request: Request):
     """Serve greeting audio using the voice selected in Settings. Per-client cache."""
     global greeting_audio_cache
     client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
-    cache_key = (client_id, _call_recording_enabled_for_tenant(_tenant_for_call_recording()))
+    cache_key = _greeting_audio_cache_key(client_id)
     cached = greeting_audio_cache.get(cache_key)
     if cached:
         return Response(

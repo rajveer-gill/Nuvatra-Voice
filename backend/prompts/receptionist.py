@@ -31,6 +31,7 @@ def build_system_prompt(
             may be empty string when no slots are booked.
     """
     name = (business_info.get("name") or "the business").strip()
+    receptionist_name = (business_info.get("receptionist_name") or "").strip()
     hours = (business_info.get("hours") or "").strip()
     address = (business_info.get("address") or "").strip()
     services_raw = business_info.get("services") or []
@@ -232,15 +233,21 @@ def build_system_prompt(
         if help_lines
         else "- (Business details: ask the caller what they need and offer to transfer or take a message.)"
     )
+    identity_line = ""
+    if receptionist_name:
+        identity_line = (
+            f" Your name is {receptionist_name}. When speaking to callers, use this name "
+            f"(e.g. “I'm {receptionist_name}”). Do not make up a different name."
+        )
     if industry_desc:
         header = (
-            f"Super peppy, warm AI receptionist for {name}, a {industry_desc}! "
+            f"Super peppy, warm AI receptionist for {name}, a {industry_desc}!{identity_line} "
             'Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". '
             "Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
         )
     else:
         header = (
-            f"Super peppy, warm AI receptionist for {name}! "
+            f"Super peppy, warm AI receptionist for {name}!{identity_line} "
             'Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". '
             "Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
         )
