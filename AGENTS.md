@@ -85,7 +85,7 @@ Do this in order (human steps—cannot be done from git alone):
 ### Voice streaming STT (Deepgram Nova-2, optional)
 
 - Default is Twilio `<Gather input="speech">` (`VOICE_STT_PROVIDER` unset or `twilio`).
-- Set **`VOICE_STT_PROVIDER=deepgram`** on Render to use **Twilio `<Connect><Stream>` → `wss://…/api/phone/media`** bridged to **Deepgram Nova-2** live transcription (8 kHz mu-law). When the media WebSocket closes, Twilio continues to the queued **got-it** audio and **`/api/phone/respond`** polling, matching the Gather path.
+- Set **`VOICE_STT_PROVIDER=deepgram`** on Render to use **Twilio `<Connect><Stream>` → `wss://…/api/phone/media`** bridged to **Deepgram Nova-2** live transcription (8 kHz mu-law) on **every** listen turn (inbound greeting, post-AI reply, empty-retry). When the caller speaks, the app **updates the live call via Twilio REST** to **got-it** + **`/api/phone/respond`** so queued “Still there?” verbs are skipped. If Deepgram or the media bridge fails, the call **fail-opens** to Twilio `<Gather>` (unchanged).
 - **`DEEPGRAM_API_KEY`** — required for the Deepgram path (Render secret; never log or expose client-side).
 - **`MEDIA_STREAM_SIGNING_SECRET`** — optional HMAC secret for stream URL tokens; if unset, **`TWILIO_AUTH_TOKEN`** is used for signing (must be set for the Deepgram path to activate).
 - **`PUBLIC_BASE_URL`** (HTTPS origin of the API) should be set in production so TwiML builds a stable **`wss://`** media URL (the app can derive from `Host` / `X-Forwarded-*` if unset).

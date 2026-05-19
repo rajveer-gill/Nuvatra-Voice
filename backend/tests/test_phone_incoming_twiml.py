@@ -8,13 +8,14 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def phone_client(monkeypatch):
-    """Skip Twilio signature when no auth token (dev / CI)."""
+    """Skip Twilio signature validation in unit tests (CI may load TWILIO_AUTH_TOKEN from .env)."""
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("CALL_RECORDING_ENABLED", raising=False)
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://voice.example.test")
-    from main import app
+    import main
 
-    return TestClient(app)
+    monkeypatch.setattr(main, "_validate_twilio_webhook", lambda _r, _d: True)
+    return TestClient(main.app)
 
 
 def test_incoming_twiml_nests_greeting_play_inside_gather(phone_client):

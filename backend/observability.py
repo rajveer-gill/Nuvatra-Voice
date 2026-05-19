@@ -6,7 +6,7 @@ Environment:
   OBS_VERBOSE=1            — Extra DEBUG logs inside SMS/voice/chat paths (slot checks, branches).
   OBS_TRACE_WEBHOOKS=1     — INFO log for each /api/phone/* and /api/sms/* request (timing + status).
   OBS_TRACE_SMS=1          — INFO logs each inbound SMS pipeline step (tenant resolve, compliance, AI, DB); use when debugging delivery or replies.
-  VOICE_STT_PROVIDER=twilio|deepgram — Default twilio (Gather). deepgram uses Twilio Media Streams WebSocket /api/phone/media + Deepgram Nova-2.
+  VOICE_STT_PROVIDER=twilio|deepgram — Default twilio (Gather). deepgram uses Media Streams on every listen turn (/api/phone/media + Deepgram Nova-2); Gather remains fail-open fallback.
   DEEPGRAM_API_KEY         — Required when VOICE_STT_PROVIDER=deepgram.
   MEDIA_STREAM_SIGNING_SECRET — Optional HMAC secret for stream tokens; falls back to TWILIO_AUTH_TOKEN.
   VOICE_MEDIA_STREAM_MAX_SEC — Max seconds per Connect+Stream listening window (default 30).

@@ -10,6 +10,8 @@ PLAN_HAS_REMINDERS = {"starter": False, "growth": True, "pro": True}
 PLAN_HAS_LEAD_CAPTURE = {"starter": False, "growth": True, "pro": True}
 PLAN_SMS_AUTOMATIONS = {"starter": 0, "growth": 2, "pro": 999}
 PLAN_HAS_EXPORT = {"starter": False, "growth": True, "pro": True}
+PLAN_HAS_CALL_RECORDING = {"starter": False, "growth": False, "pro": True}
+PLAN_CONVERSATIONAL_SMS_SESSIONS = {"starter": 100, "growth": 300, "pro": 1000}
 
 # Validate all dicts have expected keys at import
 _EXPECTED_PLANS = {"starter", "growth", "pro"}
@@ -21,6 +23,8 @@ for name, d in [
     ("PLAN_HAS_LEAD_CAPTURE", PLAN_HAS_LEAD_CAPTURE),
     ("PLAN_SMS_AUTOMATIONS", PLAN_SMS_AUTOMATIONS),
     ("PLAN_HAS_EXPORT", PLAN_HAS_EXPORT),
+    ("PLAN_HAS_CALL_RECORDING", PLAN_HAS_CALL_RECORDING),
+    ("PLAN_CONVERSATIONAL_SMS_SESSIONS", PLAN_CONVERSATIONAL_SMS_SESSIONS),
 ]:
     if set(d.keys()) != _EXPECTED_PLANS:
         raise ValueError(f"{name} missing keys: expected {_EXPECTED_PLANS}, got {set(d.keys())}")
@@ -67,5 +71,7 @@ def get_plan_limits(tenant: Optional[dict]) -> dict:
         "has_lead_capture": PLAN_HAS_LEAD_CAPTURE.get(effective, False),
         "sms_automations_max": PLAN_SMS_AUTOMATIONS.get(effective, 0),
         "has_export": PLAN_HAS_EXPORT.get(effective, False),
+        "has_call_recording": PLAN_HAS_CALL_RECORDING.get(effective, False),
+        "conversational_sms_sessions_cap": PLAN_CONVERSATIONAL_SMS_SESSIONS.get(effective, 100),
         "is_trial": _is_trial_active(tenant),
     }

@@ -47,6 +47,8 @@ try:
 except ImportError:
     get_plan_limits = None  # type: ignore
 
+from subscription_access import get_tenant_subscription_state
+
 try:
     from voice_preview import add_sentence_pauses
 except ImportError:
@@ -423,39 +425,53 @@ elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
 def _voice_stt_use_deepgram() -> bool:
     """Nova-2 live STT via Twilio Media Streams when env and credentials are present."""
     try:
-        from voice.stt_config import voice_stt_provider, deepgram_api_key, media_stream_signing_secret
+        from voice.stt_runtime import deepgram_stt_active
     except ImportError:
         return False
-    if voice_stt_provider() != "deepgram":
-        return False
-    if not deepgram_api_key():
-        logger.warning(
-            "[VOICE] VOICE_STT_PROVIDER=deepgram but DEEPGRAM_API_KEY is unset; falling back to Twilio Gather"
-        )
-        return False
-    if not media_stream_signing_secret():
-        logger.warning(
-            "[VOICE] VOICE_STT_PROVIDER=deepgram but MEDIA_STREAM_SIGNING_SECRET and TWILIO_AUTH_TOKEN "
-            "are unset; cannot sign media WebSocket; falling back to Twilio Gather"
-        )
-        return False
-    if not TWILIO_AVAILABLE or not twilio_client:
-        logger.warning("[VOICE] VOICE_STT_PROVIDER=deepgram but Twilio client is unavailable")
-        return False
-    return True
+    return deepgram_stt_active(twilio_available=TWILIO_AVAILABLE, twilio_client=twilio_client)
 
 # Project root (parent of backend) for client configs
 PROJECT_ROOT = _backend_dir.parent
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 
-def _call_recording_enabled() -> bool:
+def _call_recording_env_enabled() -> bool:
     return os.getenv("CALL_RECORDING_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
-def _call_summary_enabled() -> bool:
+
+def _tenant_for_call_recording(tenant: Optional[dict] = None) -> Optional[dict]:
+    """Resolve tenant dict for plan-gated recording (explicit tenant or current client)."""
+    if tenant:
+        return tenant
+    if not USE_DB:
+        return None
+    cid = get_db_client_id()
+    if cid and cid != "default":
+        return db_tenant_get_by_client_id(cid)
+    return None
+
+
+def _call_recording_enabled_for_tenant(tenant: Optional[dict] = None) -> bool:
+    """Env flag AND Pro-tier plan (trial uses effective Pro limits via get_plan_limits)."""
+    if not _call_recording_env_enabled():
+        return False
+    t = _tenant_for_call_recording(tenant)
+    if not t or not get_plan_limits:
+        return False
+    return bool(get_plan_limits(t).get("has_call_recording"))
+
+
+def _call_recording_enabled() -> bool:
+    """Backward-compatible alias when tenant context is resolved from request client."""
+    return _call_recording_enabled_for_tenant(None)
+
+
+def _call_summary_enabled_for_tenant(tenant: Optional[dict] = None) -> bool:
     raw = os.getenv("CALL_SUMMARY_ENABLED")
     if raw is None or not str(raw).strip():
-        return _call_recording_enabled()
-    return str(raw).strip().lower() in ("1", "true", "yes")
+        return _call_recording_enabled_for_tenant(tenant)
+    if not str(raw).strip().lower() in ("1", "true", "yes"):
+        return False
+    return _call_recording_enabled_for_tenant(tenant)
 
 # Auth: Clerk JWT verification for multi-tenant
 try:
@@ -915,7 +931,7 @@ def get_greeting_text() -> str:
         base = raw.format(business_name=info.get("name", "us"))
     except KeyError:
         base = raw
-    if _call_recording_enabled():
+    if _call_recording_enabled_for_tenant(_tenant_for_call_recording()):
         base = f"{base.strip()} This call may be recorded for quality and training."
     return base
 
@@ -1056,49 +1072,6 @@ def require_admin(request: Request):
         audit_log("admin", "auth_failure", actor_id=user_id, details={"reason": "not_admin"}, request=request)
         raise HTTPException(status_code=403, detail="Admin access required")
     return user_id
-
-def get_tenant_subscription_state(tenant: Optional[dict]) -> dict:
-    """Return subscription state for the tenant. If tenant is None (single-tenant), can_use_app is True."""
-    if not tenant:
-        return {"can_use_app": True, "trial_ends_at": None, "subscription_status": None, "plan": "starter", "billing_exempt_until": None}
-    if not USE_DB:
-        return {"can_use_app": True, "trial_ends_at": None, "subscription_status": tenant.get("subscription_status"), "plan": tenant.get("plan", "starter"), "billing_exempt_until": None}
-    now = datetime.now(timezone.utc)
-    trial_ends_at = tenant.get("trial_ends_at")
-    subscription_status = tenant.get("subscription_status") or "trialing"
-    billing_exempt_until = tenant.get("billing_exempt_until")
-    plan = tenant.get("plan") or "free"
-    exempt_active = False
-    if billing_exempt_until:
-        try:
-            exempt_dt = datetime.fromisoformat(billing_exempt_until.replace("Z", "+00:00")) if isinstance(billing_exempt_until, str) else billing_exempt_until
-            if exempt_dt.tzinfo is None:
-                exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
-            exempt_active = now < exempt_dt
-        except Exception:
-            pass
-    trial_active = False
-    if subscription_status == "trialing":
-        if not trial_ends_at:
-            # Trialing without an end date (legacy / partial row): still allow app use.
-            trial_active = True
-        else:
-            try:
-                trial_dt = datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00")) if isinstance(trial_ends_at, str) else trial_ends_at
-                if trial_dt.tzinfo is None:
-                    trial_dt = trial_dt.replace(tzinfo=timezone.utc)
-                trial_active = now < trial_dt
-            except Exception:
-                trial_active = True
-    paid_active = subscription_status == "active"
-    can_use_app = exempt_active or trial_active or paid_active
-    return {
-        "can_use_app": can_use_app,
-        "trial_ends_at": trial_ends_at,
-        "subscription_status": subscription_status,
-        "plan": plan,
-        "billing_exempt_until": billing_exempt_until,
-    }
 
 def require_active_subscription(tenant: Optional[dict] = Depends(require_tenant)):
     """Dependency: after require_tenant, require that tenant can use the app (trial or paid or exempt)."""
@@ -2514,7 +2487,9 @@ async def cron_process_overage(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     if not USE_DB or not STRIPE_AVAILABLE or not stripe:
         return {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 0}
-    price_per_min = float((os.getenv("OVERAGE_PRICE_PER_MINUTE") or "0.05").strip())
+    from billing_config import get_overage_price_per_minute
+
+    price_per_min = get_overage_price_per_minute()
     prev_month = (datetime.now(timezone.utc) - timedelta(days=28)).strftime("%Y-%m")
     tenants_processed = 0
     invoices_created = 0
@@ -3934,6 +3909,8 @@ async def get_call_recording_audio(
     """Stream call recording (MP3) from Twilio using server-side credentials; tenant must own the call."""
     if not tenant or not USE_DB:
         raise HTTPException(status_code=404, detail="Recording not available")
+    if not _call_recording_enabled_for_tenant(tenant):
+        raise HTTPException(status_code=404, detail="Recording not available")
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         raise HTTPException(status_code=503, detail="Recording playback is not configured")
     row = db_call_log_get_by_call_sid(tenant["client_id"], call_sid)
@@ -4079,7 +4056,7 @@ async def get_greeting_audio(request: Request):
     global greeting_audio_cache
     client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
-    cache_key = (client_id, _call_recording_enabled())
+    cache_key = (client_id, _call_recording_enabled_for_tenant(_tenant_for_call_recording()))
     cached = greeting_audio_cache.get(cache_key)
     if cached:
         return Response(
@@ -4334,6 +4311,19 @@ async def handle_incoming_sms(request: Request):
         if staff_handled:
             sms_trace("inbound_staff_command_handled", request_id=rid, client_id=tenant["client_id"])
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        from webhook_responses import SMS_SUBSCRIPTION_LAPSED_MESSAGE, check_webhook_tenant_access
+
+        if not check_webhook_tenant_access(tenant, channel="sms", request_id=rid):
+            send_sms(
+                from_number,
+                SMS_SUBSCRIPTION_LAPSED_MESSAGE,
+                from_override=to_number,
+                force=True,
+            )
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
         # Pre-SMS usage check: allow overage, log for billing (Option B)
         if get_plan_limits:
             limits = get_plan_limits(tenant)
@@ -4488,6 +4478,27 @@ async def handle_incoming_sms(request: Request):
                 )
                 logger.warning("db_sms_session_upsert failed (pending_customer path): %s", upsert_err, exc_info=True)
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        from conversational_sms import (
+            conversational_sms_cap_fallback_body,
+            reserve_conversational_sms_session,
+        )
+
+        conv_reserve = reserve_conversational_sms_session(tenant, from_number)
+        if not conv_reserve.allowed:
+            fallback_body = conversational_sms_cap_fallback_body(tenant)
+            send_sms(from_number, fallback_body, from_override=to_number)
+            sms_trace(
+                "inbound_conversational_session_cap",
+                request_id=rid,
+                client_id=tenant["client_id"],
+                session_cap=conv_reserve.session_cap,
+                session_count=conv_reserve.session_count,
+                billing_period_key=conv_reserve.billing_period_key,
+            )
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
         apt_info = ""
         if apt:
             apt_info = f"The customer has a PENDING appointment: Name {apt.get('name','')}, {apt.get('date','')} at {_hhmm_to_ampm(apt.get('time','') or '')}, service: {apt.get('reason','')}."
@@ -4739,6 +4750,23 @@ async def handle_incoming_call(request: Request):
             )
         else:
             voice_info("tenant_fallback_default", to_number=to_number)
+
+        tenant_for_access = tenant
+        if not tenant_for_access and USE_DB:
+            cid_fb = (CLIENT_ID or "").strip() or "default"
+            tenant_for_access = db_tenant_get_by_client_id(cid_fb)
+        from webhook_responses import check_webhook_tenant_access, subscription_denied_voice_twiml
+
+        if not check_webhook_tenant_access(
+            tenant_for_access,
+            channel="voice",
+            request_id=getattr(request.state, "request_id", None),
+        ):
+            return Response(
+                content=subscription_denied_voice_twiml(),
+                media_type="application/xml",
+            )
+
         # Pre-call usage check: allow overage, log for billing (Option B)
         if USE_DB and tenant and get_plan_limits:
             limits = get_plan_limits(tenant)
@@ -4793,7 +4821,7 @@ async def handle_incoming_call(request: Request):
         # Create TwiML response
         response = VoiceResponse()
 
-        if TWILIO_AVAILABLE and VoiceResponse and _call_recording_enabled():
+        if TWILIO_AVAILABLE and VoiceResponse and _call_recording_enabled_for_tenant(tenant_for_access):
             cb = f"{base_url.rstrip('/')}/api/phone/recording-complete"
             start = response.start()
             start.recording(
@@ -4825,38 +4853,31 @@ async def handle_incoming_call(request: Request):
                 )
 
         if use_deepgram_stt:
-            from twilio.twiml.voice_response import Connect, Stream
-
-            from voice.media_token import mint_media_stream_token
-            from voice.stt_config import http_to_ws_base
+            from voice.twiml_stt import (
+                append_connect_stream,
+                append_got_it_and_respond_redirect,
+                next_media_stream_generation,
+            )
 
             response.play(greeting_audio_url)
-            wss_base = http_to_ws_base(base_url)
-            stream_url = f"{wss_base}/api/phone/media"
-            token = mint_media_stream_token(call_sid)
-            connect = Connect()
-            stream = Stream(url=stream_url)
-            if token:
-                stream.parameter(name="token", value=token)
-            connect.append(stream)
-            response.append(connect)
-            got_it_audio_url = f"{base_url}/api/phone/got-it-audio?call_sid={call_sid}"
-            response.play(got_it_audio_url)
-            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            gen = next_media_stream_generation(active_calls[call_sid])
+            append_connect_stream(
+                response,
+                call_sid=call_sid,
+                base_url=base_url,
+                stream_generation=gen,
+            )
+            append_got_it_and_respond_redirect(response, call_sid, base_url)
             return Response(content=str(response), media_type="application/xml")
 
-        gather = response.gather(
-            input='speech',
-            action=f"{base_url}/api/phone/process-speech",
-            method='POST',
-            speech_timeout='auto',
-            language='en-US',  # Start with English, will be updated dynamically after first detection
-            hints='appointment, schedule, message, hours, contact, help'
-        )
-        gather.play(greeting_audio_url)
+        from voice.twiml_stt import append_gather_listen
 
-        # If no input, redirect to process speech anyway
-        response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+        append_gather_listen(
+            response,
+            base_url,
+            language="en-US",
+            nested_play_url=greeting_audio_url,
+        )
 
         return Response(content=str(response), media_type="application/xml")
     
@@ -4918,6 +4939,15 @@ async def handle_recording_complete(request: Request):
             client_id = CLIENT_ID or "default"
         set_request_client_id(client_id)
 
+        tenant_rec = db_tenant_get_by_client_id(client_id) if USE_DB and client_id else None
+        if not _call_recording_enabled_for_tenant(tenant_rec):
+            voice_info(
+                "recording_complete_ignored_plan",
+                call_sid=call_sid or "",
+                client_id_prefix=(client_id or "")[:12],
+            )
+            return Response(content="OK", status_code=200, media_type="text/plain")
+
         if USE_DB:
             db_call_log_update_recording(
                 call_sid,
@@ -4944,7 +4974,7 @@ async def handle_recording_complete(request: Request):
             )
 
         st = (recording_status or "").lower()
-        if st == "completed" and recording_url and _call_summary_enabled():
+        if st == "completed" and recording_url and _call_summary_enabled_for_tenant(tenant_rec):
             asyncio.create_task(_schedule_recording_summary(call_sid, client_id, recording_url, duration_sec))
         return Response(content="", status_code=200, media_type="text/plain")
     except Exception as e:
@@ -5172,7 +5202,7 @@ async def respond_with_audio(request: Request):
                     detected_lang = call_data.get("detected_language", "English")
                     twilio_lang_code = get_twilio_language_code(detected_lang)
                     
-                    # For non-Latin scripts, use Record + Whisper
+                    # For non-Latin scripts, use Record + Whisper (unchanged; not Twilio Gather STT)
                     if uses_non_latin_script(detected_lang):
                         record = response.record(
                             action=f"{base_url}/api/phone/process-recording",
@@ -5183,25 +5213,43 @@ async def respond_with_audio(request: Request):
                         )
                         response.say("Please speak now, then press pound when done.", language='en-US')
                     else:
-                        # For Latin scripts, use Gather
-                        gather = response.gather(
-                            input='speech',
-                            action=f"{base_url}/api/phone/process-speech",
-                            method='POST',
-                            speech_timeout='auto',
-                            language=twilio_lang_code
+                        from voice.twiml_stt import append_post_ai_listen_with_still_there
+
+                        still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
+                        append_post_ai_listen_with_still_there(
+                            response,
+                            call_sid=call_sid,
+                            base_url=base_url,
+                            twilio_lang_code=twilio_lang_code,
+                            still_there_play_url=still_there_url,
+                            use_deepgram=_voice_stt_use_deepgram(),
+                            call_state=active_calls.get(call_sid, {}),
                         )
-                    
-                    # If no input, prompt once then goodbye (same TTS voice as receptionist)
-                    still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
-                    response.play(still_there_url)
-                    gather2 = response.gather(
-                        input='speech',
-                        action=f"{base_url}/api/phone/process-speech",
-                        method='POST',
-                        speech_timeout='auto',
-                        language=twilio_lang_code
-                    )
+
+                    if uses_non_latin_script(detected_lang):
+                        still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
+                        response.play(still_there_url)
+                        if _voice_stt_use_deepgram():
+                            from voice.twiml_stt import append_connect_stream, next_media_stream_generation
+
+                            call_state = active_calls.get(call_sid, {})
+                            gen = next_media_stream_generation(call_state)
+                            append_connect_stream(
+                                response,
+                                call_sid=call_sid,
+                                base_url=base_url,
+                                stream_generation=gen,
+                            )
+                        else:
+                            response.gather(
+                                input="speech",
+                                action=f"{base_url}/api/phone/process-speech",
+                                method="POST",
+                                speech_timeout="auto",
+                                language=twilio_lang_code,
+                                hints="appointment, schedule, message, hours, contact, help",
+                            )
+
                     forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
                     if forwarding_phone:
                         if call_sid and call_sid in active_calls:
@@ -5509,7 +5557,6 @@ async def process_recording(request: Request):
         twilio_lang_code = get_twilio_language_code(detected_lang)
         
         if uses_non_latin_script(detected_lang):
-            # Continue using Record + Whisper for non-Latin scripts
             record = response.record(
                 action=f"{base_url}/api/phone/process-recording",
                 method='POST',
@@ -5517,15 +5564,25 @@ async def process_recording(request: Request):
                 finish_on_key='#'
             )
             response.say("Please speak now, then press pound when done.", language='en-US')
-        else:
-            # Switch back to Gather for Latin scripts
-            gather = response.gather(
-                input='speech',
-                action=f"{base_url}/api/phone/process-speech",
-                method='POST',
-                speech_timeout='auto',
-                language=twilio_lang_code
+        elif _voice_stt_use_deepgram() and call_sid in active_calls:
+            from voice.twiml_stt import (
+                append_connect_stream,
+                append_got_it_and_respond_redirect,
+                next_media_stream_generation,
             )
+
+            gen = next_media_stream_generation(active_calls[call_sid])
+            append_connect_stream(
+                response,
+                call_sid=call_sid,
+                base_url=base_url,
+                stream_generation=gen,
+            )
+            append_got_it_and_respond_redirect(response, call_sid, base_url)
+        else:
+            from voice.twiml_stt import append_gather_listen
+
+            append_gather_listen(response, base_url, language=twilio_lang_code)
         
         return Response(content=str(response), media_type="application/xml")
     

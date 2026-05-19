@@ -9,6 +9,8 @@ from typing import Literal, Optional
 from urllib.parse import quote
 
 from observability import voice_debug, voice_info
+from voice.stt_runtime import deepgram_stt_active
+from voice.twiml_stt import empty_retry_twiml
 
 _log = logging.getLogger("nuvatra")
 
@@ -70,8 +72,6 @@ async def apply_caller_utterance(
             n = int(call_data.get("empty_speech_turns") or 0) + 1
             call_data["empty_speech_turns"] = n
             voice_info("utterance_empty_transcript", call_sid=call_sid, attempt=n)
-            empty_twiml = m.VoiceResponse()
-            action_url = f"{base_url}/api/phone/process-speech"
             lang_code = m.get_twilio_language_code(call_data.get("detected_language") or "English")
             if n >= 4:
                 empty_twiml.say(
@@ -80,22 +80,18 @@ async def apply_caller_utterance(
                 )
                 empty_twiml.hangup()
                 return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(empty_twiml))
-            empty_twiml.say(
-                "I didn't quite catch that. After the tone, please say that again in a few words.",
-                voice="alice",
+            use_deepgram = deepgram_stt_active(
+                twilio_available=bool(m.TWILIO_AVAILABLE),
+                twilio_client=m.twilio_client,
             )
-            gather = empty_twiml.gather(
-                input="speech",
-                action=action_url,
-                method="POST",
-                speech_timeout="auto",
-                timeout=10,
+            xml = empty_retry_twiml(
+                base_url=base_url,
                 language=lang_code,
+                use_deepgram=use_deepgram,
+                call_sid=call_sid,
+                call_state=call_data,
             )
-            gather.say("Go ahead.", voice="alice")
-            empty_twiml.say("We didn't hear anything. Goodbye for now.", voice="alice")
-            empty_twiml.hangup()
-            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(empty_twiml))
+            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
 
         current_detected_lang = m.detect_language(speech_result)
         confidence_float = float(confidence) if confidence else 0.0

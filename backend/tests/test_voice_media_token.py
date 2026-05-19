@@ -16,6 +16,15 @@ def test_media_stream_token_roundtrip(monkeypatch):
     assert not verify_media_stream_token(tok, "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
 
+def test_media_stream_token_stream_generation(monkeypatch):
+    monkeypatch.setenv("MEDIA_STREAM_SIGNING_SECRET", "unit-test-secret")
+    sid = "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    tok = mint_media_stream_token(sid, stream_generation=3)
+    assert verify_media_stream_token(tok, sid, expected_stream_generation=3)
+    assert not verify_media_stream_token(tok, sid, expected_stream_generation=4)
+    assert not verify_media_stream_token(tok, sid, expected_stream_generation=None)
+
+
 def test_twilio_start_custom_parameters():
     raw = json.dumps(
         {

@@ -1,7 +1,8 @@
 """Tests for subscription state and enforcement."""
 import pytest
 from fastapi.testclient import TestClient
-from main import app, get_tenant_subscription_state
+from main import app
+from subscription_access import get_tenant_subscription_state
 
 
 @pytest.fixture

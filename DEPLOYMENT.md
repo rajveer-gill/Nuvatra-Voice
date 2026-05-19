@@ -202,7 +202,7 @@ Use this as a single reference for every env var used by the app.
 | `LOG_LEVEL` | Optional | Logging level: DEBUG, INFO, WARNING, ERROR. Default: INFO. |
 | `CRON_SECRET` | Yes (cron) | Shared secret for cron endpoints (`X-Cron-Secret` header). Required for appointment reminders and overage billing. |
 | `REMINDER_TIMEZONE` | Optional | Timezone for "tomorrow" in reminders (e.g. `America/New_York`). Default: UTC. |
-| `OVERAGE_PRICE_PER_MINUTE` | Yes (overage) | Price per minute in dollars (e.g. 0.05) for extra minutes billing. |
+| `OVERAGE_PRICE_PER_MINUTE` | Yes (overage) | Price per minute in dollars (default 0.15 via `billing_config.OVERAGE_PRICE_PER_MINUTE_DEFAULT`) for extra minutes billing. |
 
 ### Cron Jobs (Render)
 
@@ -218,7 +218,7 @@ To enable day-before appointment reminders (Growth/Pro plans):
 1. Add another Cron Job service.
 2. **Command**: `curl -s -X POST -H "X-Cron-Secret: $CRON_SECRET" https://your-backend.onrender.com/api/cron/process-overage`
 3. **Schedule**: Monthly on the 1st (e.g. `0 15 1 * *` for 15:00 UTC on the 1st).
-4. Set `OVERAGE_PRICE_PER_MINUTE` (e.g. `0.05`) and `CRON_SECRET`.
+4. Set `OVERAGE_PRICE_PER_MINUTE` (e.g. `0.15`) and `CRON_SECRET`.
 
 ### Frontend
 

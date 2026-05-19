@@ -1,7 +1,18 @@
 """Tests for plan limits and get_plan_limits()."""
 import pytest
 from datetime import datetime, timezone, timedelta
-from plans import get_plan_limits, PLAN_MINUTES, PLAN_STAFF_MAX, PLAN_HAS_REMINDERS, PLAN_HAS_LEAD_CAPTURE, PLAN_HAS_EXPORT, PLAN_CALL_LOG_DAYS, PLAN_SMS_AUTOMATIONS
+from plans import (
+    PLAN_CALL_LOG_DAYS,
+    PLAN_CONVERSATIONAL_SMS_SESSIONS,
+    PLAN_HAS_CALL_RECORDING,
+    PLAN_HAS_EXPORT,
+    PLAN_HAS_LEAD_CAPTURE,
+    PLAN_HAS_REMINDERS,
+    PLAN_MINUTES,
+    PLAN_SMS_AUTOMATIONS,
+    PLAN_STAFF_MAX,
+    get_plan_limits,
+)
 
 
 def test_get_plan_limits_starter():
@@ -16,6 +27,8 @@ def test_get_plan_limits_starter():
     assert limits["has_lead_capture"] is False
     assert limits["sms_automations_max"] == 0
     assert limits["has_export"] is False
+    assert limits["has_call_recording"] is False
+    assert limits["conversational_sms_sessions_cap"] == PLAN_CONVERSATIONAL_SMS_SESSIONS["starter"]
     assert limits["is_trial"] is False
 
 
@@ -108,5 +121,7 @@ def test_plan_constants_have_all_plans():
         ("PLAN_HAS_EXPORT", PLAN_HAS_EXPORT),
         ("PLAN_CALL_LOG_DAYS", PLAN_CALL_LOG_DAYS),
         ("PLAN_SMS_AUTOMATIONS", PLAN_SMS_AUTOMATIONS),
+        ("PLAN_HAS_CALL_RECORDING", PLAN_HAS_CALL_RECORDING),
+        ("PLAN_CONVERSATIONAL_SMS_SESSIONS", PLAN_CONVERSATIONAL_SMS_SESSIONS),
     ]:
         assert set(d.keys()) == {"starter", "growth", "pro"}, f"{name} missing keys"

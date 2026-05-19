@@ -15,6 +15,7 @@ from voice.deepgram_bridge import connect_deepgram_listen, parse_deepgram_transc
 from voice.media_token import verify_media_stream_token
 from voice.stt_config import deepgram_max_frame_bytes, media_stream_max_sec, utterance_finalize_debounce_ms
 from voice.twilio_fallback_twiml import gather_process_speech_twiml
+from voice.twiml_stt import got_it_respond_twiml
 from voice.twilio_media import parse_twilio_media_message, twilio_media_payload_bytes, twilio_start_meta
 from voice.utterance import apply_caller_utterance
 
@@ -110,14 +111,25 @@ class _UtteranceCollector:
             return
         try:
             result = await apply_caller_utterance(self.call_sid, text, conf, self.base_url)
-            if result.mode == "replace_call_twiml" and result.replacement_twiml and self.twilio_client:
-                try:
-                    await asyncio.to_thread(
-                        self.twilio_client.calls(self.call_sid).update,
-                        twiml=result.replacement_twiml,
-                    )
-                except Exception:
-                    _log.exception("twilio_calls_update_failed call_sid=%s", self.call_sid)
+            if self.twilio_client:
+                if result.mode == "replace_call_twiml" and result.replacement_twiml:
+                    try:
+                        await asyncio.to_thread(
+                            self.twilio_client.calls(self.call_sid).update,
+                            twiml=result.replacement_twiml,
+                        )
+                    except Exception:
+                        _log.exception("twilio_calls_update_failed call_sid=%s", self.call_sid)
+                elif result.mode == "tail_play_respond":
+                    # Interrupt any queued TwiML after </Connect> (e.g. Still there? / second stream).
+                    try:
+                        xml = got_it_respond_twiml(self.call_sid, self.base_url)
+                        await asyncio.to_thread(
+                            self.twilio_client.calls(self.call_sid).update,
+                            twiml=xml,
+                        )
+                    except Exception:
+                        _log.exception("twilio_calls_update_got_it_failed call_sid=%s", self.call_sid)
         except Exception:
             _log.exception("apply_caller_utterance_failed call_sid=%s", self.call_sid)
         try:
@@ -188,13 +200,18 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                 cs, _ss, cp = twilio_start_meta(ev)
                 call_sid = cs
                 token = (cp or {}).get("token") or ""
-                if not call_sid or not verify_media_stream_token(token, call_sid):
-                    voice_info("media_ws_close", reason="invalid_token", call_sid=call_sid or "")
-                    await websocket.close(code=4401)
-                    return
                 import main as m
 
                 row = m.active_calls.get(call_sid) or {}
+                expected_gen = row.get("media_stream_gen")
+                if not call_sid or not verify_media_stream_token(
+                    token,
+                    call_sid,
+                    expected_stream_generation=int(expected_gen) if expected_gen is not None else None,
+                ):
+                    voice_info("media_ws_close", reason="invalid_token", call_sid=call_sid or "")
+                    await websocket.close(code=4401)
+                    return
                 base_url = (row.get("twilio_public_base_url") or "").strip()
                 if not base_url:
                     voice_info("media_ws_close", reason="missing_base_url", call_sid=call_sid)

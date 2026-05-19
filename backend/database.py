@@ -153,6 +153,7 @@ def init_db() -> bool:
             ("stripe_subscription_id", "TEXT"),
             ("billing_exempt_until", "TIMESTAMPTZ"),
             ("business_vertical", "TEXT"),
+            ("billing_period_anchor_at", "TIMESTAMPTZ"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {typ}")
@@ -278,6 +279,35 @@ def init_db() -> bool:
                 PRIMARY KEY (client_id, month)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS conversational_sms_period_usage (
+                client_id TEXT NOT NULL,
+                billing_period_key TEXT NOT NULL,
+                session_count INTEGER NOT NULL DEFAULT 0 CHECK (session_count >= 0),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (client_id, billing_period_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS conversational_sms_session_keys (
+                client_id TEXT NOT NULL,
+                billing_period_key TEXT NOT NULL,
+                phone_normalized TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (client_id, billing_period_key, phone_normalized)
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_sms_sessions_client_period "
+            "ON conversational_sms_session_keys(client_id, billing_period_key)"
+        )
+        try:
+            cur.execute(
+                "UPDATE tenants SET billing_period_anchor_at = created_at "
+                "WHERE billing_period_anchor_at IS NULL"
+            )
+        except Exception:
+            pass
         try:
             cur.execute("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ")
         except Exception:
@@ -376,10 +406,18 @@ def _row_to_tenant(row) -> dict:
         base["business_vertical"] = str(row[11]).strip()
     else:
         base["business_vertical"] = "salon_chair"
+    if len(row) >= 13 and row[12]:
+        base["billing_period_anchor_at"] = row[12].isoformat() if hasattr(row[12], "isoformat") else row[12]
+    else:
+        base["billing_period_anchor_at"] = base.get("created_at")
     return base
 
 def _tenant_select_cols():
-    return "id, client_id, name, twilio_phone_number, plan, created_at, trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, business_vertical"
+    return (
+        "id, client_id, name, twilio_phone_number, plan, created_at, trial_ends_at, "
+        "subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, "
+        "business_vertical, billing_period_anchor_at"
+    )
 
 def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
     """Look up tenant by Twilio phone number (E.164). Returns tenant or None."""
@@ -1720,5 +1758,148 @@ def db_booked_slots_save(slots: List[dict]) -> None:
                 s.get("staff_id"),
             ),
         )
+    conn.commit()
+    cur.close()
+
+
+# --- Conversational SMS session caps (billing-period scoped) ---
+def db_conversational_sms_reserve_session(
+    client_id: str,
+    billing_period_key: str,
+    phone_normalized: str,
+    session_cap: int,
+) -> dict:
+    """
+    Atomically allow an inbound conversational SMS session or deny when at cap.
+
+    Returns dict: allowed (bool), is_new_session (bool), session_count (int), at_cap (bool).
+    """
+    if not client_id or not billing_period_key or not phone_normalized:
+        return {"allowed": False, "is_new_session": False, "session_count": 0, "at_cap": True}
+    cap = max(0, int(session_cap))
+    conn = _get_conn()
+    if not conn:
+        return {"allowed": True, "is_new_session": True, "session_count": 0, "at_cap": False}
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN")
+        cur.execute(
+            """
+            SELECT 1 FROM conversational_sms_session_keys
+            WHERE client_id = %s AND billing_period_key = %s AND phone_normalized = %s
+            """,
+            (client_id, billing_period_key, phone_normalized),
+        )
+        if cur.fetchone():
+            cur.execute(
+                """
+                SELECT session_count FROM conversational_sms_period_usage
+                WHERE client_id = %s AND billing_period_key = %s
+                """,
+                (client_id, billing_period_key),
+            )
+            row = cur.fetchone()
+            count = int(row[0]) if row else 0
+            cur.execute("COMMIT")
+            cur.close()
+            return {
+                "allowed": True,
+                "is_new_session": False,
+                "session_count": count,
+                "at_cap": count >= cap if cap > 0 else False,
+            }
+        cur.execute(
+            """
+            INSERT INTO conversational_sms_period_usage (client_id, billing_period_key, session_count)
+            VALUES (%s, %s, 0)
+            ON CONFLICT (client_id, billing_period_key) DO NOTHING
+            """,
+            (client_id, billing_period_key),
+        )
+        cur.execute(
+            """
+            SELECT session_count FROM conversational_sms_period_usage
+            WHERE client_id = %s AND billing_period_key = %s
+            FOR UPDATE
+            """,
+            (client_id, billing_period_key),
+        )
+        row = cur.fetchone()
+        current = int(row[0]) if row else 0
+        if cap <= 0 or current >= cap:
+            cur.execute("ROLLBACK")
+            cur.close()
+            return {
+                "allowed": False,
+                "is_new_session": True,
+                "session_count": current,
+                "at_cap": True,
+            }
+        cur.execute(
+            """
+            INSERT INTO conversational_sms_session_keys (client_id, billing_period_key, phone_normalized)
+            VALUES (%s, %s, %s)
+            """,
+            (client_id, billing_period_key, phone_normalized),
+        )
+        cur.execute(
+            """
+            UPDATE conversational_sms_period_usage
+            SET session_count = session_count + 1, updated_at = NOW()
+            WHERE client_id = %s AND billing_period_key = %s
+            RETURNING session_count
+            """,
+            (client_id, billing_period_key),
+        )
+        new_count = int(cur.fetchone()[0])
+        cur.execute("COMMIT")
+        cur.close()
+        return {
+            "allowed": True,
+            "is_new_session": True,
+            "session_count": new_count,
+            "at_cap": new_count >= cap if cap > 0 else False,
+        }
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[DB] conversational_sms_reserve_session failed: {e}")
+        return {"allowed": False, "is_new_session": False, "session_count": 0, "at_cap": True}
+
+
+def db_conversational_sms_session_count(client_id: str, billing_period_key: str) -> int:
+    """Current session count for client/period (for tests and diagnostics)."""
+    conn = _get_conn()
+    if not conn:
+        return 0
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT session_count FROM conversational_sms_period_usage
+        WHERE client_id = %s AND billing_period_key = %s
+        """,
+        (client_id, billing_period_key),
+    )
+    row = cur.fetchone()
+    cur.close()
+    return int(row[0]) if row else 0
+
+
+def db_conversational_sms_clear_period(client_id: str, billing_period_key: str) -> None:
+    """Test helper: reset conversational session counters for a period."""
+    conn = _get_conn()
+    if not conn:
+        return
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM conversational_sms_session_keys WHERE client_id = %s AND billing_period_key = %s",
+        (client_id, billing_period_key),
+    )
+    cur.execute(
+        "DELETE FROM conversational_sms_period_usage WHERE client_id = %s AND billing_period_key = %s",
+        (client_id, billing_period_key),
+    )
     conn.commit()
     cur.close()

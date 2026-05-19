@@ -12,19 +12,32 @@ from typing import Any, Optional
 from voice.stt_config import media_stream_signing_secret
 
 
-def mint_media_stream_token(call_sid: str, ttl_sec: int = 3600) -> str:
+def mint_media_stream_token(
+    call_sid: str,
+    ttl_sec: int = 3600,
+    *,
+    stream_generation: Optional[int] = None,
+) -> str:
     """Opaque token Twilio echoes in the stream `start` customParameters."""
     secret = media_stream_signing_secret()
     if not secret or not call_sid:
         return ""
     exp = int(time.time()) + max(60, min(int(ttl_sec), 86400))
-    payload = json.dumps({"cs": call_sid, "e": exp}, separators=(",", ":"))
+    body: dict[str, Any] = {"cs": call_sid, "e": exp}
+    if stream_generation is not None:
+        body["g"] = int(stream_generation)
+    payload = json.dumps(body, separators=(",", ":"))
     sig = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     raw = payload.encode("utf-8") + b"|" + sig.encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def verify_media_stream_token(token: str, expected_call_sid: str) -> bool:
+def verify_media_stream_token(
+    token: str,
+    expected_call_sid: str,
+    *,
+    expected_stream_generation: Optional[int] = None,
+) -> bool:
     if not token or not expected_call_sid:
         return False
     secret = media_stream_signing_secret()
@@ -48,6 +61,13 @@ def verify_media_stream_token(token: str, expected_call_sid: str) -> bool:
         return False
     exp = payload.get("e")
     if not isinstance(exp, (int, float)) or int(time.time()) > int(exp):
+        return False
+    tok_gen = payload.get("g")
+    if expected_stream_generation is not None:
+        if not isinstance(tok_gen, (int, float)) or int(tok_gen) != int(expected_stream_generation):
+            return False
+    elif tok_gen is not None:
+        # Generation-bound tokens must be verified with the expected generation.
         return False
     expect_sig = hmac.new(secret.encode("utf-8"), payload_b, hashlib.sha256).hexdigest()
     try:
