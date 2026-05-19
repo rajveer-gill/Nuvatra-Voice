@@ -3,7 +3,22 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import * as Sentry from '@sentry/nextjs'
 import { useAuth } from '@clerk/nextjs'
-import { Volume2, Store, Save, Shuffle, User, Play, Square, CreditCard, CheckCircle2, Circle, AlertTriangle, Clock } from 'lucide-react'
+import {
+  Volume2,
+  Store,
+  Save,
+  Shuffle,
+  User,
+  Play,
+  Square,
+  CreditCard,
+  CheckCircle2,
+  Circle,
+  AlertTriangle,
+  Clock,
+  Users,
+  PhoneForwarded,
+} from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import {
   RANDOM_NAMES,
@@ -632,24 +647,11 @@ export default function Settings() {
               className="cs-field w-full"
               placeholder="Number to forward calls to when a caller asks for a real person"
             />
-            <p className="text-xs text-gray-500 mt-1">When a caller asks to speak to someone, the AI will transfer the call to this number.</p>
+            <p className="text-xs text-gray-500 mt-1">
+              Default line when someone asks for a person without naming anyone on your transfer list (see Call transfers
+              section below).
+            </p>
           </div>
-          <StaffMembersSection
-            staff={staff}
-            onStaffChange={setStaff}
-            api={api}
-            onNotify={setMessage}
-            onAfterSave={refreshSetupStatus}
-          />
-          <TransferTargetsSection
-            transfers={transferTargets}
-            staff={staff}
-            transferMax={transferMax}
-            onTransfersChange={setTransferTargets}
-            api={api}
-            onNotify={setMessage}
-            onAfterSave={refreshSetupStatus}
-          />
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
             <input
@@ -708,6 +710,50 @@ export default function Settings() {
           </button>
         </div>
       </div>
+
+      <section className="bg-white rounded-2xl shadow-xl p-8" aria-labelledby="team-roster-settings-heading">
+        <h2
+          id="team-roster-settings-heading"
+          className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"
+        >
+          <Users className="w-6 h-6 text-teal-600" />
+          Team roster
+        </h2>
+        <p className="text-gray-600 text-sm mb-6 max-w-3xl">
+          Everyone callers can book with—stylists, artists, providers, chairs. Add as many as you need; this list is only for
+          scheduling and AI context, not who receives live call transfers.
+        </p>
+        <StaffMembersSection
+          staff={staff}
+          onStaffChange={setStaff}
+          api={api}
+          onNotify={setMessage}
+          onAfterSave={refreshSetupStatus}
+        />
+      </section>
+
+      <section className="bg-white rounded-2xl shadow-xl p-8" aria-labelledby="call-transfers-settings-heading">
+        <h2
+          id="call-transfers-settings-heading"
+          className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"
+        >
+          <PhoneForwarded className="w-6 h-6 text-violet-600" />
+          Call transfers
+        </h2>
+        <p className="text-gray-600 text-sm mb-6 max-w-3xl">
+          When a caller asks to speak with someone by name, the AI can transfer only to numbers you list here. Your plan limits
+          how many destinations you can add—not how many people are on your booking roster above.
+        </p>
+        <TransferTargetsSection
+          transfers={transferTargets}
+          staff={staff}
+          transferMax={transferMax}
+          onTransfersChange={setTransferTargets}
+          api={api}
+          onNotify={setMessage}
+          onAfterSave={refreshSetupStatus}
+        />
+      </section>
     </div>
   )
 }

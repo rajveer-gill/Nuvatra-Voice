@@ -202,34 +202,15 @@ export function StaffMembersSection({
   }
 
   return (
-    <motion.div
-      className="md:col-span-2 rounded-2xl border border-teal-200/70 bg-gradient-to-br from-teal-50/80 via-white to-emerald-50/40 p-4 sm:p-5 shadow-sm"
-      initial={reduceMotion ? false : { opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4 }}
-    >
-      <motion.div className="flex items-start gap-3 mb-4" layout>
-        <motion.span
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-teal-600 to-emerald-600 text-white shadow-md"
-          whileHover={reduceMotion ? {} : { rotate: 4, scale: 1.05 }}
-        >
-          <Calendar className="h-5 w-5" />
-        </motion.span>
-        <motion.div className="min-w-0 flex-1">
-          <h3 className="text-base font-bold text-gray-900">Team roster (booking)</h3>
-          <p className="text-sm text-gray-600 mt-1">
-            Add everyone callers can book with — artists, stylists, providers. No plan limit on roster size. Phone is optional here; use{' '}
-            <span className="font-medium text-violet-800">Live call transfers</span> below to route spoken transfer requests.
-          </p>
-          <motion.p
-            className="text-xs text-teal-800 mt-2 font-medium"
-            animate={reduceMotion ? {} : { opacity: [0.7, 1, 0.7] }}
-            transition={{ duration: 3, repeat: Infinity }}
-          >
-            {staff.length} on roster
-          </motion.p>
-        </motion.div>
-      </motion.div>
+    <div>
+      <motion.p
+        className="text-xs text-teal-800 mb-3 font-medium inline-flex items-center gap-2 rounded-full bg-teal-50 px-3 py-1 border border-teal-100"
+        animate={reduceMotion ? {} : { opacity: [0.75, 1, 0.75] }}
+        transition={{ duration: 3, repeat: Infinity }}
+      >
+        <Calendar className="h-3.5 w-3.5" />
+        {staff.length} on roster
+      </motion.p>
 
       <motion.ul
         className="space-y-2 mb-3 max-h-[min(420px,50vh)] overflow-y-auto pr-1"
@@ -429,7 +410,7 @@ export function StaffMembersSection({
                 >
                   {saving ? 'Saving…' : 'Save'}
                 </motion.button>
-              </motion.div>
+    </div>
             </motion.div>
           )}
         </AnimatePresence>
