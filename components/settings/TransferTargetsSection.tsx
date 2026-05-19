@@ -463,7 +463,7 @@ export function TransferTargetsSection({
                     </select>
                     {!draft.phone.trim() && draft.staff_id && (
                       <p className="text-xs text-amber-700 mt-2">
-                        This person has no phone on their roster profile — add one in Team roster, or use Custom with a number.
+                        This person has no phone on their roster profile. Add one in Team roster, or use Custom with a number.
                       </p>
                     )}
                   </div>
@@ -489,7 +489,7 @@ export function TransferTargetsSection({
                         value={draft.phone}
                         onChange={(e) => setDraft((d) => ({ ...d, phone: e.target.value }))}
                         className="cs-field w-full tabular-nums"
-                        placeholder="+1…"
+                        placeholder="+1..."
                         maxLength={32}
                         disabled={!!draft.staff_id && !!staff.find((s) => s.id === draft.staff_id)?.phone.trim()}
                       />
@@ -511,7 +511,7 @@ export function TransferTargetsSection({
                   className="px-5 py-2 rounded-xl text-sm font-semibold bg-violet-600 text-white disabled:opacity-50"
                   whileTap={reduceMotion ? {} : { scale: 0.96 }}
                 >
-                  {saving ? 'Saving…' : 'Save'}
+                  {saving ? 'Saving...' : 'Save'}
                 </motion.button>
               </div>
             </motion.div>

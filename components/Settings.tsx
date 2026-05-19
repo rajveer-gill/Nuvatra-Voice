@@ -785,8 +785,8 @@ export default function Settings() {
           Team roster
         </h2>
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
-          Everyone callers can book with—stylists, artists, providers, chairs. Add as many as you need; this list is only for
-          scheduling and AI context, not who receives live call transfers.
+          Staff your callers can book with (stylists, artists, providers, chairs). Add as many as you need. This list is only for
+          scheduling and AI context, not live call transfers.
         </p>
         <StaffMembersSection
           staff={staff}
@@ -808,7 +808,7 @@ export default function Settings() {
         </h2>
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
           When a caller asks to speak with someone by name, the AI can transfer only to numbers you list here. Your plan limits
-          how many destinations you can add—not how many people are on your booking roster above.
+          how many destinations you can add, not how many people are on your booking roster above.
         </p>
         <TransferTargetsSection
           transfers={transferTargets}

@@ -388,7 +388,7 @@ export function StaffMembersSection({
                     value={draft.phone}
                     onChange={(e) => setDraft((d) => ({ ...d, phone: e.target.value }))}
                     className="cs-field w-full tabular-nums"
-                    placeholder="+1… for SMS approvals or linking transfers"
+                    placeholder="+1... for SMS approvals or linking transfers"
                     maxLength={32}
                     autoComplete="tel"
                   />
@@ -458,7 +458,7 @@ export function StaffMembersSection({
                     value={draft.notes}
                     onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
                     className="cs-field w-full min-h-[100px]"
-                    placeholder="Chair, specialties, schedule — helps booking and Q&A…"
+                    placeholder="Chair, specialties, schedule - helps booking and Q&A"
                     maxLength={4000}
                   />
                 </motion.div>
@@ -490,7 +490,7 @@ export function StaffMembersSection({
                   className="px-5 py-2 rounded-xl text-sm font-semibold bg-teal-600 text-white disabled:opacity-50"
                   whileTap={reduceMotion ? {} : { scale: 0.96 }}
                 >
-                  {saving ? 'Saving…' : 'Save'}
+                  {saving ? 'Saving...' : 'Save'}
                 </motion.button>
               </motion.div>
             </motion.div>
