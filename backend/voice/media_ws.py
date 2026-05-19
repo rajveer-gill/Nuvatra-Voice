@@ -13,7 +13,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from observability import voice_debug, voice_info
 from voice.twilio_call import safe_twilio_call_update
 from voice.deepgram_bridge import connect_deepgram_listen, parse_deepgram_transcript_message
-from voice.media_token import verify_media_stream_token
+from voice.media_token import token_stream_generation, verify_pending_media_stream_token
 from voice.stt_config import deepgram_max_frame_bytes, media_stream_max_sec, utterance_finalize_debounce_ms
 from voice.twilio_fallback_twiml import gather_process_speech_twiml
 from voice.twiml_stt import got_it_respond_twiml
@@ -204,13 +204,27 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                 import main as m
 
                 row = m.active_calls.get(call_sid) or {}
-                expected_gen = row.get("media_stream_gen")
-                if not call_sid or not verify_media_stream_token(
-                    token,
-                    call_sid,
-                    expected_stream_generation=int(expected_gen) if expected_gen is not None else None,
+                max_gen = int(row.get("media_stream_gen") or 0)
+                tok_gen = token_stream_generation(token)
+                if not call_sid or not token or not max_gen:
+                    voice_info(
+                        "media_ws_close",
+                        reason="invalid_token",
+                        call_sid=call_sid or "",
+                        detail="missing_token_or_gen",
+                    )
+                    await websocket.close(code=4401)
+                    return
+                if not verify_pending_media_stream_token(
+                    token, call_sid, max_issued_generation=max_gen
                 ):
-                    voice_info("media_ws_close", reason="invalid_token", call_sid=call_sid or "")
+                    voice_info(
+                        "media_ws_close",
+                        reason="invalid_token",
+                        call_sid=call_sid,
+                        token_gen=tok_gen,
+                        max_issued_gen=max_gen,
+                    )
                     await websocket.close(code=4401)
                     return
                 base_url = (row.get("twilio_public_base_url") or "").strip()

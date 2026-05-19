@@ -3,7 +3,12 @@
 import json
 
 from voice.deepgram_bridge import parse_deepgram_transcript_message
-from voice.media_token import mint_media_stream_token, verify_media_stream_token
+from voice.media_token import (
+    mint_media_stream_token,
+    token_stream_generation,
+    verify_media_stream_token,
+    verify_pending_media_stream_token,
+)
 from voice.stt_config import deepgram_env_block_reason, voice_stt_provider
 from voice.twilio_media import parse_twilio_media_message, twilio_media_payload_bytes, twilio_start_meta
 
@@ -14,6 +19,21 @@ def test_media_stream_token_roundtrip(monkeypatch):
     assert tok
     assert verify_media_stream_token(tok, "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     assert not verify_media_stream_token(tok, "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+
+def test_verify_pending_media_stream_token_queued_streams(monkeypatch):
+    """First WS may present g=1 while TwiML already minted g=2 for the next listen."""
+    monkeypatch.setenv("MEDIA_STREAM_SIGNING_SECRET", "unit-test-secret")
+    sid = "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    tok1 = mint_media_stream_token(sid, stream_generation=1)
+    tok2 = mint_media_stream_token(sid, stream_generation=2)
+    assert token_stream_generation(tok1) == 1
+    assert verify_pending_media_stream_token(tok1, sid, max_issued_generation=2)
+    assert verify_pending_media_stream_token(tok2, sid, max_issued_generation=2)
+    assert not verify_pending_media_stream_token(tok1, sid, max_issued_generation=0)
+    assert not verify_pending_media_stream_token(
+        mint_media_stream_token(sid, stream_generation=3), sid, max_issued_generation=2
+    )
 
 
 def test_media_stream_token_stream_generation(monkeypatch):
