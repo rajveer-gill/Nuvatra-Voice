@@ -642,14 +642,16 @@ export default function Settings() {
         </button>
       </SettingsSection>
 
-      {/* Business info — any type: restaurant, salon, HVAC, real estate, etc. */}
+      {/* Business info: restaurant, salon, HVAC, real estate, etc. */}
       <SettingsSection delay={4}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <Store className="w-6 h-6 text-primary-600" />
           Business info &amp; AI customizations
         </h2>
         <p className="text-gray-600 text-sm mb-6">
-          Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules so it can give accurate info and take bookings for any business type (restaurant, nail salon, HVAC, real estate, etc.).
+          Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules
+          so it can give accurate info and take bookings for any business type (restaurant, nail salon, HVAC, real
+          estate, etc.).
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -694,7 +696,8 @@ export default function Settings() {
             >
               <div className="min-w-0 flex-1">
                 <p className={`truncate text-sm ${hoursSummaryPreview ? 'font-medium text-gray-900' : 'text-gray-500'}`}>
-                  {hoursSummaryPreview || "Set which days you're open and your hours (opens the visual editor)"}
+                  {hoursSummaryPreview ||
+                    'Set which days you\u0027re open and your hours (opens the visual editor)'}
                 </p>
                 <p className="mt-1 text-xs text-gray-500">
                   Schedule presets, copy weekdays, and live preview. Saved when you click Apply in the editor, then Save changes below.

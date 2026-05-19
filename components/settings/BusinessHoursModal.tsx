@@ -258,7 +258,7 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                       Business hours
                     </h2>
                     <p className="mt-1 max-w-xl text-sm leading-relaxed text-white/85 sm:text-[15px]">
-                      Toggle days, set open and close — your receptionist reads this on calls and texts.
+                      Toggle days, set open and close. Your receptionist reads this on calls and texts.
                     </p>
                   </div>
                 </div>
