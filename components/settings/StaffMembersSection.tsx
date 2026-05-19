@@ -326,7 +326,8 @@ export function StaffMembersSection({
                   </motion.div>
                 </motion.div>
               </motion.li>
-            )})
+              )
+            })
           )}
         </AnimatePresence>
       </motion.ul>
@@ -444,7 +445,7 @@ export function StaffMembersSection({
                           </label>
                         )
                       })}
-                    </motion.div>
+                    </div>
                   </motion.div>
                 ) : (
                   <p className="text-xs text-gray-500 rounded-lg border border-dashed border-gray-200 px-3 py-2">
