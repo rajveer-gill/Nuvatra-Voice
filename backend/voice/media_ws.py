@@ -11,6 +11,7 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
 from observability import voice_debug, voice_info
+from voice.twilio_call import safe_twilio_call_update
 from voice.deepgram_bridge import connect_deepgram_listen, parse_deepgram_transcript_message
 from voice.media_token import verify_media_stream_token
 from voice.stt_config import deepgram_max_frame_bytes, media_stream_max_sec, utterance_finalize_debounce_ms
@@ -113,23 +114,21 @@ class _UtteranceCollector:
             result = await apply_caller_utterance(self.call_sid, text, conf, self.base_url)
             if self.twilio_client:
                 if result.mode == "replace_call_twiml" and result.replacement_twiml:
-                    try:
-                        await asyncio.to_thread(
-                            self.twilio_client.calls(self.call_sid).update,
-                            twiml=result.replacement_twiml,
-                        )
-                    except Exception:
-                        _log.exception("twilio_calls_update_failed call_sid=%s", self.call_sid)
+                    await safe_twilio_call_update(
+                        self.twilio_client,
+                        self.call_sid,
+                        result.replacement_twiml,
+                        op="replace_twiml",
+                    )
                 elif result.mode == "tail_play_respond":
-                    # Interrupt any queued TwiML after </Connect> (e.g. Still there? / second stream).
-                    try:
-                        xml = got_it_respond_twiml(self.call_sid, self.base_url)
-                        await asyncio.to_thread(
-                            self.twilio_client.calls(self.call_sid).update,
-                            twiml=xml,
-                        )
-                    except Exception:
-                        _log.exception("twilio_calls_update_got_it_failed call_sid=%s", self.call_sid)
+                    # Interrupt queued TwiML after </Connect> (Still there? / second stream).
+                    xml = got_it_respond_twiml(self.call_sid, self.base_url)
+                    await safe_twilio_call_update(
+                        self.twilio_client,
+                        self.call_sid,
+                        xml,
+                        op="got_it_respond",
+                    )
         except Exception:
             _log.exception("apply_caller_utterance_failed call_sid=%s", self.call_sid)
         try:
@@ -154,11 +153,13 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
     async def fail_open_gather(reason: str) -> None:
         voice_info("deepgram_connect_fail", reason=reason, call_sid=call_sid or "")
         if twilio_client and call_sid and base_url:
-            try:
-                xml = gather_process_speech_twiml(call_sid, base_url)
-                await asyncio.to_thread(twilio_client.calls(call_sid).update, twiml=xml)
-            except Exception:
-                _log.exception("gather_fallback_calls_update_failed call_sid=%s", call_sid)
+            xml = gather_process_speech_twiml(call_sid, base_url)
+            await safe_twilio_call_update(
+                twilio_client,
+                call_sid,
+                xml,
+                op="deepgram_fail_open_gather",
+            )
         try:
             await websocket.close()
         except Exception:

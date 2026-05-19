@@ -4950,7 +4950,11 @@ async def handle_incoming_call(request: Request):
         )
 
         if use_deepgram_stt:
-            from voice.twiml_stt import append_connect_stream, next_media_stream_generation
+            from voice.twiml_stt import (
+                append_connect_stream,
+                append_deepgram_silence_followup_after_stream,
+                next_media_stream_generation,
+            )
 
             response.play(greeting_audio_url)
             gen = next_media_stream_generation(active_calls[call_sid])
@@ -4960,8 +4964,17 @@ async def handle_incoming_call(request: Request):
                 base_url=base_url,
                 stream_generation=gen,
             )
-            # Do not queue got-it/respond here — that ran before the caller spoke and triggered
-            # immediate forward when forwarding_phone was set (respond had no response_status).
+            still_there_url = (
+                f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}"
+                f"&voice={get_tts_voice()}"
+            )
+            append_deepgram_silence_followup_after_stream(
+                response,
+                call_sid=call_sid,
+                base_url=base_url,
+                still_there_play_url=still_there_url,
+                call_state=active_calls[call_sid],
+            )
             return Response(content=str(response), media_type="application/xml")
 
         from voice.twiml_stt import append_gather_listen

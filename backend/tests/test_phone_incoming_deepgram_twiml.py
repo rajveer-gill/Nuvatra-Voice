@@ -33,5 +33,9 @@ def test_incoming_twiml_deepgram_connect_stream(deepgram_phone_client):
     assert "wss://voice.example.test/api/phone/media" in body
     assert "<Stream" in body
     assert "token" in body.lower()
-    assert "got-it-audio" in body
-    assert "/api/phone/respond" in body
+    assert "greeting-audio" in body
+    assert "Still there" in body or "Still%20there" in body
+    assert "/api/phone/no-speech" in body
+    # got-it + /respond only after caller speech (REST update), not in initial TwiML
+    assert "got-it-audio" not in body
+    assert "/api/phone/respond" not in body

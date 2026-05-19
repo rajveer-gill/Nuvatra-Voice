@@ -103,6 +103,36 @@ def append_gather_listen(
     response.redirect(f"{bu}{PROCESS_SPEECH_PATH}", method="POST")
 
 
+def append_deepgram_silence_followup_after_stream(
+    response: Any,
+    *,
+    call_sid: str,
+    base_url: str,
+    still_there_play_url: str,
+    call_state: dict[str, Any],
+) -> None:
+    """
+    After the first post-greeting Media Stream: Still there?, second listen, then no-speech webhook.
+
+    Caller speech on either stream interrupts via REST (media_ws) with got-it + respond — never
+    queue those verbs here (that caused immediate /respond before the caller spoke).
+    """
+    if not _TWILIO_OK:
+        return
+    response.play(still_there_play_url)
+    gen2 = next_media_stream_generation(call_state)
+    append_connect_stream(
+        response, call_sid=call_sid, base_url=base_url, stream_generation=gen2
+    )
+    voice_trace(
+        "listen_windows_complete_redirect_no_speech",
+        call_sid=call_sid,
+        stt="deepgram",
+        phase="post_greeting",
+    )
+    response.redirect(f"{base_url.rstrip('/')}{NO_SPEECH_PATH}", method="POST")
+
+
 def append_post_ai_listen_with_still_there(
     response: Any,
     *,
@@ -180,7 +210,7 @@ def empty_retry_twiml(
     if use_deepgram and call_sid:
         gen = next_media_stream_generation(call_state)
         append_connect_stream(vr, call_sid=call_sid, base_url=bu, stream_generation=gen)
-        append_got_it_and_respond_redirect(vr, call_sid, base_url)
+        # Silence falls through to goodbye below; speech uses REST update in media_ws.
     else:
         gather = vr.gather(
             input="speech",
