@@ -4882,11 +4882,7 @@ async def handle_incoming_call(request: Request):
                 )
 
         if use_deepgram_stt:
-            from voice.twiml_stt import (
-                append_connect_stream,
-                append_got_it_and_respond_redirect,
-                next_media_stream_generation,
-            )
+            from voice.twiml_stt import append_connect_stream, next_media_stream_generation
 
             response.play(greeting_audio_url)
             gen = next_media_stream_generation(active_calls[call_sid])
@@ -4896,7 +4892,8 @@ async def handle_incoming_call(request: Request):
                 base_url=base_url,
                 stream_generation=gen,
             )
-            append_got_it_and_respond_redirect(response, call_sid, base_url)
+            # Do not queue got-it/respond here — that ran before the caller spoke and triggered
+            # immediate forward when forwarding_phone was set (respond had no response_status).
             return Response(content=str(response), media_type="application/xml")
 
         from voice.twiml_stt import append_gather_listen
@@ -5184,6 +5181,51 @@ async def handle_media_stream(request: Request):
         "websocket_path": "/api/phone/media",
     }
 
+@app.post("/api/phone/no-speech")
+async def handle_no_speech(request: Request):
+    """
+    After listen windows expire with no caller speech: forward to fallback number only here,
+    not on every AI turn. Caller must stay silent through Still there? + second listen.
+    """
+    if not TWILIO_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Twilio not installed")
+    try:
+        form_data = await request.form()
+        call_sid = (form_data.get("CallSid") or "").strip()
+        _restore_call_context(call_sid or "")
+        base_url = _twilio_base_url(request)
+        call_data = active_calls.get(call_sid, {}) if call_sid else {}
+        detected_lang = call_data.get("detected_language", "English")
+        forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
+
+        voice_info(
+            "no_speech_timeout",
+            call_sid=call_sid or "",
+            will_forward=bool(forwarding_phone),
+            client_id_prefix=(str(call_data.get("client_id") or "")[:12]),
+        )
+
+        if forwarding_phone:
+            if call_sid and call_sid in active_calls:
+                active_calls[call_sid]["outcome"] = "forwarded"
+            if call_sid:
+                call_log_set_outcome(call_sid, "forwarded")
+            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+        else:
+            response = VoiceResponse()
+            goodbye_text = "Thanks for calling! Have a wonderful day!"
+            goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
+            response.play(goodbye_url)
+            response.hangup()
+        return Response(content=str(response), media_type="application/xml")
+    except Exception as e:
+        logger.exception("no_speech_handler_failed: %s", e)
+        response = VoiceResponse()
+        response.say("Thanks for calling. Goodbye.", voice="alice")
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
+
+
 @app.post("/api/phone/respond")
 async def respond_with_audio(request: Request):
     """
@@ -5200,21 +5242,20 @@ async def respond_with_audio(request: Request):
         # base_url needed for forward_call_to_business in all branches
         base_url = _twilio_base_url(request)
         if not call_sid or call_sid not in response_status:
-            # Lost response status - forward to business phone if available
+            # GPT still processing or caller has not spoken yet — keep polling; never auto-forward.
+            voice_info(
+                "respond_poll_no_status_yet",
+                call_sid=call_sid or "",
+                has_active_call=bool(call_sid and call_sid in active_calls),
+            )
             response = VoiceResponse()
-            forwarding_phone = get_business_info().get("forwarding_phone")
-            if forwarding_phone:
-                print(f"🔄 Lost response status - forwarding to business phone: {forwarding_phone}")
-                # Try to get call data for language
-                call_data = active_calls.get(call_sid, {})
-                detected_lang = call_data.get("detected_language", "English")
-                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
-                return Response(content=str(response), media_type="application/xml")
-            else:
-                # Fallback: return error message
-                response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
-                response.hangup()
-                return Response(content=str(response), media_type="application/xml")
+            filler_text = "One moment."
+            filler_encoded = quote(filler_text)
+            filler_audio_url = f"{base_url}/api/phone/tts-audio?text={filler_encoded}&voice={get_tts_voice()}"
+            response.play(filler_audio_url)
+            response.pause(length=1)
+            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            return Response(content=str(response), media_type="application/xml")
         
         status_data = response_status[call_sid]
         status = status_data.get("status", "pending")
@@ -5278,24 +5319,7 @@ async def respond_with_audio(request: Request):
                                 language=twilio_lang_code,
                                 hints="appointment, schedule, message, hours, contact, help",
                             )
-
-                    forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
-                    if forwarding_phone:
-                        if call_sid and call_sid in active_calls:
-                            active_calls[call_sid]["outcome"] = "forwarded"
-                        if call_sid:
-                            call_log_set_outcome(call_sid, "forwarded")
-                        print(
-                            f"🔄 No speech after still there — forwarding to business phone: {forwarding_phone}"
-                        )
-                        append_forward_call_verbs(
-                            response, forwarding_phone, base_url, detected_lang
-                        )
-                    else:
-                        goodbye_text = "Thanks for calling! Have a wonderful day!"
-                        goodbye_url = f"{base_url}/api/phone/tts-audio?text={quote(goodbye_text)}&voice={get_tts_voice()}"
-                        response.play(goodbye_url)
-                        response.hangup()
+                    # No-input fallback (forward OR goodbye) is chained after listen windows in twiml_stt.
                 except Exception as e:
                     logger.warning("respond ready/goodbye block failed: %s: %s", type(e).__name__, e)
                     response = VoiceResponse()

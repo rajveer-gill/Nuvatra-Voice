@@ -25,6 +25,7 @@ except ImportError:
 
 GATHER_HINTS = "appointment, schedule, message, hours, contact, help"
 PROCESS_SPEECH_PATH = "/api/phone/process-speech"
+NO_SPEECH_PATH = "/api/phone/no-speech"
 
 
 def next_media_stream_generation(call_state: dict[str, Any]) -> int:
@@ -145,6 +146,8 @@ def append_post_ai_listen_with_still_there(
             language=twilio_lang_code,
             hints=GATHER_HINTS,
         )
+
+    response.redirect(f"{base_url.rstrip('/')}{NO_SPEECH_PATH}", method="POST")
 
 
 def empty_retry_twiml(
