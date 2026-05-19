@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
@@ -50,9 +50,7 @@ import {
 } from '@/components/settings/StructuredListEditors'
 import { BusinessHoursModal } from '@/components/settings/BusinessHoursModal'
 import { parseHoursToWeekly, summarizeSchedule } from '@/lib/businessHours'
-import { fadeUpChild, staggerContainer } from '@/components/motion'
-
-/** Set NEXT_PUBLIC_DEBUG_SETTINGS=1 in .env.local (or Vercel) to log per-endpoint load outcomes — no tokens. */
+/** Set NEXT_PUBLIC_DEBUG_SETTINGS=1 in .env.local (or Vercel) to log per-endpoint load outcomes â€” no tokens. */
 const DEBUG_SETTINGS = process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1'
 
 function SettingsSection({
@@ -68,11 +66,16 @@ function SettingsSection({
   const reduceMotion = useReducedMotion()
   return (
     <motion.section
-      variants={fadeUpChild}
-      custom={delay}
-      whileHover={reduceMotion ? undefined : { y: -3, transition: { type: 'spring', stiffness: 420, damping: 26 } }}
-      className={`relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-8 shadow-xl shadow-slate-900/10 ring-1 ring-slate-900/[0.04] ${className}`}
       {...rest}
+      className={`relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-8 shadow-xl shadow-slate-900/10 ring-1 ring-slate-900/[0.04] ${className}`}
+      initial={reduceMotion ? false : { opacity: 1, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={
+        reduceMotion
+          ? { duration: 0 }
+          : { delay: delay * 0.06, duration: 0.4, ease: [0.22, 1, 0.36, 1] }
+      }
+      whileHover={reduceMotion ? undefined : { y: -3, transition: { type: 'spring', stiffness: 420, damping: 26 } }}
     >
       <motion.div
         aria-hidden
@@ -86,9 +89,7 @@ function SettingsSection({
         animate={reduceMotion ? undefined : { x: [0, 8, 0], y: [0, -6, 0] }}
         transition={{ duration: 7, repeat: Infinity, ease: 'easeInOut' }}
       />
-      <motion.div className="relative z-10" layout>
-        {children}
-      </motion.div>
+      <div className="relative z-10">{children}</div>
     </motion.section>
   )
 }
@@ -197,7 +198,7 @@ export default function Settings() {
           if (!d) {
             if (DEBUG_SETTINGS) {
               console.warn(
-                '[Settings] business-info body is empty — open Network → /api/business-info (status, JSON, CORS)'
+                '[Settings] business-info body is empty â€” open Network â†’ /api/business-info (status, JSON, CORS)'
               )
             }
             return
@@ -415,12 +416,7 @@ export default function Settings() {
   const warnings = setupStatus?.warnings ?? []
 
   return (
-    <motion.div
-      className="mx-auto max-w-4xl space-y-8 pb-44 text-gray-900"
-      variants={staggerContainer}
-      initial="hidden"
-      animate="visible"
-    >
+    <div className="mx-auto max-w-4xl space-y-8 pb-44 text-gray-900">
       {/* Setup checklist: ensure AI has correct business info before taking calls */}
       <SettingsSection delay={0}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2">
@@ -428,7 +424,7 @@ export default function Settings() {
           Setup checklist
         </h2>
         <p className="text-gray-600 text-sm mb-4">
-          Complete these so your AI receptionist can give callers accurate info and handle bookings. Works for any business—restaurants, salons, HVAC, real estate, and more.
+          Complete these so your AI receptionist can give callers accurate info and handle bookings. Works for any businessâ€”restaurants, salons, HVAC, real estate, and more.
         </p>
         <ul className="space-y-2">
           {(
@@ -596,7 +592,7 @@ export default function Settings() {
             animate={{ opacity: 1 }}
             className="mt-2 text-xs font-medium text-primary-600"
           >
-            Playing {previewing} voice sample…
+            Playing {previewing} voice sampleâ€¦
           </motion.p>
         )}
       </SettingsSection>
@@ -628,7 +624,7 @@ export default function Settings() {
           className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
         >
           <CreditCard className="w-4 h-4" />
-          {portalLoading ? 'Opening…' : 'Manage subscription'}
+          {portalLoading ? 'Openingâ€¦' : 'Manage subscription'}
         </button>
         {billingError && (
           <p className="mt-3 text-sm text-red-600">{billingError}</p>
@@ -646,14 +642,14 @@ export default function Settings() {
         </button>
       </SettingsSection>
 
-      {/* Business info — any type: restaurant, salon, HVAC, real estate, etc. */}
+      {/* Business info â€” any type: restaurant, salon, HVAC, real estate, etc. */}
       <SettingsSection delay={4}>
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
           <Store className="w-6 h-6 text-primary-600" />
           Business info &amp; AI customizations
         </h2>
         <p className="text-gray-600 text-sm mb-6">
-          Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules so it can give accurate info and take bookings—for any business type (restaurant, nail salon, HVAC, real estate, etc.).
+          Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules so it can give accurate info and take bookingsâ€”for any business type (restaurant, nail salon, HVAC, real estate, etc.).
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -698,10 +694,10 @@ export default function Settings() {
             >
               <div className="min-w-0 flex-1">
                 <p className={`truncate text-sm ${hoursSummaryPreview ? 'font-medium text-gray-900' : 'text-gray-500'}`}>
-                  {hoursSummaryPreview || 'Set which days you’re open and your hours — opens the visual editor'}
+                  {hoursSummaryPreview || 'Set which days youâ€™re open and your hours â€” opens the visual editor'}
                 </p>
                 <p className="mt-1 text-xs text-gray-500">
-                  Schedule presets, copy weekdays, and live preview — saved when you click Apply in the editor, then Save changes below.
+                  Schedule presets, copy weekdays, and live preview â€” saved when you click Apply in the editor, then Save changes below.
                 </p>
               </div>
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-100 text-primary-700 transition group-hover:scale-105 group-hover:bg-primary-200">
@@ -770,7 +766,7 @@ export default function Settings() {
             />
             <p className="text-xs text-gray-500 mt-1">
               Use {'{business_name}'} for your business name and {'{receptionist_name}'} for the AI name above. If you
-              leave the name out of this text, we prepend “Hi, I&apos;m [name].” on the phone greeting automatically.
+              leave the name out of this text, we prepend â€œHi, I&apos;m [name].â€ on the phone greeting automatically.
             </p>
           </div>
           <ServicesEditor items={serviceItems} onChange={setServiceItems} />
@@ -789,7 +785,7 @@ export default function Settings() {
           Team roster
         </h2>
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
-          Everyone callers can book with—stylists, artists, providers, chairs. Add as many as you need; this list is only for
+          Everyone callers can book withâ€”stylists, artists, providers, chairs. Add as many as you need; this list is only for
           scheduling and AI context, not who receives live call transfers.
         </p>
         <StaffMembersSection
@@ -812,7 +808,7 @@ export default function Settings() {
         </h2>
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
           When a caller asks to speak with someone by name, the AI can transfer only to numbers you list here. Your plan limits
-          how many destinations you can add—not how many people are on your booking roster above.
+          how many destinations you can addâ€”not how many people are on your booking roster above.
         </p>
         <TransferTargetsSection
           transfers={transferTargets}
@@ -880,10 +876,10 @@ export default function Settings() {
               />
             )}
             <Save className="relative h-5 w-5" />
-            <span className="relative">{saving ? 'Saving…' : 'Save changes'}</span>
+            <span className="relative">{saving ? 'Savingâ€¦' : 'Save changes'}</span>
           </motion.button>
         </motion.div>
       </motion.div>
-    </motion.div>
+    </div>
   )
 }
