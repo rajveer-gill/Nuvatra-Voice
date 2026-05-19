@@ -405,7 +405,7 @@ export default function Settings() {
           animate={reduceMotion ? undefined : { opacity: [0.45, 1, 0.45] }}
           transition={{ duration: 1.6, repeat: Infinity }}
         >
-          Loading settings…
+          Loading settings...
         </motion.p>
       </motion.div>
     )
@@ -424,7 +424,7 @@ export default function Settings() {
           Setup checklist
         </h2>
         <p className="text-gray-600 text-sm mb-4">
-          Complete these so your AI receptionist can give callers accurate info and handle bookings. Works for any business—restaurants, salons, HVAC, real estate, and more.
+          Complete these so your AI receptionist can give callers accurate info and handle bookings. Works for any business: restaurants, salons, HVAC, real estate, and more.
         </p>
         <ul className="space-y-2">
           {(
@@ -592,7 +592,7 @@ export default function Settings() {
             animate={{ opacity: 1 }}
             className="mt-2 text-xs font-medium text-primary-600"
           >
-            Playing {previewing} voice sample…
+            Playing {previewing} voice sample...
           </motion.p>
         )}
       </SettingsSection>
@@ -624,7 +624,7 @@ export default function Settings() {
           className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
         >
           <CreditCard className="w-4 h-4" />
-          {portalLoading ? 'Opening…' : 'Manage subscription'}
+          {portalLoading ? 'Opening...' : 'Manage subscription'}
         </button>
         {billingError && (
           <p className="mt-3 text-sm text-red-600">{billingError}</p>
@@ -649,7 +649,7 @@ export default function Settings() {
           Business info &amp; AI customizations
         </h2>
         <p className="text-gray-600 text-sm mb-6">
-          Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules so it can give accurate info and take bookings—for any business type (restaurant, nail salon, HVAC, real estate, etc.).
+          Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules so it can give accurate info and take bookings for any business type (restaurant, nail salon, HVAC, real estate, etc.).
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -694,10 +694,10 @@ export default function Settings() {
             >
               <div className="min-w-0 flex-1">
                 <p className={`truncate text-sm ${hoursSummaryPreview ? 'font-medium text-gray-900' : 'text-gray-500'}`}>
-                  {hoursSummaryPreview || 'Set which days you're open and your hours — opens the visual editor'}
+                  {hoursSummaryPreview || "Set which days you're open and your hours (opens the visual editor)"}
                 </p>
                 <p className="mt-1 text-xs text-gray-500">
-                  Schedule presets, copy weekdays, and live preview — saved when you click Apply in the editor, then Save changes below.
+                  Schedule presets, copy weekdays, and live preview. Saved when you click Apply in the editor, then Save changes below.
                 </p>
               </div>
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-100 text-primary-700 transition group-hover:scale-105 group-hover:bg-primary-200">
@@ -876,7 +876,7 @@ export default function Settings() {
               />
             )}
             <Save className="relative h-5 w-5" />
-            <span className="relative">{saving ? 'Saving…' : 'Save changes'}</span>
+            <span className="relative">{saving ? 'Saving...' : 'Save changes'}</span>
           </motion.button>
         </motion.div>
       </motion.div>
