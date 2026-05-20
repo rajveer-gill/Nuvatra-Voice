@@ -200,7 +200,7 @@ export default function DashboardPage() {
               <p className="mt-3 text-center text-sm leading-relaxed text-zinc-400">
                 {deniedKind === 'verification_failed'
                   ? 'We could not confirm your account with the server. Check your connection and try again.'
-                  : 'Your account is not linked to an active business. Access is granted when your administrator creates your business and sends you an invite. If you were invited, open the link from that email. If your access was removed, contact your administrator.'}
+                  : 'Your sign-in is not linked to a business yet (this is not a trial or billing issue). Ask your administrator to resend the invite, then sign out and open the link from that email. If you already signed up, use the same email address that was invited.'}
               </p>
               <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
                 {deniedKind === 'verification_failed' && (

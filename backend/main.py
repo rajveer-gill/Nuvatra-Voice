@@ -2674,6 +2674,99 @@ class AdminResendInviteRequest(BaseModel):
     email: str
 
 
+def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
+    """
+    Queue pending invite by email and either re-link an existing Clerk user or send a new invitation.
+  """
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return {"invite_sent": False, "user_relinked": False, "pending_invite_stored": False}
+    db_tenant_invite_upsert(email, tenant_id)
+    invite_sent = False
+    user_relinked = False
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if not clerk_secret:
+        return {"invite_sent": False, "user_relinked": False, "pending_invite_stored": True}
+    import httpx
+    headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+    existing_user_id = None
+    try:
+        email_q = quote(email, safe="")
+        users_resp = httpx.get(
+            f"https://api.clerk.com/v1/users?email_address[]={email_q}",
+            headers=headers,
+            timeout=10.0,
+        )
+        if users_resp.status_code < 400:
+            users = users_resp.json()
+            user_list = users if isinstance(users, list) else users.get("data", [])
+            if user_list:
+                existing_user_id = user_list[0]["id"]
+    except Exception as e:
+        print(f"[Admin] Error looking up Clerk user: {e}")
+    if existing_user_id:
+        try:
+            httpx.patch(
+                f"https://api.clerk.com/v1/users/{existing_user_id}",
+                headers=headers,
+                json={"public_metadata": {"tenant_id": tenant_id}},
+                timeout=10.0,
+            )
+            db_tenant_member_add(existing_user_id, tenant_id)
+            db_tenant_invite_delete(email)
+            user_relinked = True
+            print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant_id}")
+        except Exception as e:
+            print(f"[Admin] Error re-linking user: {e}")
+    else:
+        try:
+            resp = httpx.post(
+                "https://api.clerk.com/v1/invitations",
+                headers=headers,
+                json={
+                    "email_address": email,
+                    "public_metadata": {"tenant_id": tenant_id},
+                    "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/",
+                },
+                timeout=10.0,
+            )
+            if resp.status_code < 400:
+                invite_sent = True
+            else:
+                print(f"[Admin] Clerk invite failed: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"[Admin] Clerk invite error: {e}")
+    return {
+        "invite_sent": invite_sent,
+        "user_relinked": user_relinked,
+        "pending_invite_stored": True,
+    }
+
+
+def _extend_trial_through_exempt(tenant_id: str, exempt_until: datetime) -> None:
+    """Keep trial_ends_at at or past billing_exempt_until so admin/client dates stay aligned."""
+    tenant = db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        return
+    now = datetime.now(timezone.utc)
+    trial_ends_at = tenant.get("trial_ends_at")
+    try:
+        if trial_ends_at:
+            trial_dt = (
+                datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00"))
+                if isinstance(trial_ends_at, str)
+                else trial_ends_at
+            )
+            if trial_dt.tzinfo is None:
+                trial_dt = trial_dt.replace(tzinfo=timezone.utc)
+        else:
+            trial_dt = now
+    except Exception:
+        trial_dt = now
+    if exempt_until > trial_dt:
+        db_tenant_extend_trial(tenant_id, exempt_until)
+
+
 class AdminTenantTwilioUpdate(BaseModel):
     twilio_phone_number: str
 
@@ -2716,68 +2809,9 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
     cfg = _default_client_config_data(req.client_id, tenant.get("plan") or "free")
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-    # Link the user to this tenant via Clerk.
-    # If the user already has a Clerk account (e.g. re-adding a previously removed client),
-    # update their metadata and add them to tenant_members directly.
-    # If the user is new, send a Clerk invitation.
-    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
-    invite_sent = False
-    user_relinked = False
-    if clerk_secret:
-        import httpx
-        headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
-        # Check if user already exists in Clerk
-        existing_user_id = None
-        try:
-            email_q = quote(req.email.strip(), safe="")
-            users_resp = httpx.get(
-                f"https://api.clerk.com/v1/users?email_address[]={email_q}",
-                headers=headers,
-                timeout=10.0,
-            )
-            if users_resp.status_code < 400:
-                users = users_resp.json()
-                user_list = users if isinstance(users, list) else users.get("data", [])
-                if user_list:
-                    existing_user_id = user_list[0]["id"]
-        except Exception as e:
-            print(f"[Admin] Error looking up Clerk user: {e}")
-
-        if existing_user_id:
-            # User already exists — re-link them directly
-            try:
-                httpx.patch(
-                    f"https://api.clerk.com/v1/users/{existing_user_id}",
-                    headers=headers,
-                    json={"public_metadata": {"tenant_id": tenant["id"]}},
-                    timeout=10.0,
-                )
-                db_tenant_member_add(existing_user_id, tenant["id"])
-                db_tenant_invite_delete(req.email)
-                user_relinked = True
-                print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant['id']}")
-            except Exception as e:
-                print(f"[Admin] Error re-linking user: {e}")
-        else:
-            # New user — send Clerk invitation
-            db_tenant_invite_upsert(req.email, tenant["id"])
-            try:
-                resp = httpx.post(
-                    "https://api.clerk.com/v1/invitations",
-                    headers=headers,
-                    json={
-                        "email_address": req.email,
-                        "public_metadata": {"tenant_id": tenant["id"]},
-                        "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/",
-                    },
-                    timeout=10.0,
-                )
-                if resp.status_code >= 400:
-                    print(f"[Admin] Clerk invite failed: {resp.status_code} {resp.text}")
-                else:
-                    invite_sent = True
-            except Exception as e:
-                print(f"[Admin] Clerk invite error: {e}")
+    link = _clerk_link_email_to_tenant(req.email, tenant["id"])
+    invite_sent = bool(link.get("invite_sent"))
+    user_relinked = bool(link.get("user_relinked"))
     audit_log("admin", "tenant_created", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant["id"], client_id=tenant["client_id"], details={"name": req.name}, request=request)
     return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked}
 
@@ -2798,29 +2832,9 @@ async def admin_resend_invite(
     email = (req.email or "").strip()
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email required")
-    db_tenant_invite_upsert(email, tenant_id)
-    invite_sent = False
-    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
-    if clerk_secret:
-        import httpx
-        headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
-        try:
-            resp = httpx.post(
-                "https://api.clerk.com/v1/invitations",
-                headers=headers,
-                json={
-                    "email_address": email,
-                    "public_metadata": {"tenant_id": tenant_id},
-                    "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/",
-                },
-                timeout=10.0,
-            )
-            if resp.status_code < 400:
-                invite_sent = True
-            else:
-                print(f"[Admin] Clerk resend invite failed: {resp.status_code} {resp.text}")
-        except Exception as e:
-            print(f"[Admin] Clerk resend invite error: {e}")
+    link = _clerk_link_email_to_tenant(email, tenant_id)
+    invite_sent = bool(link.get("invite_sent"))
+    user_relinked = bool(link.get("user_relinked"))
     audit_log(
         "admin",
         "tenant_invite_resent",
@@ -2831,7 +2845,12 @@ async def admin_resend_invite(
         details={"email": email, "invite_sent": invite_sent},
         request=request,
     )
-    return {"success": True, "invite_sent": invite_sent, "pending_invite_stored": True}
+    return {
+        "success": True,
+        "invite_sent": invite_sent,
+        "user_relinked": user_relinked,
+        "pending_invite_stored": True,
+    }
 
 
 @app.get("/api/admin/tenants")
@@ -2978,6 +2997,7 @@ async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, 
     if req.extend_months is not None and req.extend_months >= 0:
         exempt_until = now + timedelta(days=30 * req.extend_months)
         if db_tenant_set_billing_exempt(tenant_id, exempt_until):
+            _extend_trial_through_exempt(tenant_id, exempt_until)
             audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "extend_months", "months": req.extend_months, "exempt_until": exempt_until.isoformat()}, request=request)
             return {"success": True, "billing_exempt_until": exempt_until.isoformat()}
     if req.exempt_until:
@@ -2986,6 +3006,7 @@ async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, 
             if exempt_dt.tzinfo is None:
                 exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
             if db_tenant_set_billing_exempt(tenant_id, exempt_dt):
+                _extend_trial_through_exempt(tenant_id, exempt_dt)
                 audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "exempt_until", "exempt_until": exempt_dt.isoformat()}, request=request)
                 return {"success": True, "billing_exempt_until": exempt_dt.isoformat()}
         except ValueError as e:
@@ -2993,16 +3014,33 @@ async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, 
     raise HTTPException(status_code=400, detail="Provide exempt_until, extend_months, or extend_trial_months")
 
 @app.post("/api/admin/tenants/{tenant_id}/members")
-async def admin_add_tenant_member(tenant_id: str, request: Request, email: str = Form(...), admin_user_id: str = Depends(require_admin)):
-    """Manually add a Clerk user to a tenant by linking after sign-up. Use Clerk invite for new users."""
+async def admin_add_tenant_member(
+    tenant_id: str,
+    req: AdminResendInviteRequest,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
+    """Link a Clerk user to a tenant by email (re-link existing account or send invite)."""
     if not USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    audit_log("admin", "tenant_member_add_attempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"email": email}, request=request)
-    # We would need Clerk API to look up user_id by email - skip for now; invite flow is primary
-    return {"success": False, "message": "Use Clerk Invitations for new users; metadata links tenant"}
+    email = (req.email or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    link = _clerk_link_email_to_tenant(email, tenant_id)
+    audit_log(
+        "admin",
+        "tenant_member_add_attempt",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"email": email, **link},
+        request=request,
+    )
+    return {"success": True, **link}
 
 @app.post("/api/conversation", response_model=ConversationResponse)
 async def handle_conversation(request: ConversationRequest, _: None = Depends(require_active_subscription)):

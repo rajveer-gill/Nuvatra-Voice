@@ -114,6 +114,8 @@ export default function AdminPage() {
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [twilioDraft, setTwilioDraft] = useState<Record<string, string>>({})
   const [twilioSaving, setTwilioSaving] = useState<string | null>(null)
+  const [inviteEmailByTenant, setInviteEmailByTenant] = useState<Record<string, string>>({})
+  const [resendingInvite, setResendingInvite] = useState<string | null>(null)
 
   const listContainer = {
     hidden: {},
@@ -262,6 +264,36 @@ export default function AdminPage() {
       setError(err.response?.data?.detail || 'Failed to remove tenant')
     } finally {
       setDeleting(null)
+    }
+  }
+
+  const handleResendInvite = async (tenantId: string) => {
+    const email = (inviteEmailByTenant[tenantId] || '').trim()
+    if (!email || !email.includes('@')) {
+      setError('Enter the client email address to resend or link the invite.')
+      return
+    }
+    setResendingInvite(tenantId)
+    setError(null)
+    setSuccess(null)
+    try {
+      const { data } = await api.post<{
+        invite_sent?: boolean
+        user_relinked?: boolean
+        pending_invite_stored?: boolean
+      }>(`/api/admin/tenants/${tenantId}/resend-invite`, { email })
+      if (data.user_relinked) {
+        setSuccess('Existing account linked to this business. They can refresh the dashboard.')
+      } else if (data.invite_sent) {
+        setSuccess('Invitation email sent. They should open that link to finish access.')
+      } else {
+        setSuccess('Pending invite saved. Resend may require Clerk dashboard if email was not sent.')
+      }
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setError(err.response?.data?.detail || 'Failed to resend invite')
+    } finally {
+      setResendingInvite(null)
     }
   }
 
@@ -511,8 +543,33 @@ export default function AdminPage() {
                             {t.billing_exempt_until && <>Exempt until: {formatTrialEndDate(t.billing_exempt_until)}</>}
                           </div>
                         )}
+                        <div className="mt-3 flex max-w-xl flex-wrap items-end gap-2">
+                          <div className="min-w-[200px] flex-1">
+                            <label className="mb-1 block text-xs font-medium text-zinc-500">
+                              Client email (resend invite / link account)
+                            </label>
+                            <input
+                              type="email"
+                              value={inviteEmailByTenant[t.id] ?? ''}
+                              onChange={(e) =>
+                                setInviteEmailByTenant((d) => ({ ...d, [t.id]: e.target.value }))
+                              }
+                              placeholder="client@example.com"
+                              className={inputClass}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleResendInvite(t.id)}
+                            disabled={resendingInvite === t.id}
+                            className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-200 motion-safe-transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {resendingInvite === t.id ? 'Sending...' : 'Resend invite'}
+                          </button>
+                        </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
+
                         <div className="flex flex-wrap items-center gap-2">
                           <select
                             value={exemptAction[t.id] || ''}
