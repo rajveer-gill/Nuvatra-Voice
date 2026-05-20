@@ -154,6 +154,7 @@ def init_db() -> bool:
             ("billing_exempt_until", "TIMESTAMPTZ"),
             ("business_vertical", "TEXT"),
             ("billing_period_anchor_at", "TIMESTAMPTZ"),
+            ("business_config", "JSONB"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {typ}")
@@ -835,6 +836,65 @@ def db_tenant_get_by_client_id(client_id: str) -> Optional[dict]:
     if not row:
         return None
     return _row_to_tenant(row)
+
+
+def _jsonb_to_dict(val: Any) -> Optional[dict]:
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def db_tenant_get_business_config(client_id: str) -> Optional[dict]:
+    """Load persisted business config (voice, greeting, services, etc.) for a tenant."""
+    cid = (client_id or "").strip()
+    if not cid:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT business_config FROM tenants WHERE client_id = %s LIMIT 1", (cid,))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        return _jsonb_to_dict(row[0])
+    except Exception as e:
+        print(f"[DB] Failed to get business_config for {cid}: {e}")
+        return None
+
+
+def db_tenant_set_business_config(client_id: str, config: dict) -> bool:
+    """Persist business config JSON for a tenant (survives Render redeploys)."""
+    cid = (client_id or "").strip()
+    if not cid or not isinstance(config, dict):
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tenants SET business_config = %s::jsonb WHERE client_id = %s",
+            (json.dumps(config), cid),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to set business_config for {cid}: {e}")
+        return False
+
 
 def db_audit_append(
     actor_type: str,

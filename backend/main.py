@@ -153,6 +153,19 @@ def _settings_load_debug_enabled() -> bool:
     return os.getenv("SETTINGS_LOAD_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
+def _greeting_debug_enabled() -> bool:
+    """GREETING_DEBUG=1 or SETTINGS_LOAD_DEBUG=1 — logs greeting resolution on calls and Settings saves."""
+    return _settings_load_debug_enabled() or os.getenv("GREETING_DEBUG", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+RECORDING_DISCLOSURE_TEXT = "This call may be recorded for quality and training."
+DEFAULT_GREETING_TEMPLATE = "Thank you for calling {business_name}. How can I help you today?"
+
+
 def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) -> None:
     if not _settings_load_debug_enabled():
         return
@@ -165,13 +178,18 @@ def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) ->
 
     logger.info(
         "settings_load_debug GET /api/business-info client_id_prefix=%s response_keys=%s "
-        "services_ty=%s specials_ty=%s reservation_rules_ty=%s staff_ty=%s",
+        "services_ty=%s specials_ty=%s reservation_rules_ty=%s staff_ty=%s "
+        "config_source=%s greeting_len=%s voice=%s receptionist_set=%s",
         prefix,
         sorted(out.keys()),
         _tn("services"),
         _tn("specials"),
         _tn("reservation_rules"),
         _tn("staff"),
+        client_config_source(str(cid)) if cid else "none",
+        len((out.get("greeting") or "")),
+        out.get("voice"),
+        bool((out.get("receptionist_name") or "").strip()),
     )
 
 
@@ -530,6 +548,8 @@ try:
         db_tenant_set_twilio_phone,
         db_tenant_get_by_stripe_subscription_id,
         db_tenant_get_by_client_id,
+        db_tenant_get_business_config,
+        db_tenant_set_business_config,
         db_usage_get,
         db_usage_increment_voice,
         db_usage_increment_sms,
@@ -698,48 +718,111 @@ def _normalize_rule_entries(raw) -> List[dict]:
     return out[:100]
 
 
-def load_client_config(client_id: Optional[str] = None):
-    """Load business config from clients/<client_id>/config.json. Uses request-scoped client_id if not passed."""
-    cid = (client_id or get_db_client_id()).strip()
-    if not cid:
-        return None
+def _config_data_to_business_info(data: dict) -> dict:
+    """Normalize raw config.json / DB business_config dict to get_business_info() shape."""
+    forwarding = (data.get("forwarding_phone") or "")
+    if not forwarding and data.get("locations"):
+        forwarding = data["locations"][0].get("forwarding_phone", "")
+    _departments = data.get("departments")
+    if not isinstance(_departments, list):
+        _departments = []
+    return {
+        "name": data.get("business_name") or data.get("name") or "",
+        "hours": data.get("hours", ""),
+        "phone": data.get("phone", ""),
+        "forwarding_phone": forwarding,
+        "email": data.get("email", ""),
+        "address": data.get("address", ""),
+        "departments": _departments,
+        "menu_link": data.get("menu_link", ""),
+        "services": _normalize_service_entries(data.get("services", [])),
+        "specials": _normalize_special_entries(data.get("specials", [])),
+        "reservation_rules": _normalize_rule_entries(data.get("reservation_rules", [])),
+        "staff": data.get("staff", []),
+        "transfer_targets": data.get("transfer_targets", []),
+        "locations": data.get("locations", []),
+        "greeting": data.get("greeting", ""),
+        "plan": data.get("plan", "starter"),
+        "voice": data.get("voice", "fable"),
+        "speed": float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0,
+        "receptionist_name": data.get("receptionist_name", ""),
+        "business_type": data.get("business_type", ""),
+    }
+
+
+def client_config_source(cid: str) -> str:
+    """Where business config was loaded from: database, file, or none."""
+    c = (cid or "").strip()
+    if not c:
+        return "none"
+    if USE_DB:
+        try:
+            if db_tenant_get_business_config(c):
+                return "database"
+        except Exception:
+            pass
+    config_path = PROJECT_ROOT / "clients" / c / "config.json"
+    if config_path.exists():
+        return "file"
+    return "none"
+
+
+def _read_raw_client_config(cid: str) -> Optional[dict]:
+    """Load raw config from PostgreSQL (production) then clients/<cid>/config.json (local dev)."""
+    raw = None
+    if USE_DB:
+        try:
+            raw = db_tenant_get_business_config(cid)
+        except Exception as e:
+            logger.warning("business_config db read failed client_id=%s: %s", cid, e)
+    if raw is not None:
+        return raw
     config_path = PROJECT_ROOT / "clients" / cid / "config.json"
     if not config_path.exists():
-        # Normal on multi-tenant hosts until Settings PATCH creates the file; DB/minimal tenant fallback applies.
         logger.debug("client_config_missing path=%s client_id=%s", config_path, cid)
         return None
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Normalize to get_business_info() shape (do not merge BUSINESS_FORWARDING_PHONE — multi-tenant leak)
-        forwarding = (data.get("forwarding_phone") or "")
-        if not forwarding and data.get("locations"):
-            forwarding = data["locations"][0].get("forwarding_phone", "")
-        _departments = data.get("departments")
-        if not isinstance(_departments, list):
-            _departments = []
-        info = {
-            "name": data.get("business_name") or data.get("name") or "",
-            "hours": data.get("hours", ""),
-            "phone": data.get("phone", ""),
-            "forwarding_phone": forwarding,
-            "email": data.get("email", ""),
-            "address": data.get("address", ""),
-            "departments": _departments,
-            "menu_link": data.get("menu_link", ""),
-            "services": _normalize_service_entries(data.get("services", [])),
-            "specials": _normalize_special_entries(data.get("specials", [])),
-            "reservation_rules": _normalize_rule_entries(data.get("reservation_rules", [])),
-            "staff": data.get("staff", []),
-            "transfer_targets": data.get("transfer_targets", []),
-            "locations": data.get("locations", []),
-            "greeting": data.get("greeting", ""),
-            "plan": data.get("plan", "starter"),
-            "voice": data.get("voice", "fable"),
-            "speed": float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0,
-            "receptionist_name": data.get("receptionist_name", ""),
-            "business_type": data.get("business_type", ""),
-        }
+            raw = json.load(f)
+        if USE_DB and raw:
+            try:
+                db_tenant_set_business_config(cid, raw)
+            except Exception as e:
+                logger.warning("business_config file->db migrate failed client_id=%s: %s", cid, e)
+        return raw
+    except Exception as e:
+        logger.warning("Failed to read client config file client_id=%s: %s", cid, e)
+        return None
+
+
+def save_raw_client_config(cid: str, data: dict) -> None:
+    """Persist business config to DB (required on Render) and optionally to clients/<cid>/config.json."""
+    db_ok = True
+    if USE_DB:
+        db_ok = bool(db_tenant_set_business_config(cid, data))
+        if not db_ok:
+            raise HTTPException(status_code=500, detail="Failed to save settings to database")
+    config_path = PROJECT_ROOT / "clients" / cid / "config.json"
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        if not USE_DB:
+            raise HTTPException(status_code=500, detail=f"Failed to write config: {e}") from e
+        logger.warning("config file write failed client_id=%s (saved to db): %s", cid, e)
+
+
+def load_client_config(client_id: Optional[str] = None):
+    """Load business config for client_id (DB first, then on-disk file)."""
+    cid = (client_id or get_db_client_id()).strip()
+    if not cid:
+        return None
+    raw = _read_raw_client_config(cid)
+    if not raw:
+        return None
+    try:
+        info = _config_data_to_business_info(raw)
         print(f"Loaded client config: {cid} ({info['name']})")
         return info
     except Exception as e:
@@ -778,7 +861,7 @@ def _minimal_business_info_from_tenant_dict(tenant: dict) -> dict:
     plan = tenant.get("plan") or "starter"
     bv = (tenant.get("business_vertical") or "salon_chair").strip()
     return {
-        "name": "",
+        "name": (tenant.get("name") or "").strip(),
         "hours": "",
         "phone": (tenant.get("twilio_phone_number") or "").strip(),
         "forwarding_phone": "",
@@ -846,6 +929,8 @@ def business_info_for_dashboard(tenant: Optional[dict]) -> dict:
             out = dict(cfg)
             if not (out.get("phone") or "").strip():
                 out["phone"] = (tenant.get("twilio_phone_number") or "").strip()
+            if not (out.get("name") or "").strip():
+                out["name"] = (tenant.get("name") or "").strip()
             bv = (tenant.get("business_vertical") or "salon_chair").strip()
             out["business_vertical"] = bv
             out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
@@ -911,6 +996,8 @@ def get_business_info() -> dict:
                 bv = (t.get("business_vertical") or "salon_chair").strip()
                 out["business_vertical"] = bv
                 out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
+                if not (out.get("name") or "").strip():
+                    out["name"] = (t.get("name") or "").strip()
     return out
 
 def get_tts_voice() -> str:
@@ -952,18 +1039,111 @@ def _format_greeting_template(raw: str, info: dict) -> str:
         return out
 
 
+def _resolve_greeting_business_name(info: dict, tenant: Optional[dict] = None) -> str:
+    """Business name for {business_name} — config first, then tenant row from admin."""
+    name = (info.get("name") or "").strip()
+    if name:
+        return name
+    if tenant:
+        name = (tenant.get("name") or "").strip()
+        if name:
+            return name
+    cid = get_db_client_id()
+    if USE_DB and cid:
+        t = db_tenant_get_by_client_id(cid)
+        if t:
+            name = (t.get("name") or "").strip()
+            if name:
+                return name
+    return "us"
+
+
+def build_phone_greeting_payload(info: dict, tenant: Optional[dict] = None) -> dict:
+    """
+    Build phone greeting text: main message first, recording disclosure always last when enabled.
+    Returns a debug-friendly dict (used by get_greeting_text and GET /api/greeting-preview).
+    """
+    cid = (get_db_client_id() or (tenant or {}).get("client_id") or "").strip()
+    raw_saved = (info.get("greeting") or "").strip()
+    used_default_template = not bool(raw_saved)
+    raw_template = raw_saved if raw_saved else DEFAULT_GREETING_TEMPLATE
+
+    business_name = _resolve_greeting_business_name(info, tenant)
+    receptionist_name = (info.get("receptionist_name") or "").strip()
+    fmt_info = {**info, "name": business_name, "receptionist_name": receptionist_name}
+    main_greeting = _format_greeting_template(raw_template, fmt_info).strip()
+
+    prepended_receptionist = False
+    if receptionist_name and receptionist_name.lower() not in main_greeting.lower():
+        main_greeting = f"Hi, I'm {receptionist_name}. {main_greeting}"
+        prepended_receptionist = True
+
+    tenant_rec = tenant if tenant is not None else _tenant_for_call_recording()
+    recording_enabled = _call_recording_enabled_for_tenant(tenant_rec)
+    recording_disclosure = RECORDING_DISCLOSURE_TEXT if recording_enabled else ""
+    spoken_text = f"{main_greeting} {recording_disclosure}".strip() if recording_disclosure else main_greeting
+
+    warnings: List[str] = []
+    if "{receptionist_name}" in raw_template and not receptionist_name:
+        warnings.append("Greeting uses {receptionist_name} but AI receptionist name is empty in Settings.")
+    if "{business_name}" in raw_template and business_name == "us" and not (info.get("name") or "").strip():
+        warnings.append("Greeting uses {business_name} but business name is empty in Settings (using fallback 'us').")
+
+    return {
+        "spoken_text": spoken_text,
+        "main_greeting": main_greeting,
+        "recording_disclosure": recording_disclosure or None,
+        "used_default_template": used_default_template,
+        "raw_greeting_saved": raw_saved,
+        "prepended_receptionist": prepended_receptionist,
+        "placeholders": {
+            "business_name": business_name,
+            "receptionist_name": receptionist_name,
+        },
+        "recording_enabled": recording_enabled,
+        "config_source": client_config_source(cid) if cid else "none",
+        "client_id": cid,
+        "voice": (info.get("voice") or "fable") or "fable",
+        "warnings": warnings,
+    }
+
+
+def _log_greeting_debug(event: str, payload: dict, *, call_sid: str = "", cache_hit: Optional[bool] = None) -> None:
+    """Structured greeting logs (Render: GREETING_DEBUG=1 or OBS_TRACE_VOICE=1)."""
+    cid = (payload.get("client_id") or "")[:12]
+    fields = {
+        "client_id_prefix": cid or "(none)",
+        "config_source": payload.get("config_source"),
+        "used_default_template": payload.get("used_default_template"),
+        "recording_enabled": payload.get("recording_enabled"),
+        "prepended_receptionist": payload.get("prepended_receptionist"),
+        "raw_greeting_len": len(payload.get("raw_greeting_saved") or ""),
+        "spoken_len": len(payload.get("spoken_text") or ""),
+        "business_name": (payload.get("placeholders") or {}).get("business_name"),
+        "receptionist_name": (payload.get("placeholders") or {}).get("receptionist_name"),
+        "voice": payload.get("voice"),
+    }
+    if call_sid:
+        fields["call_sid"] = call_sid
+    if cache_hit is not None:
+        fields["cache_hit"] = cache_hit
+    if payload.get("warnings"):
+        fields["warnings"] = "; ".join(payload["warnings"])
+    # Spoken text is not secret — needed to verify placeholders on production calls.
+    spoken = (payload.get("spoken_text") or "")[:500]
+    fields["spoken_preview"] = spoken
+    voice_trace(event, **fields)
+    if _greeting_debug_enabled():
+        voice_info(event, **fields)
+
+
 def get_greeting_text() -> str:
     """Greeting for phone (uses client config if set)."""
     info = get_business_info()
-    raw = info.get("greeting") or "Thank you for calling {business_name}. How can I help you today?"
-    receptionist_name = (info.get("receptionist_name") or "").strip()
-    base = _format_greeting_template(raw, info).strip()
-    # When a receptionist name is configured, say it on answer unless the custom greeting already uses it.
-    if receptionist_name and receptionist_name.lower() not in base.lower():
-        base = f"Hi, I'm {receptionist_name}. {base}"
-    if _call_recording_enabled_for_tenant(_tenant_for_call_recording()):
-        base = f"{base.strip()} This call may be recorded for quality and training."
-    return base
+    tenant = _tenant_for_call_recording()
+    payload = build_phone_greeting_payload(info, tenant)
+    _log_greeting_debug("greeting_built", payload)
+    return payload["spoken_text"]
 
 class ConversationRequest(BaseModel):
     message: str
@@ -2802,13 +2982,8 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
     tenant = db_tenant_create(req.client_id, req.name, req.twilio_phone_number, "free", bv)
     if not tenant:
         raise HTTPException(status_code=409, detail="Tenant already exists or create failed")
-    # Create config with only admin-provided info; client fills the rest in Settings
-    client_dir = PROJECT_ROOT / "clients" / req.client_id
-    client_dir.mkdir(parents=True, exist_ok=True)
-    config_path = client_dir / "config.json"
     cfg = _default_client_config_data(req.client_id, tenant.get("plan") or "free")
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    save_raw_client_config(req.client_id, cfg)
     link = _clerk_link_email_to_tenant(req.email, tenant["id"])
     invite_sent = bool(link.get("invite_sent"))
     user_relinked = bool(link.get("user_relinked"))
@@ -3740,6 +3915,21 @@ async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_
     _settings_load_debug_log_business_info(tenant, out)
     return out
 
+
+@app.get("/api/greeting-preview")
+async def api_greeting_preview(tenant: Optional[dict] = Depends(require_active_subscription)):
+    """
+    Return the exact phone greeting text (placeholders resolved, recording line last).
+    Use in Settings to verify what callers will hear before placing a test call.
+    """
+    tid = tenant or {}
+    cid = (tid.get("client_id") or "").strip()
+    if cid:
+        set_request_client_id(cid)
+    info = business_info_for_dashboard(tid) if tid else get_business_info()
+    payload = build_phone_greeting_payload(info, tid or _tenant_for_call_recording())
+    return payload
+
 # Required and recommended fields so the AI receptionist can relay accurate info (any business type)
 # Setup checklist labels must stay in sync with Settings.tsx checklist rows.
 SETUP_REQUIRED_FIELDS = [
@@ -3944,22 +4134,14 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     cid = ((tid.get("client_id") or "").strip() or get_db_client_id()).strip()
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
-    config_path = PROJECT_ROOT / "clients" / cid / "config.json"
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read config: {e}")
-    else:
-        # Use JWT-resolved tenant (always present here); do not require DB lookup — fails when USE_DB is off or DB is down.
+    data = _read_raw_client_config(cid)
+    if data is None:
         plan = tid.get("plan") or "free"
         if USE_DB:
             trow = db_tenant_get_by_client_id(cid)
             if trow and trow.get("plan"):
                 plan = trow.get("plan") or plan
         data = _default_client_config_data(cid, plan)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
     if update.name is not None:
         data["business_name"] = update.name
     if update.hours is not None:
@@ -4044,12 +4226,18 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
             if msg.startswith("Plan allows"):
                 raise HTTPException(status_code=403, detail=msg) from e
             raise HTTPException(status_code=400, detail=msg) from e
-    try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
+    save_raw_client_config(cid, data)
+    if _greeting_debug_enabled():
+        voice_info(
+            "greeting_settings_saved",
+            client_id_prefix=cid[:12],
+            config_source="database" if USE_DB else "file",
+            fields=[k for k in update.model_dump(exclude_none=True)],
+            greeting_len=len(data.get("greeting") or ""),
+            voice=data.get("voice"),
+            receptionist_set=bool((data.get("receptionist_name") or "").strip()),
+            business_name_len=len(data.get("business_name") or data.get("name") or ""),
+        )
     audit_log("user", "business_info_updated", resource_type="config", client_id=cid, details={"fields": [k for k in update.model_dump(exclude_none=True)]}, request=request)
     resp_tenant: dict = {**tid, "client_id": cid}
     if "plan" not in resp_tenant or not resp_tenant.get("plan"):
@@ -4360,14 +4548,20 @@ async def _schedule_recording_summary(call_sid: str, client_id: str, recording_u
 
 
 def _greeting_audio_cache_key(client_id: str) -> tuple:
-    """Cache busts when greeting copy, receptionist name, or recording disclosure changes."""
+    """Cache busts when greeting copy, voice, speed, receptionist name, or recording disclosure changes."""
     info = get_business_info()
+    try:
+        speed_key = round(float(info.get("speed", 1.0)), 2)
+    except (TypeError, ValueError):
+        speed_key = 1.0
     return (
         client_id,
         _call_recording_enabled_for_tenant(_tenant_for_call_recording()),
         (info.get("receptionist_name") or "").strip(),
         (info.get("greeting") or "").strip(),
         (info.get("name") or "").strip(),
+        (info.get("voice") or "fable").strip(),
+        speed_key,
     )
 
 
@@ -4377,9 +4571,14 @@ async def get_greeting_audio(request: Request):
     global greeting_audio_cache
     client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
+    call_sid = request.query_params.get("call_sid") or ""
     cache_key = _greeting_audio_cache_key(client_id)
     cached = greeting_audio_cache.get(cache_key)
+    info = get_business_info()
+    tenant = _tenant_for_call_recording()
+    preview_payload = build_phone_greeting_payload(info, tenant)
     if cached:
+        _log_greeting_debug("greeting_audio_cache_hit", preview_payload, call_sid=call_sid, cache_hit=True)
         return Response(
             content=cached,
             media_type="audio/mpeg",
@@ -4391,7 +4590,8 @@ async def get_greeting_audio(request: Request):
         )
     try:
         voice = get_tts_voice()
-        greeting_text = add_sentence_pauses(get_greeting_text())
+        greeting_text = add_sentence_pauses(preview_payload["spoken_text"])
+        _log_greeting_debug("greeting_audio_generating", preview_payload, call_sid=call_sid, cache_hit=False)
         greeting_audio = client.audio.speech.create(
             model="tts-1-hd",
             voice=voice,
@@ -4400,7 +4600,13 @@ async def get_greeting_audio(request: Request):
         )
         data = greeting_audio.content
         greeting_audio_cache[cache_key] = data
-        print(f"🎵 Greeting audio generated for {client_id} (voice={voice})")
+        voice_info(
+            "greeting_audio_generated",
+            client_id_prefix=(client_id or "")[:12],
+            voice=voice,
+            bytes=len(data),
+            call_sid=call_sid or "",
+        )
         return Response(
             content=data,
             media_type="audio/mpeg",

@@ -126,6 +126,15 @@ export default function Settings() {
   const [staff, setStaff] = useState<StaffRow[]>([])
   const [transferTargets, setTransferTargets] = useState<TransferRow[]>([])
   const [transferMax, setTransferMax] = useState<number | null>(null)
+  const [greetingPreview, setGreetingPreview] = useState<{
+    spoken_text: string
+    main_greeting: string
+    recording_disclosure: string | null
+    config_source: string
+    warnings?: string[]
+    placeholders?: { business_name?: string; receptionist_name?: string }
+  } | null>(null)
+  const [greetingPreviewLoading, setGreetingPreviewLoading] = useState(false)
   const [automations, setAutomations] = useState<{ id: number; trigger: string; template: string; enabled: boolean }[]>([])
   const [smsAutomationsMax, setSmsAutomationsMax] = useState<number | null>(null)
   const [setupStatus, setSetupStatus] = useState<{ complete: boolean; missing: string[]; warnings: string[] } | null>(null)
@@ -323,6 +332,29 @@ export default function Settings() {
     }
   }
 
+  const loadGreetingPreview = async () => {
+    setGreetingPreviewLoading(true)
+    try {
+      const { data } = await api.get<{
+        spoken_text: string
+        main_greeting: string
+        recording_disclosure: string | null
+        config_source: string
+        warnings?: string[]
+        placeholders?: { business_name?: string; receptionist_name?: string }
+      }>('/api/greeting-preview')
+      setGreetingPreview(data)
+    } catch {
+      setGreetingPreview(null)
+      setMessage({
+        type: 'error',
+        text: 'Could not load greeting preview. Save settings and try again.',
+      })
+    } finally {
+      setGreetingPreviewLoading(false)
+    }
+  }
+
   const handleSave = async () => {
     setSaving(true)
     setMessage(null)
@@ -337,6 +369,7 @@ export default function Settings() {
         menu_link: form.menu_link || undefined,
         greeting: form.greeting || undefined,
         voice: voice || undefined,
+        speed: speechSpeed,
         receptionist_name: receptionistName || undefined,
         staff: staff
           .filter((s) => s.name.trim() || s.phone.trim())
@@ -354,6 +387,7 @@ export default function Settings() {
       })
       setStaff(normalizeStaffFromApi((data as { staff?: unknown }).staff ?? []))
       setMessage({ type: 'success', text: 'Settings saved. Your AI receptionist will use this info.' })
+      setGreetingPreview(null)
       refreshSetupStatus()
     } catch (e: unknown) {
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
@@ -770,7 +804,50 @@ export default function Settings() {
             <p className="text-xs text-gray-500 mt-1">
               Use {'{business_name}'} for your business name and {'{receptionist_name}'} for the AI name above. If you
               leave the name out of this text, we prepend &quot;Hi, I&apos;m [name].&quot; on the phone greeting automatically.
+              When call recording is enabled for your plan, the recording notice is always spoken after this greeting.
             </p>
+            <motion.div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={loadGreetingPreview}
+                disabled={greetingPreviewLoading}
+                className="text-sm font-medium text-teal-700 hover:text-teal-900 disabled:opacity-50"
+              >
+                {greetingPreviewLoading ? 'Loading preview…' : 'Preview phone greeting'}
+              </button>
+              <span className="text-xs text-gray-500">Shows saved settings (save first if you just edited).</span>
+            </motion.div>
+            {greetingPreview && (
+              <motion.div
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-3 rounded-lg border border-teal-200 bg-teal-50/80 p-3 text-sm text-gray-800"
+              >
+                <p className="font-medium text-gray-900 mb-1">What callers will hear</p>
+                <p className="whitespace-pre-wrap">{greetingPreview.spoken_text}</p>
+                {greetingPreview.recording_disclosure && (
+                  <p className="text-xs text-gray-600 mt-2">
+                    Recording line (always last): {greetingPreview.recording_disclosure}
+                  </p>
+                )}
+                <p className="text-xs text-gray-500 mt-2">
+                  Config: {greetingPreview.config_source}
+                  {greetingPreview.placeholders?.business_name != null && (
+                    <> · Business name: &quot;{greetingPreview.placeholders.business_name}&quot;</>
+                  )}
+                  {greetingPreview.placeholders?.receptionist_name != null && (
+                    <> · AI name: &quot;{greetingPreview.placeholders.receptionist_name || '(empty)'}&quot;</>
+                  )}
+                </p>
+                {(greetingPreview.warnings?.length ?? 0) > 0 && (
+                  <ul className="mt-2 text-xs text-amber-800 list-disc pl-4">
+                    {greetingPreview.warnings!.map((w) => (
+                      <li key={w}>{w}</li>
+                    ))}
+                  </ul>
+                )}
+              </motion.div>
+            )}
           </div>
           <ServicesEditor items={serviceItems} onChange={setServiceItems} />
           <SpecialsEditor items={specialItems} onChange={setSpecialItems} />
