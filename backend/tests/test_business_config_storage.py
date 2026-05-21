@@ -56,20 +56,27 @@ def test_save_raw_client_config_writes_db_and_file(client_config_dir, monkeypatc
     assert on_disk["greeting"] == "Hello from save"
 
 
-def test_greeting_cache_key_includes_voice(client_config_dir, monkeypatch):
+def test_greeting_cache_key_uses_resolved_spoken_text(monkeypatch):
     monkeypatch.setattr(
         main,
         "get_business_info",
         lambda: {
-            "name": "Spa",
-            "receptionist_name": "",
-            "greeting": "Hi",
+            "name": "",
+            "receptionist_name": "Aria",
+            "greeting": "Thank you for calling {business_name}. I am {receptionist_name}.",
             "voice": "onyx",
             "speed": 1.25,
         },
     )
+    monkeypatch.setattr(
+        main,
+        "_tenant_for_call_recording",
+        lambda: {"name": "From Admin Tenant", "client_id": "ands-test"},
+    )
     monkeypatch.setattr(main, "_call_recording_enabled_for_tenant", lambda _t: False)
-    monkeypatch.setattr(main, "_tenant_for_call_recording", lambda: None)
-    key = main._greeting_audio_cache_key("test-spa")
-    assert key[-2] == "onyx"
-    assert key[-1] == 1.25
+    key = main._greeting_audio_cache_key("ands-test")
+    assert key[0] == "ands-test"
+    assert "From Admin Tenant" in key[1]
+    assert "Aria" in key[1]
+    assert key[2] == "onyx"
+    assert key[3] == 1.25

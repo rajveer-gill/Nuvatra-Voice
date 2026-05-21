@@ -3912,6 +3912,8 @@ async def stripe_webhook(request: Request):
 @app.get("/api/business-info")
 async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_subscription)):
     out = business_info_for_dashboard(tenant)
+    if tenant:
+        out["client_id"] = (tenant.get("client_id") or "").strip()
     _settings_load_debug_log_business_info(tenant, out)
     return out
 
@@ -4548,19 +4550,18 @@ async def _schedule_recording_summary(call_sid: str, client_id: str, recording_u
 
 
 def _greeting_audio_cache_key(client_id: str) -> tuple:
-    """Cache busts when greeting copy, voice, speed, receptionist name, or recording disclosure changes."""
+    """Cache key from fully resolved spoken text (includes tenant name fallback for placeholders)."""
     info = get_business_info()
+    tenant = _tenant_for_call_recording()
+    payload = build_phone_greeting_payload(info, tenant)
     try:
         speed_key = round(float(info.get("speed", 1.0)), 2)
     except (TypeError, ValueError):
         speed_key = 1.0
     return (
         client_id,
-        _call_recording_enabled_for_tenant(_tenant_for_call_recording()),
-        (info.get("receptionist_name") or "").strip(),
-        (info.get("greeting") or "").strip(),
-        (info.get("name") or "").strip(),
-        (info.get("voice") or "fable").strip(),
+        payload["spoken_text"],
+        (payload.get("voice") or "fable").strip(),
         speed_key,
     )
 
@@ -5310,6 +5311,17 @@ async def handle_incoming_call(request: Request):
         # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"
         client_id = tenant["client_id"] if tenant else (CLIENT_ID or "default")
+        set_request_client_id(client_id)
+        greeting_plan = build_phone_greeting_payload(get_business_info(), tenant_for_access)
+        _log_greeting_debug("incoming_call_greeting_plan", greeting_plan, call_sid=call_sid or "")
+        voice_info(
+            "incoming_call_greeting",
+            call_sid=call_sid or "",
+            client_id=client_id,
+            config_source=greeting_plan.get("config_source"),
+            spoken_preview=(greeting_plan.get("spoken_text") or "")[:500],
+            voice=greeting_plan.get("voice"),
+        )
         voice_info(
             "call_session_started",
             call_sid=call_sid,

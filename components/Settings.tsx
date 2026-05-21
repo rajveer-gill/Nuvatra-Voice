@@ -106,6 +106,7 @@ export default function Settings() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [receptionistName, setReceptionistName] = useState('')
   const [aiPhone, setAiPhone] = useState('')
+  const [tenantClientId, setTenantClientId] = useState('')
   const [portalLoading, setPortalLoading] = useState(false)
   const [billingError, setBillingError] = useState<string | null>(null)
   const [form, setForm] = useState({
@@ -219,6 +220,7 @@ export default function Settings() {
           setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
           setReceptionistName((d.receptionist_name as string) || '')
           setAiPhone((d.phone as string) || '')
+          setTenantClientId((d.client_id as string) || '')
           setForm({
             name: (d.name as string) || '',
             business_type: (d.business_type as string) || '',
@@ -503,10 +505,25 @@ export default function Settings() {
 
       {/* AI Receptionist Identity */}
       <SettingsSection delay={1}>
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
+        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2">
           <User className="w-6 h-6 text-primary-600" />
           AI Receptionist
         </h2>
+        {(tenantClientId || aiPhone) && (
+          <p className="text-sm text-gray-600 mb-6 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+            {tenantClientId && (
+              <>
+                Settings apply to account <strong className="font-mono text-gray-800">{tenantClientId}</strong>
+              </>
+            )}
+            {aiPhone && (
+              <>
+                {tenantClientId ? ' · ' : ''}
+                Test calls must dial <strong className="text-gray-800">{aiPhone}</strong> (this line only).
+              </>
+            )}
+          </p>
+        )}
 
         <div className="space-y-4">
           <div>
