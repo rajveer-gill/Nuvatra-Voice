@@ -1638,102 +1638,36 @@ def update_caller_memory(
         print(f"Failed to save caller memory: {e}")
 
 def get_staff_phone_by_name(name: str) -> Optional[str]:
-    """Return E.164 for a team roster member by name (live transfers)."""
+    """Return E.164 for a plan-authorized transfer destination by name (not the full staff roster)."""
     from staff_transfers import get_transfer_phone_by_name
 
     return get_transfer_phone_by_name(name, get_business_info())
 
 
 ROSTER_NOT_READY_CALL_MESSAGE = (
-    "Sorry, I cannot take bookings or transfers until the owner adds at least one team member "
-    "with a name and phone number to their team roster online. Please try again later."
+    "Sorry, I won't be able to function until the owner adds team members "
+    "for you to book with to their roster online. Don't worry! I am transferring you to the store now."
 )
 
 
 def bookable_staff_members(info: Optional[dict] = None) -> List[dict]:
-    """Staff rows with a display name and dialable phone (bookings + live transfers)."""
-    from staff_transfers import bookable_staff_members as _bookable
-
+    """Staff rows with a display name and dialable phone (required for appointment booking)."""
     data = info if info is not None else get_business_info()
-    return _bookable(data)
+    out: List[dict] = []
+    for s in data.get("staff") or []:
+        if not isinstance(s, dict):
+            continue
+        name = (s.get("name") or "").strip()
+        phone = (s.get("phone") or "").strip()
+        digits = "".join(c for c in phone if c.isdigit())
+        if name and len(digits) >= 10:
+            out.append(s)
+    return out
 
 
 def staff_roster_ready_for_booking(info: Optional[dict] = None) -> bool:
     """True when at least one team member can be booked on the calendar."""
-    from staff_transfers import staff_roster_ready
-
-    data = info if info is not None else get_business_info()
-    return staff_roster_ready(data)
-
-
-def live_transfer_phone(
-    info: Optional[dict] = None,
-    *,
-    staff_name: Optional[str] = None,
-    user_text: str = "",
-) -> Optional[str]:
-    """Resolve transfer dial target from team roster (not a separate store/forwarding line)."""
-    from staff_transfers import resolve_live_transfer_phone
-
-    data = info if info is not None else get_business_info()
-    return resolve_live_transfer_phone(data, staff_name=staff_name, user_text=user_text)
-
-
-def forward_call_to_roster(
-    base_url: str,
-    detected_lang: str = "English",
-    *,
-    staff_name: Optional[str] = None,
-    user_text: str = "",
-    call_sid: str = "",
-    client_id: str = "",
-    forward_kind: str = "roster",
-    preamble_play_url: Optional[str] = None,
-) -> Optional[VoiceResponse]:
-    """Dial a team roster member when configured; otherwise None."""
-    phone = live_transfer_phone(staff_name=staff_name, user_text=user_text)
-    if not phone:
-        return None
-    voice_forward(
-        forward_kind,
-        call_sid=call_sid,
-        client_id=client_id,
-        has_fallback_configured=True,
-    )
-    response = VoiceResponse()
-    if preamble_play_url:
-        response.play(preamble_play_url)
-    append_forward_call_verbs(response, phone, base_url, detected_lang)
-    return response
-
-
-def _last_user_utterance(call_data: dict) -> str:
-    for msg in reversed(call_data.get("conversation_history") or []):
-        if msg.get("role") == "user":
-            return (msg.get("content") or "").strip()
-    return ""
-
-
-def _booking_staff_id_from_roster(booking: dict, info: Optional[dict] = None) -> Optional[str]:
-    """Assign staff_id for bookings: auto when one roster member; required name when several."""
-    data = info if info is not None else get_business_info()
-    roster = bookable_staff_members(data)
-    if not roster:
-        return None
-    staff_key = resolve_staff_id_from_booking_fragment(booking.get("staff"))
-    if staff_key:
-        roster_ids = {(s.get("id") or "").strip() for s in roster}
-        if staff_key in roster_ids:
-            return staff_key
-    frag = (booking.get("staff") or "").strip().lower()
-    if frag:
-        for s in roster:
-            if (s.get("name") or "").strip().lower() == frag:
-                sid = (s.get("id") or "").strip()
-                return sid if sid else None
-    if len(roster) == 1:
-        return (roster[0].get("id") or "").strip() or None
-    return None
+    return len(bookable_staff_members(info)) >= 1
 
 
 def _normalize_dial_number(forwarding_phone: str) -> str:
@@ -1761,14 +1695,23 @@ def append_dial_forwarding_only(response: VoiceResponse, forwarding_phone: str) 
 
 
 def twiml_roster_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str = "") -> VoiceResponse:
-    """Play roster-not-ready message and end call (no transfer without a roster member)."""
+    """Play roster-not-ready message, then transfer to the store forwarding number when configured."""
     response = VoiceResponse()
     msg_encoded = quote(ROSTER_NOT_READY_CALL_MESSAGE)
     response.play(f"{base_url}/api/phone/tts-audio?text={msg_encoded}&voice={get_tts_voice()}")
-    response.say("Goodbye.", voice="alice")
-    response.hangup()
-    if call_sid:
-        call_log_set_outcome(call_sid, "error")
+    forwarding_phone = (biz_info.get("forwarding_phone") or "").strip()
+    if forwarding_phone:
+        append_dial_forwarding_only(response, forwarding_phone)
+        if call_sid:
+            call_log_set_outcome(call_sid, "forwarded")
+    else:
+        response.say(
+            "Please ask the business to complete their team roster online. Goodbye.",
+            voice="alice",
+        )
+        response.hangup()
+        if call_sid:
+            call_log_set_outcome(call_sid, "error")
     return response
 
 def parse_transfer_to(ai_text: str) -> Optional[str]:
@@ -2260,18 +2203,7 @@ def _create_appointment_from_booking(
     name = (booking.get("name") or "").strip()
     if not name or not date or not time:
         return None
-    biz = get_business_info()
-    roster = bookable_staff_members(biz)
-    staff_key = _booking_staff_id_from_roster(booking, biz)
-    if roster and len(roster) > 1 and not staff_key:
-        system_info(
-            "booking_create_failed_staff_required",
-            name=name,
-            date=date,
-            time=time,
-            roster_size=len(roster),
-        )
-        return None
+    staff_key = resolve_staff_id_from_booking_fragment(booking.get("staff"))
     if not is_slot_available(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key):
         _invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
         system_info(
@@ -2418,7 +2350,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             if not staff_roster_ready_for_booking():
                 ai_text = (
                     "I'm not able to book appointments until the business adds team members to their roster online. "
-                    "Please ask the owner to complete their team roster in settings."
+                    "Let me connect you with the store."
                 )
             else:
                 try:
@@ -2529,16 +2461,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         name_ok = bool((booking.get("name") or "").strip())
                         date_ok = bool((booking.get("date") or "").strip())
                         time_ok = bool((booking.get("time") or "").strip())
-                        roster = bookable_staff_members()
-                        staff_required = len(roster) > 1 and not _booking_staff_id_from_roster(booking)
-                        if staff_required:
-                            reason = "staff_required"
-                        elif name_ok and date_ok and time_ok:
-                            reason = "slot_taken"
-                        elif not name_ok:
-                            reason = "no_name"
-                        else:
-                            reason = "no_date_time"
+                        reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
                         system_info(
                             "voice_booking_not_created",
                             reason=reason,
@@ -2548,17 +2471,6 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         )
                         if not name_ok:
                             ai_text = "I'd love to book that for you—what's your name?"
-                        elif staff_required:
-                            names = ", ".join(
-                                (s.get("name") or "").strip()
-                                for s in roster
-                                if (s.get("name") or "").strip()
-                            )
-                            ai_text = (
-                                f"Who would you like to book with? We have {names}."
-                                if names
-                                else "Which team member would you like to book with?"
-                            )
                         elif not date_ok or not time_ok:
                             ai_text = "I need the date and time again to confirm—which day and time would you like?"
                         else:
@@ -2611,13 +2523,13 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             call_sid=call_sid,
             client_id=str(call_data.get("client_id") or ""),
         ):
-            xfer_phone = live_transfer_phone(user_text=_last_user_utterance(call_data))
-            if xfer_phone:
+            forwarding_phone = get_business_info().get("forwarding_phone")
+            if forwarding_phone:
                 voice_forward(
                     "ai_transfer_intent_in_reply",
                     call_sid=call_sid,
                     client_id=str(call_data.get("client_id") or ""),
-                    forward_kind="roster",
+                    forward_kind="fallback",
                     has_fallback_configured=True,
                 )
                 call_data["outcome"] = "forwarded"
@@ -2626,7 +2538,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     "status": "forward",
                     "audio_url": None,
                     "ai_text": ai_text,
-                    "forwarding_phone": xfer_phone,
+                    "forwarding_phone": forwarding_phone
                 }
                 return
         
@@ -4101,6 +4013,7 @@ async def api_greeting_preview(tenant: Optional[dict] = Depends(require_active_s
 SETUP_REQUIRED_FIELDS = [
     ("name", "Business name"),
     ("hours", "Hours of operation"),
+    ("forwarding_phone", "Store phone (real person)"),
     ("address", "Address"),
 ]
 
@@ -4120,7 +4033,7 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
     roster_ready = staff_roster_ready_for_booking(info)
     if not roster_ready:
         warnings.append(
-            "Add at least one team member with a name and phone on the Team roster so callers can book appointments and reach a real person."
+            "Add at least one team member with a name and phone on the Team roster so callers can book appointments."
         )
     return {
         "complete": len(missing) == 0,
@@ -4360,7 +4273,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         if not (USE_DB and tid and tid.get("business_vertical")):
             data["business_type"] = update.business_type
     if update.staff is not None:
-        from staff_transfers import STAFF_ROSTER_MAX
+        from staff_transfers import STAFF_ROSTER_MAX, prune_transfer_targets_for_removed_staff
 
         new_staff = finalize_staff_records_for_storage(
             update.staff,
@@ -4371,8 +4284,32 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
                 status_code=400,
                 detail=f"Staff roster cannot exceed {STAFF_ROSTER_MAX} members. Contact support if you need more.",
             )
+        old_ids = {str(s.get("id")) for s in (data.get("staff") or []) if s.get("id")}
+        new_ids = {s["id"] for s in new_staff}
+        removed_ids = old_ids - new_ids
         data["staff"] = new_staff
-        data.pop("transfer_targets", None)
+        if removed_ids and data.get("transfer_targets"):
+            data["transfer_targets"] = prune_transfer_targets_for_removed_staff(
+                list(data["transfer_targets"]), removed_ids
+            )
+    if update.transfer_targets is not None:
+        from staff_transfers import TransferTarget, finalize_transfer_targets_for_storage
+
+        tenant_limits = db_tenant_get_by_client_id(cid) or tid
+        transfer_max = 1
+        if tenant_limits and get_plan_limits:
+            transfer_max = int(get_plan_limits(tenant_limits).get("transfer_max") or 1)
+        try:
+            data["transfer_targets"] = finalize_transfer_targets_for_storage(
+                update.transfer_targets,
+                data.get("staff") or [],
+                transfer_max=transfer_max,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if msg.startswith("Plan allows"):
+                raise HTTPException(status_code=403, detail=msg) from e
+            raise HTTPException(status_code=400, detail=msg) from e
     save_raw_client_config(cid, data)
     if _greeting_debug_enabled():
         voice_info(
@@ -5505,11 +5442,11 @@ async def handle_incoming_call(request: Request):
         biz_info = get_business_info()
         if not staff_roster_ready_for_booking(biz_info):
             voice_forward(
-                "roster_not_ready",
+                "roster_not_ready_forward",
                 call_sid=call_sid or "",
                 client_id=client_id,
-                forward_kind="none",
-                has_fallback_configured=False,
+                forward_kind="store_forwarding",
+                has_fallback_configured=bool((biz_info.get("forwarding_phone") or "").strip()),
             )
             roster_twiml = twiml_roster_not_ready_handoff(base_url, biz_info, call_sid=call_sid or "")
             return Response(content=str(roster_twiml), media_type="application/xml")
@@ -5603,21 +5540,24 @@ async def handle_incoming_call(request: Request):
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
 
-        # On error, forward to a roster member when exactly one is configured
-        error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
-        error_encoded = quote(error_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
-        fwd = forward_call_to_roster(
-            base_url,
-            "English",
-            call_sid=str(form_data.get("CallSid") if "form_data" in dir() else ""),
-            forward_kind="incoming_error_roster",
-            preamble_play_url=tts_audio_url,
-        )
-        if fwd:
-            return Response(content=str(fwd), media_type="application/xml")
+        # On error, forward to business phone if available
+        forwarding_phone = get_business_info().get("forwarding_phone")
+        if forwarding_phone:
+            voice_forward(
+                "incoming_error_forward",
+                call_sid=str(form_data.get("CallSid") if "form_data" in dir() else ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
+            error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
+            error_encoded = quote(error_text)
+            tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
+            response.play(tts_audio_url)
+            response = forward_call_to_business(forwarding_phone, base_url, "English")
+            return Response(content=str(response), media_type="application/xml")
         else:
-            # Fallback: just say error message if no roster transfer target
+            # Fallback: just say error message if no forwarding number
             error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
             error_encoded = quote(error_text)
             tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
@@ -5753,21 +5693,22 @@ async def process_speech(request: Request):
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
 
-        call_data_err = active_calls.get(call_sid or "", {}) if call_sid else {}
-        detected_lang_err = call_data_err.get("detected_language", "English")
-        error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
-        error_encoded = quote(error_text)
-        tts_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
-        fwd = forward_call_to_roster(
-            base_url,
-            detected_lang_err,
-            call_sid=str(call_sid if "call_sid" in dir() else ""),
-            user_text=_last_user_utterance(call_data_err),
-            forward_kind="process_speech_error_roster",
-            preamble_play_url=tts_url,
-        )
-        if fwd:
-            return Response(content=str(fwd), media_type="application/xml")
+        # Check if we have a forwarding number - if so, forward on error
+        forwarding_phone = get_business_info().get("forwarding_phone")
+        if forwarding_phone:
+            voice_forward(
+                "process_speech_error_forward",
+                call_sid=str(call_sid if "call_sid" in dir() else ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
+            error_text = "I'm experiencing technical difficulties. Let me connect you with someone who can help."
+            error_encoded = quote(error_text)
+            tts_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
+            response.play(tts_url)
+            response = forward_call_to_business(forwarding_phone, base_url, "English")
+            return Response(content=str(response), media_type="application/xml")
         else:
             # Avoid redirect-only loops on errors: prompt once inside Gather, then end the call.
             error_text = "I'm sorry, I didn't catch that. Could you repeat?"
@@ -5912,19 +5853,21 @@ async def handle_no_speech(request: Request):
         base_url = _twilio_base_url(request)
         call_data = active_calls.get(call_sid, {}) if call_sid else {}
         detected_lang = call_data.get("detected_language", "English")
-        fwd = forward_call_to_roster(
-            base_url,
-            detected_lang,
-            call_sid=call_sid or "",
-            client_id=str(call_data.get("client_id") or ""),
-            forward_kind="no_speech_roster",
-        )
-        if fwd:
+        forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
+
+        if forwarding_phone:
+            voice_forward(
+                "no_speech_timeout",
+                call_sid=call_sid or "",
+                client_id=str(call_data.get("client_id") or ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+            )
             if call_sid and call_sid in active_calls:
                 active_calls[call_sid]["outcome"] = "forwarded"
             if call_sid:
                 call_log_set_outcome(call_sid, "forwarded")
-            response = fwd
+            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
         else:
             voice_respond_branch(
                 "no_speech_goodbye",
@@ -6090,20 +6033,22 @@ async def respond_with_audio(request: Request):
                 return Response(content=str(response), media_type="application/xml")
         
         elif status == "error":
-            call_data_err = active_calls.get(call_sid, {})
-            detected_lang = call_data_err.get("detected_language", "English")
-            fwd = forward_call_to_roster(
-                base_url,
-                detected_lang,
-                call_sid=call_sid or "",
-                client_id=str(call_data_err.get("client_id") or ""),
-                user_text=_last_user_utterance(call_data_err),
-                forward_kind="respond_status_error_roster",
-            )
-            if fwd:
+            # Error occurred - forward to business phone if available
+            forwarding_phone = get_business_info().get("forwarding_phone")
+            if forwarding_phone:
+                voice_forward(
+                    "respond_status_error_forward",
+                    call_sid=call_sid or "",
+                    client_id=str(active_calls.get(call_sid, {}).get("client_id") or ""),
+                    forward_kind="fallback",
+                    has_fallback_configured=True,
+                )
+                detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
+                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+                # Clean up status
                 if call_sid in response_status:
                     del response_status[call_sid]
-                return Response(content=str(fwd), media_type="application/xml")
+                return Response(content=str(response), media_type="application/xml")
             else:
                 voice_respond_branch(
                     "error_no_fallback",
@@ -6141,20 +6086,25 @@ async def respond_with_audio(request: Request):
         traceback.print_exc()
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
-        call_data = active_calls.get(call_sid, {})
-        detected_lang = call_data.get("detected_language", "English")
-        fwd = forward_call_to_roster(
-            base_url,
-            detected_lang,
-            call_sid=str(call_sid or ""),
-            client_id=str(call_data.get("client_id") or ""),
-            user_text=_last_user_utterance(call_data),
-            forward_kind="respond_endpoint_exception_roster",
-        )
-        if fwd:
+        # On error, forward to business phone if available
+        forwarding_phone = get_business_info().get("forwarding_phone")
+        if forwarding_phone:
+            voice_forward(
+                "respond_endpoint_exception_forward",
+                call_sid=str(call_sid or ""),
+                client_id=str(active_calls.get(call_sid or "", {}).get("client_id") or ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
+            # Try to get call data for language
+            call_data = active_calls.get(call_sid, {})
+            detected_lang = call_data.get("detected_language", "English")
+            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+            # Clean up status
             if call_sid in response_status:
                 del response_status[call_sid]
-            return Response(content=str(fwd), media_type="application/xml")
+            return Response(content=str(response), media_type="application/xml")
         else:
             voice_respond_branch(
                 "respond_endpoint_exception",
@@ -6162,7 +6112,7 @@ async def respond_with_audio(request: Request):
                 status="error",
                 error_type=type(e).__name__,
             )
-            # Fallback: return error message if no roster transfer target
+            # Fallback: return error message if no forwarding number
             response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
             response.hangup()
             return Response(content=str(response), media_type="application/xml")
@@ -6419,19 +6369,23 @@ async def process_recording(request: Request):
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
 
-        call_data = active_calls.get(call_sid, {})
-        detected_lang = call_data.get("detected_language", "English")
-        fwd = forward_call_to_roster(
-            base_url,
-            detected_lang,
-            call_sid=str(call_sid if "call_sid" in dir() else ""),
-            user_text=_last_user_utterance(call_data),
-            forward_kind="process_recording_error_roster",
-        )
-        if fwd:
-            return Response(content=str(fwd), media_type="application/xml")
+        # On error, forward to business phone if available
+        forwarding_phone = get_business_info().get("forwarding_phone")
+        if forwarding_phone:
+            voice_forward(
+                "process_recording_error_forward",
+                call_sid=str(call_sid if "call_sid" in dir() else ""),
+                forward_kind="fallback",
+                has_fallback_configured=True,
+                error_type=type(e).__name__,
+            )
+            # Try to get call data for language
+            call_data = active_calls.get(call_sid, {})
+            detected_lang = call_data.get("detected_language", "English")
+            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+            return Response(content=str(response), media_type="application/xml")
         else:
-            # Fallback: ask to try again if no roster transfer target
+            # Fallback: ask to try again if no forwarding number
             response.say("I'm sorry, I had trouble processing that. Please try again.", voice='alice')
             response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
             return Response(content=str(response), media_type="application/xml")

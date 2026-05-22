@@ -115,16 +115,14 @@ def build_system_prompt(
         all_names = [s.get("name", "") for s in staff if s.get("name")]
         if transfer_names:
             staff_block = (
-                f"\n- Team roster (bookings and live transfers): {', '.join(transfer_names)}. "
+                f"\n- Staff you can transfer to: {', '.join(transfer_names)}. "
                 "When the caller asks to speak to one of these people by name, reply with EXACTLY: "
-                "TRANSFER_TO: [Name] (use the exact name from the list). "
-                "If they want a real person but do not name someone, ask which team member they need when there are several; "
-                "if only one person is on the roster, you may transfer to them. Otherwise do not use TRANSFER_TO."
+                "TRANSFER_TO: [Name] (use the exact name from the list). Otherwise do not use TRANSFER_TO."
             )
         elif all_names:
             staff_block = (
-                f"\n- Team roster (add a phone number in settings to enable transfers): {', '.join(all_names)}. "
-                "Do not use TRANSFER_TO until each listed person has a dialable phone on the roster."
+                f"\n- Staff on file (no live transfer configured): {', '.join(all_names)}. "
+                "Do not use TRANSFER_TO. Offer to take a message or use the business forwarding number if appropriate."
             )
         # Optional context from business (not email/phone — reduces PII exposure in the model).
         notes_cap = 400
@@ -228,7 +226,7 @@ def build_system_prompt(
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date and time, and optionally email for confirmations.
-{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). The reason field holds the service name when services are configured, or a short visit note otherwise. The 7th field staff: use the exact team member name from the roster when they chose someone (or when multiple people are on the roster—then you MUST ask who they want and include that name). If only one person is on the roster, you may leave staff empty (we assign them automatically). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time—and when several team members are on the roster, until you know which staff member they are booking with."""
+{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). The reason field holds the service name when services are configured, or a short visit note otherwise. The 7th field staff is OPTIONAL: use the exact staff/stylist name from the staff list if they requested someone; otherwise leave it empty (still include the trailing pipe if no staff). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
 
     help_section = (
         "\n".join(help_lines)

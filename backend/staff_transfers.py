@@ -1,5 +1,5 @@
 """
-Team roster helpers: bookings and live call transfers share the same staff name + phone list.
+Call transfer targets (plan-limited) vs unlimited staff roster (booking / calendar).
 """
 
 from __future__ import annotations
@@ -119,58 +119,48 @@ def finalize_transfer_targets_for_storage(
     return out
 
 
-def bookable_staff_members(business_info: dict) -> List[dict]:
-    """Team roster rows with a display name and dialable phone (bookings + live transfers)."""
-    out: List[dict] = []
-    for s in business_info.get("staff") or []:
-        if not isinstance(s, dict):
-            continue
+def resolve_transfer_destinations(business_info: dict) -> List[dict[str, str]]:
+    """
+    Resolved {name, phone} pairs authorized for live TRANSFER_TO dialing.
+  Falls back to legacy staff-with-phone rows when transfer_targets is empty.
+    """
+    staff = business_info.get("staff") or []
+    staff_by_id = {str(s.get("id")): s for s in staff if s.get("id")}
+    targets = business_info.get("transfer_targets")
+
+    if isinstance(targets, list) and targets:
+        out: List[dict[str, str]] = []
+        for t in targets:
+            if not isinstance(t, dict):
+                continue
+            name = str(t.get("name") or "").strip()
+            sid = str(t.get("staff_id") or "").strip() or None
+            phone_raw = str(t.get("phone") or "").strip()
+            if sid and sid in staff_by_id:
+                st = staff_by_id[sid]
+                if not name:
+                    name = str(st.get("name") or "").strip()
+                sp = str(st.get("phone") or "").strip()
+                if sp:
+                    phone_raw = sp
+            if not name or not phone_raw:
+                continue
+            e164 = normalize_transfer_phone(phone_raw)
+            if e164:
+                out.append({"name": name, "phone": e164})
+        return out
+
+    # Legacy: staff list phones (pre–transfer_targets migration)
+    legacy: List[dict[str, str]] = []
+    for s in staff:
         name = str(s.get("name") or "").strip()
         phone_raw = str(s.get("phone") or "").strip()
-        digits = "".join(c for c in phone_raw if c.isdigit())
-        if name and len(digits) >= 10:
-            out.append(s)
-    return out
-
-
-def staff_roster_ready(business_info: dict) -> bool:
-    return len(bookable_staff_members(business_info)) >= 1
-
-
-def resolve_transfer_destinations(business_info: dict) -> List[dict[str, str]]:
-    """Live transfers use the team roster only (name + phone per member)."""
-    out: List[dict[str, str]] = []
-    for s in bookable_staff_members(business_info):
-        name = str(s.get("name") or "").strip()
-        e164 = normalize_transfer_phone(str(s.get("phone") or "").strip())
-        if name and e164:
-            sid = str(s.get("id") or "").strip() or None
-            out.append({"name": name, "phone": e164, "staff_id": sid})
-    return out
-
-
-def resolve_live_transfer_phone(
-    business_info: dict,
-    *,
-    staff_name: Optional[str] = None,
-    user_text: str = "",
-) -> Optional[str]:
-    """
-    Phone to dial for a live transfer. Prefer explicit staff name (TRANSFER_TO or utterance match);
-    if exactly one roster member, use them for generic 'talk to a person' requests.
-    """
-    if staff_name:
-        return get_transfer_phone_by_name(staff_name, business_info)
-    text_lower = (user_text or "").strip().lower()
-    if text_lower:
-        for dest in resolve_transfer_destinations(business_info):
-            n = dest.get("name", "").strip().lower()
-            if n and n in text_lower:
-                return dest.get("phone")
-    roster = bookable_staff_members(business_info)
-    if len(roster) == 1:
-        return normalize_transfer_phone(str(roster[0].get("phone") or "").strip())
-    return None
+        if not name or not phone_raw:
+            continue
+        e164 = normalize_transfer_phone(phone_raw)
+        if e164:
+            legacy.append({"name": name, "phone": e164})
+    return legacy
 
 
 def get_transfer_phone_by_name(name: str, business_info: Optional[dict] = None) -> Optional[str]:
