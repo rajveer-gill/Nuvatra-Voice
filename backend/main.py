@@ -1643,6 +1643,77 @@ def get_staff_phone_by_name(name: str) -> Optional[str]:
 
     return get_transfer_phone_by_name(name, get_business_info())
 
+
+ROSTER_NOT_READY_CALL_MESSAGE = (
+    "Sorry, I won't be able to function until the owner adds team members "
+    "for you to book with to their roster online. Don't worry! I am transferring you to the store now."
+)
+
+
+def bookable_staff_members(info: Optional[dict] = None) -> List[dict]:
+    """Staff rows with a display name and dialable phone (required for appointment booking)."""
+    data = info if info is not None else get_business_info()
+    out: List[dict] = []
+    for s in data.get("staff") or []:
+        if not isinstance(s, dict):
+            continue
+        name = (s.get("name") or "").strip()
+        phone = (s.get("phone") or "").strip()
+        digits = "".join(c for c in phone if c.isdigit())
+        if name and len(digits) >= 10:
+            out.append(s)
+    return out
+
+
+def staff_roster_ready_for_booking(info: Optional[dict] = None) -> bool:
+    """True when at least one team member can be booked on the calendar."""
+    return len(bookable_staff_members(info)) >= 1
+
+
+def _normalize_dial_number(forwarding_phone: str) -> str:
+    clean = "".join(c for c in (forwarding_phone or "") if c.isdigit() or c == "+")
+    if not clean.startswith("+"):
+        if len(clean) == 10:
+            clean = f"+1{clean}"
+        elif len(clean) == 11 and clean.startswith("1"):
+            clean = f"+{clean}"
+        else:
+            clean = f"+1{clean}"
+    return clean
+
+
+def append_dial_forwarding_only(response: VoiceResponse, forwarding_phone: str) -> None:
+    """Dial the store after a custom message (no extra 'please hold' TTS)."""
+    clean_phone = _normalize_dial_number(forwarding_phone)
+    voice_trace("dial_forwarding_only", dial_to=mask_phone(clean_phone))
+    response.dial(clean_phone, timeout=30, record=False)
+    response.say(
+        "I'm sorry, no one is available right now. Please try again later or leave a message.",
+        voice="alice",
+    )
+    response.hangup()
+
+
+def twiml_roster_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str = "") -> VoiceResponse:
+    """Play roster-not-ready message, then transfer to the store forwarding number when configured."""
+    response = VoiceResponse()
+    msg_encoded = quote(ROSTER_NOT_READY_CALL_MESSAGE)
+    response.play(f"{base_url}/api/phone/tts-audio?text={msg_encoded}&voice={get_tts_voice()}")
+    forwarding_phone = (biz_info.get("forwarding_phone") or "").strip()
+    if forwarding_phone:
+        append_dial_forwarding_only(response, forwarding_phone)
+        if call_sid:
+            call_log_set_outcome(call_sid, "forwarded")
+    else:
+        response.say(
+            "Please ask the business to complete their team roster online. Goodbye.",
+            voice="alice",
+        )
+        response.hangup()
+        if call_sid:
+            call_log_set_outcome(call_sid, "error")
+    return response
+
 def parse_transfer_to(ai_text: str) -> Optional[str]:
     """If AI responded with TRANSFER_TO: Name, return the name; else None."""
     if not ai_text:
@@ -2276,132 +2347,137 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
         if booking:
-            try:
-                from_num = call_data.get("from_number") or ""
-                to_num = call_data.get("to_number") or ""
-                cid_raw = call_data.get("client_id") or ""
-                system_info(
-                    "voice_booking_line_parsed",
-                    name=booking.get("name"),
-                    date=booking.get("date"),
-                    time=booking.get("time"),
-                    from_number=from_num or None,
-                    to_number=to_num or None,
-                    client_id=cid_raw or None,
+            if not staff_roster_ready_for_booking():
+                ai_text = (
+                    "I'm not able to book appointments until the business adds team members to their roster online. "
+                    "Let me connect you with the store."
                 )
-                # Use caller's phone from Twilio when available (don't require asking)
-                if from_num:
-                    booking["phone"] = (booking.get("phone") or "").strip() or from_num
-                cid = (call_data.get("client_id") or "").strip() or None
-                apt = _create_appointment_from_booking(
-                    booking, client_id_override=cid, reserve_slot_immediately=False
-                )
-                if apt:
-                    call_data["appointment_created"] = True
-                    if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
-                        apt["phone"] = call_data["from_number"]
-                        if USE_DB and apt.get("id"):
+            else:
+                try:
+                    from_num = call_data.get("from_number") or ""
+                    to_num = call_data.get("to_number") or ""
+                    cid_raw = call_data.get("client_id") or ""
+                    system_info(
+                        "voice_booking_line_parsed",
+                        name=booking.get("name"),
+                        date=booking.get("date"),
+                        time=booking.get("time"),
+                        from_number=from_num or None,
+                        to_number=to_num or None,
+                        client_id=cid_raw or None,
+                    )
+                    # Use caller's phone from Twilio when available (don't require asking)
+                    if from_num:
+                        booking["phone"] = (booking.get("phone") or "").strip() or from_num
+                    cid = (call_data.get("client_id") or "").strip() or None
+                    apt = _create_appointment_from_booking(
+                        booking, client_id_override=cid, reserve_slot_immediately=False
+                    )
+                    if apt:
+                        call_data["appointment_created"] = True
+                        if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
+                            apt["phone"] = call_data["from_number"]
+                            if USE_DB and apt.get("id"):
+                                try:
+                                    db_appointments_update(apt["id"], phone=apt["phone"])
+                                except Exception:
+                                    pass
+                        phone_display = (apt.get("phone") or "").strip() or "Not provided"
+                        email_display = (apt.get("email") or "").strip() or "Not provided"
+                        thanks_msg = (
+                            f"Hey! Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:\n"
+                            f"Name: {apt.get('name', '')}\n"
+                            f"Phone: {phone_display}\n"
+                            f"Email: {email_display}\n"
+                            f"Date: {apt.get('date', '')}\n"
+                            f"Time: {_hhmm_to_ampm(apt.get('time', '') or '')}\n"
+                            f"Service: {apt.get('reason', '')}\n\n"
+                            f"Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
+                            f"You can also reply with changes.\n\n"
+                            f"Msg & data rates may apply. Reply STOP to opt out."
+                        )
+                        to_number_sms = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
+                        from_number_sms = (call_data.get("to_number") or "").strip() or None
+                        if not from_number_sms and cid and USE_DB:
+                            tenant_row = db_tenant_get_by_client_id(cid)
+                            if tenant_row:
+                                from_number_sms = (tenant_row.get("twilio_phone_number") or "").strip()
+                                sms_info("confirmation_sms_from_tenant_lookup", client_id=cid)
+                            else:
+                                sms_info("confirmation_sms_tenant_missing_for_from_override", client_id=cid)
+                        if not from_number_sms:
+                            from_number_sms = _tenant_sms_from_number()
+                        sms_info(
+                            "post_booking_confirmation_dispatch",
+                            client_id=cid,
+                            to_set=bool(to_number_sms),
+                            from_set=bool(from_number_sms),
+                        )
+                        if to_number_sms:
+                            ok = send_sms(to_number_sms, thanks_msg, from_override=from_number_sms or None)
+                            sms_info(
+                                "post_booking_confirmation_sms",
+                                client_id=cid,
+                                to_number=to_number_sms,
+                                from_number=from_number_sms,
+                                success=ok,
+                            )
+                            if ok:
+                                ai_text = (
+                                    "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
+                                    "The time is not finalized until you confirm by text."
+                                )
+                            else:
+                                ai_text = (
+                                    "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
+                                )
+                        else:
+                            sms_info("post_booking_confirmation_skipped", reason="no_caller_phone", client_id=cid)
+                            ai_text = (
+                                "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
+                            )
+                        fn_mem = (call_data.get("from_number") or "").strip()
+                        if fn_mem:
+                            dp = {
+                                "last_voice_booking_date": apt.get("date"),
+                                "last_voice_booking_time": apt.get("time"),
+                                "last_service": ((apt.get("reason") or "").strip()[:120] or None),
+                            }
+                            em_patch = (apt.get("email") or "").strip()
+                            if em_patch:
+                                dp["email_on_file"] = em_patch
+                            dp = {k: v for k, v in dp.items() if v}
                             try:
-                                db_appointments_update(apt["id"], phone=apt["phone"])
+                                update_caller_memory(
+                                    fn_mem,
+                                    name=(booking.get("name") or "").strip() or None,
+                                    last_reason="appointment details texted (pending SMS confirmation)",
+                                    increment_count=False,
+                                    data_patch=dp if dp else None,
+                                )
                             except Exception:
                                 pass
-                    phone_display = (apt.get("phone") or "").strip() or "Not provided"
-                    email_display = (apt.get("email") or "").strip() or "Not provided"
-                    thanks_msg = (
-                        f"Hey! Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:\n"
-                        f"Name: {apt.get('name', '')}\n"
-                        f"Phone: {phone_display}\n"
-                        f"Email: {email_display}\n"
-                        f"Date: {apt.get('date', '')}\n"
-                        f"Time: {_hhmm_to_ampm(apt.get('time', '') or '')}\n"
-                        f"Service: {apt.get('reason', '')}\n\n"
-                        f"Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
-                        f"You can also reply with changes.\n\n"
-                        f"Msg & data rates may apply. Reply STOP to opt out."
-                    )
-                    to_number_sms = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
-                    from_number_sms = (call_data.get("to_number") or "").strip() or None
-                    if not from_number_sms and cid and USE_DB:
-                        tenant_row = db_tenant_get_by_client_id(cid)
-                        if tenant_row:
-                            from_number_sms = (tenant_row.get("twilio_phone_number") or "").strip()
-                            sms_info("confirmation_sms_from_tenant_lookup", client_id=cid)
-                        else:
-                            sms_info("confirmation_sms_tenant_missing_for_from_override", client_id=cid)
-                    if not from_number_sms:
-                        from_number_sms = _tenant_sms_from_number()
-                    sms_info(
-                        "post_booking_confirmation_dispatch",
-                        client_id=cid,
-                        to_set=bool(to_number_sms),
-                        from_set=bool(from_number_sms),
-                    )
-                    if to_number_sms:
-                        ok = send_sms(to_number_sms, thanks_msg, from_override=from_number_sms or None)
-                        sms_info(
-                            "post_booking_confirmation_sms",
-                            client_id=cid,
-                            to_number=to_number_sms,
-                            from_number=from_number_sms,
-                            success=ok,
-                        )
-                        if ok:
-                            ai_text = (
-                                "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
-                                "The time is not finalized until you confirm by text."
-                            )
-                        else:
-                            ai_text = (
-                                "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
-                            )
                     else:
-                        sms_info("post_booking_confirmation_skipped", reason="no_caller_phone", client_id=cid)
-                        ai_text = (
-                            "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
+                        name_ok = bool((booking.get("name") or "").strip())
+                        date_ok = bool((booking.get("date") or "").strip())
+                        time_ok = bool((booking.get("time") or "").strip())
+                        reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
+                        system_info(
+                            "voice_booking_not_created",
+                            reason=reason,
+                            name_ok=name_ok,
+                            date_ok=date_ok,
+                            time_ok=time_ok,
                         )
-                    fn_mem = (call_data.get("from_number") or "").strip()
-                    if fn_mem:
-                        dp = {
-                            "last_voice_booking_date": apt.get("date"),
-                            "last_voice_booking_time": apt.get("time"),
-                            "last_service": ((apt.get("reason") or "").strip()[:120] or None),
-                        }
-                        em_patch = (apt.get("email") or "").strip()
-                        if em_patch:
-                            dp["email_on_file"] = em_patch
-                        dp = {k: v for k, v in dp.items() if v}
-                        try:
-                            update_caller_memory(
-                                fn_mem,
-                                name=(booking.get("name") or "").strip() or None,
-                                last_reason="appointment details texted (pending SMS confirmation)",
-                                increment_count=False,
-                                data_patch=dp if dp else None,
-                            )
-                        except Exception:
-                            pass
-                else:
-                    # Failed: either slot taken or missing/invalid data (name, date)
-                    name_ok = bool((booking.get("name") or "").strip())
-                    date_ok = bool((booking.get("date") or "").strip())
-                    time_ok = bool((booking.get("time") or "").strip())
-                    reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
-                    system_info(
-                        "voice_booking_not_created",
-                        reason=reason,
-                        name_ok=name_ok,
-                        date_ok=date_ok,
-                        time_ok=time_ok,
-                    )
-                    if not name_ok:
-                        ai_text = "I'd love to book that for you—what's your name?"
-                    elif not date_ok or not time_ok:
-                        ai_text = "I need the date and time again to confirm—which day and time would you like?"
-                    else:
-                        ai_text = "That time slot just got booked. Would you like to try another time or another day?"
-            except Exception as e:
-                logger.exception("voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e)
-                ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
+                        if not name_ok:
+                            ai_text = "I'd love to book that for you—what's your name?"
+                        elif not date_ok or not time_ok:
+                            ai_text = "I need the date and time again to confirm—which day and time would you like?"
+                        else:
+                            ai_text = "That time slot just got booked. Would you like to try another time or another day?"
+                except Exception as e:
+                    logger.exception("voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e)
+                    ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
         
         # Never send BOOKING: machine line to TTS or conversation history
         ai_text = _strip_booking_directive_for_voice(ai_text or "")
@@ -3954,10 +4030,16 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
     departments = info.get("departments") or []
     if not (services or departments):
         warnings.append("Add services or departments so the AI knows what your business offers (e.g. appointments, estimates, emergency service)")
+    roster_ready = staff_roster_ready_for_booking(info)
+    if not roster_ready:
+        warnings.append(
+            "Add at least one team member with a name and phone on the Team roster so callers can book appointments."
+        )
     return {
         "complete": len(missing) == 0,
         "missing": missing,
         "warnings": warnings,
+        "roster_ready": roster_ready,
     }
 
 @app.get("/api/setup-status")
@@ -5356,6 +5438,18 @@ async def handle_incoming_call(request: Request):
             return Response(content=str(fail_twiml), media_type="application/xml")
 
         active_calls[call_sid]["twilio_public_base_url"] = base_url
+
+        biz_info = get_business_info()
+        if not staff_roster_ready_for_booking(biz_info):
+            voice_forward(
+                "roster_not_ready_forward",
+                call_sid=call_sid or "",
+                client_id=client_id,
+                forward_kind="store_forwarding",
+                has_fallback_configured=bool((biz_info.get("forwarding_phone") or "").strip()),
+            )
+            roster_twiml = twiml_roster_not_ready_handoff(base_url, biz_info, call_sid=call_sid or "")
+            return Response(content=str(roster_twiml), media_type="application/xml")
 
         # Create TwiML response
         response = VoiceResponse()

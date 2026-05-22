@@ -158,7 +158,12 @@ export default function Settings() {
   }, [])
 
   const refreshSetupStatus = () => {
-    api.get('/api/setup-status').then((r) => setSetupStatus(r.data)).catch(() => setSetupStatus(null))
+    api.get('/api/setup-status').then((r) => {
+      setSetupStatus(r.data)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('call-surge-setup-status', { detail: r.data }))
+      }
+    }).catch(() => setSetupStatus(null))
   }
 
   useEffect(() => {
@@ -873,7 +878,7 @@ export default function Settings() {
 
       </SettingsSection>
 
-      <SettingsSection delay={5} aria-labelledby="team-roster-settings-heading">
+      <SettingsSection delay={5} id="team-roster-settings" aria-labelledby="team-roster-settings-heading">
         <h2
           id="team-roster-settings-heading"
           className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"

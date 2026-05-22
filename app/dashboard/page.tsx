@@ -10,6 +10,13 @@ import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { PlanPicker } from '@/components/PlanPicker'
 import { AppChrome } from '@/components/layout/AppChrome'
+import { AlertTriangle, Users } from 'lucide-react'
+
+export const TEAM_ROSTER_SECTION_ID = 'team-roster-settings'
+
+type SetupStatusSnapshot = {
+  roster_ready?: boolean
+}
 
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
 const Appointments = dynamic(() => import('@/components/Appointments'), { ssr: false })
@@ -33,6 +40,7 @@ export default function DashboardPage() {
   const [access, setAccess] = useState<'loading' | 'granted' | 'denied' | 'subscription_required'>('loading')
   const [deniedKind, setDeniedKind] = useState<'no_membership' | 'verification_failed'>('no_membership')
   const [subscription, setSubscription] = useState<SubscriptionState | null>(null)
+  const [setupStatus, setSetupStatus] = useState<SetupStatusSnapshot | null>(null)
 
   const tabs = useMemo(() => {
     const base: { id: typeof activeTab; label: string }[] = [
@@ -69,6 +77,20 @@ export default function DashboardPage() {
       })
       .catch(applySubscriptionError)
   }, [api, applySubscriptionError])
+
+  const fetchSetupStatus = useCallback(() => {
+    api
+      .get<SetupStatusSnapshot>('/api/setup-status')
+      .then((res) => setSetupStatus(res.data))
+      .catch(() => setSetupStatus(null))
+  }, [api])
+
+  const goToTeamRoster = useCallback(() => {
+    setActiveTab('settings')
+    window.setTimeout(() => {
+      document.getElementById(TEAM_ROSTER_SECTION_ID)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 400)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -162,6 +184,27 @@ export default function DashboardPage() {
       setActiveTab('appointments')
     }
   }, [subscription?.limits?.has_lead_capture, activeTab])
+
+  useEffect(() => {
+    if (access !== 'granted') return
+    fetchSetupStatus()
+  }, [access, fetchSetupStatus])
+
+  useEffect(() => {
+    if (access !== 'granted') return
+    const onRefresh = (e: Event) => {
+      const detail = (e as CustomEvent<SetupStatusSnapshot>).detail
+      if (detail && typeof detail.roster_ready === 'boolean') {
+        setSetupStatus(detail)
+      } else {
+        fetchSetupStatus()
+      }
+    }
+    window.addEventListener('call-surge-setup-status', onRefresh)
+    return () => window.removeEventListener('call-surge-setup-status', onRefresh)
+  }, [access, fetchSetupStatus])
+
+  const showRosterWarning = access === 'granted' && setupStatus?.roster_ready === false
 
   const panelTransition = reduceMotion ? { duration: 0 } : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const }
 
@@ -271,6 +314,36 @@ export default function DashboardPage() {
                   left.
                 </>
               )}
+            </div>
+          )}
+
+          {showRosterWarning && (
+            <div
+              role="alert"
+              className="sticky top-4 z-20 mb-6 rounded-2xl border-2 border-amber-400/80 bg-gradient-to-br from-amber-500/25 via-amber-600/15 to-orange-600/20 p-5 shadow-lg shadow-amber-900/30 md:p-6"
+            >
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div className="flex gap-4">
+                  <AlertTriangle className="h-10 w-10 shrink-0 text-amber-300" aria-hidden />
+                  <div>
+                    <h2 className="text-lg font-bold text-amber-50 md:text-xl">Team roster required</h2>
+                    <p className="mt-1 max-w-2xl text-sm leading-relaxed text-amber-100/95">
+                      Your AI receptionist cannot book appointments or answer calls normally until you add at least one team
+                      member with a <strong className="font-semibold text-white">name</strong> and{' '}
+                      <strong className="font-semibold text-white">phone number</strong>. Callers will hear a message and be
+                      transferred to your store until this is fixed.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={goToTeamRoster}
+                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 py-3 text-sm font-bold text-amber-950 shadow-md motion-safe-transition hover:bg-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200"
+                >
+                  <Users className="h-5 w-5" aria-hidden />
+                  Add team members
+                </button>
+              </div>
             </div>
           )}
 
