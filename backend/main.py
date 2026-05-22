@@ -4013,7 +4013,7 @@ async def api_greeting_preview(tenant: Optional[dict] = Depends(require_active_s
 SETUP_REQUIRED_FIELDS = [
     ("name", "Business name"),
     ("hours", "Hours of operation"),
-    ("forwarding_phone", "Phone number"),
+    ("forwarding_phone", "Store phone (real person)"),
     ("address", "Address"),
 ]
 

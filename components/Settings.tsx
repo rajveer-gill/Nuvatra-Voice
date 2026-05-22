@@ -472,7 +472,7 @@ export default function Settings() {
             [
               { key: 'name', label: 'Business name' },
               { key: 'hours', label: 'Hours of operation' },
-              { key: 'phone', label: 'Phone number' },
+              { key: 'forwarding_phone', label: 'Store phone (real person)' },
               { key: 'address', label: 'Address' },
             ] as const
           ).map(({ key, label }) => {
@@ -483,14 +483,11 @@ export default function Settings() {
               layout
               initial={reduceMotion ? false : { opacity: 0, x: -8 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.05 * (['name', 'hours', 'phone', 'address'].indexOf(key) + 1) }}
+              transition={{ delay: 0.05 * (['name', 'hours', 'forwarding_phone', 'address'].indexOf(key) + 1) }}
               className="flex items-center gap-2 text-sm"
             >
               {done ? <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" /> : <Circle className="w-4 h-4 text-gray-300 shrink-0" />}
               <span className={done ? 'text-gray-700' : 'text-gray-500'}>{label}</span>
-              {key === 'phone' && (
-                <span className="text-gray-400 text-xs font-normal">(where callers go when they ask for a person)</span>
-              )}
             </motion.li>
             )
           })}
@@ -743,46 +740,51 @@ export default function Settings() {
               </>
             )}
           </div>
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Hours of operation</label>
-            <button
-              type="button"
-              onClick={() => setHoursModalOpen(true)}
-              className="group flex w-full items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gradient-to-br from-white via-white to-primary-50/40 px-4 py-3.5 text-left shadow-sm ring-1 ring-black/5 transition hover:border-primary-300 hover:shadow-md hover:ring-primary-200/40"
-            >
-              <div className="min-w-0 flex-1">
-                <p className={`truncate text-sm ${hoursSummaryPreview ? 'font-medium text-gray-900' : 'text-gray-500'}`}>
-                  {hoursSummaryPreview ||
-                    'Set which days you\u0027re open and your hours (opens the visual editor)'}
-                </p>
-                <p className="mt-1 text-xs text-gray-500">
-                  Schedule presets, copy weekdays, and live preview. Saved when you click Apply in the editor, then Save changes below.
-                </p>
-              </div>
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-100 text-primary-700 transition group-hover:scale-105 group-hover:bg-primary-200">
-                <Clock className="h-5 w-5" aria-hidden />
-              </div>
-            </button>
-            <BusinessHoursModal
-              isOpen={hoursModalOpen}
-              onClose={() => setHoursModalOpen(false)}
-              hoursText={form.hours}
-              onApply={(next) => setForm((f) => ({ ...f, hours: next }))}
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Forwarding phone number</label>
-            <input
-              type="text"
-              value={form.forwarding_phone}
-              onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
-              className="cs-field w-full"
-              placeholder="Number to forward calls to when a caller asks for a real person"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Default line when someone asks for a person without naming anyone on your transfer list (see Call transfers
-              section below).
-            </p>
+          <div className="md:col-span-2 space-y-4 rounded-xl border border-slate-200/80 bg-slate-50/60 p-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Hours of operation</label>
+              <button
+                type="button"
+                onClick={() => setHoursModalOpen(true)}
+                className="group flex w-full items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gradient-to-br from-white via-white to-primary-50/40 px-4 py-3.5 text-left shadow-sm ring-1 ring-black/5 transition hover:border-primary-300 hover:shadow-md hover:ring-primary-200/40"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className={`truncate text-sm ${hoursSummaryPreview ? 'font-medium text-gray-900' : 'text-gray-500'}`}>
+                    {hoursSummaryPreview ||
+                      'Set which days you\u0027re open and your hours (opens the visual editor)'}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Schedule presets, copy weekdays, and live preview. Saved when you click Apply in the editor, then Save
+                    changes below.
+                  </p>
+                </div>
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-100 text-primary-700 transition group-hover:scale-105 group-hover:bg-primary-200">
+                  <Clock className="h-5 w-5" aria-hidden />
+                </div>
+              </button>
+              <BusinessHoursModal
+                isOpen={hoursModalOpen}
+                onClose={() => setHoursModalOpen(false)}
+                hoursText={form.hours}
+                onApply={(next) => setForm((f) => ({ ...f, hours: next }))}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Store phone (talk to a real person)</label>
+              <input
+                type="tel"
+                value={form.forwarding_phone}
+                onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
+                className="cs-field w-full"
+                placeholder="e.g. +1 555 123 4567 — your front desk or owner cell"
+                autoComplete="tel"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                When a caller wants a human—not the AI—we transfer here (including roster-not-ready calls and &quot;let me
+                talk to someone&quot;). This is not your AI line above. Named staff transfers use the Call transfers section
+                below when configured.
+              </p>
+            </div>
           </div>
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
