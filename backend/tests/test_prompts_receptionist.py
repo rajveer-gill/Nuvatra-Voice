@@ -48,10 +48,10 @@ def test_prompt_repeat_caller_memory(minimal_business):
 
 def test_prompt_staff_transfer_instruction(minimal_business):
     minimal_business["staff"] = [{"id": "s1", "name": "Jamie", "phone": "+15551110001"}]
-    minimal_business["transfer_targets"] = [{"staff_id": "s1", "phone": "+15551110001"}]
     p = build_system_prompt(business_info=minimal_business, include_booked_slots=False)
     assert "TRANSFER_TO:" in p
     assert "Jamie" in p
+    assert "Team roster" in p
 
 
 def test_prompt_staff_notes_reference_block(minimal_business):

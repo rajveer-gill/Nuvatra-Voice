@@ -55,16 +55,9 @@ async def apply_caller_utterance(
 
     async with _lock_for(call_sid):
         if not call_sid or call_sid not in m.active_calls:
-            forwarding_phone = m.get_business_info().get("forwarding_phone")
-            if forwarding_phone:
-                voice_forward(
-                    "utterance_lost_session_forward",
-                    call_sid=call_sid,
-                    forward_kind="fallback",
-                    has_fallback_configured=True,
-                )
-                xml = str(m.forward_call_to_business(forwarding_phone, base_url, "English"))
-                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
+            fwd = m.forward_call_to_roster(base_url, "English", call_sid=call_sid, forward_kind="utterance_lost_session")
+            if fwd:
+                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(fwd))
             # Use a fresh variable name per branch so Python never treats TwiML locals as one shared `vr`
             # (assignments later in this function would otherwise make `vr` local for the whole body → UnboundLocalError).
             lost_twiml = m.VoiceResponse()
@@ -165,19 +158,18 @@ async def apply_caller_utterance(
             call_sid=call_sid,
             client_id=str(call_data.get("client_id") or ""),
         ):
-            forwarding_phone = m.get_business_info().get("forwarding_phone")
-            if forwarding_phone:
-                voice_forward(
-                    "caller_requested_human",
-                    call_sid=call_sid,
-                    client_id=str(call_data.get("client_id") or ""),
-                    forward_kind="fallback",
-                    has_fallback_configured=True,
-                )
+            fwd = m.forward_call_to_roster(
+                base_url,
+                detected_lang,
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                user_text=speech_result or "",
+                forward_kind="caller_requested_human",
+            )
+            if fwd:
                 call_data["outcome"] = "forwarded"
                 m.call_log_set_outcome(call_sid, "forwarded")
-                xml = str(m.forward_call_to_business(forwarding_phone, base_url, detected_lang))
-                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
+                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(fwd))
 
         m.response_status[call_sid] = {
             "status": "pending",

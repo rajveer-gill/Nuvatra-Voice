@@ -26,24 +26,40 @@ def test_setup_status_warns_without_roster():
         {
             "name": "Spa",
             "hours": "9-5",
-            "forwarding_phone": "+15551111111",
             "address": "123 Main",
             "staff": [],
             "services": [{"id": "s1", "name": "Cut"}],
         }
     )
     assert body.get("roster_ready") is False
-    assert any("Team roster" in w for w in body.get("warnings") or [])
+    assert any("Team roster" in w or "team member" in w.lower() for w in body.get("warnings") or [])
 
 
-def test_roster_not_ready_twiml_includes_message_and_dial(monkeypatch):
+def test_roster_not_ready_twiml_plays_message_and_hangup(monkeypatch):
     monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
     twiml = str(
         main.twiml_roster_not_ready_handoff(
             "https://api.example.com",
-            {"forwarding_phone": "+15557654321"},
+            {"staff": []},
             call_sid="CA123",
         )
     )
     assert "tts-audio" in twiml
-    assert "+15557654321" in twiml.replace(" ", "")
+    assert "Goodbye" in twiml
+    assert "<Dial" not in twiml
+
+
+def test_booking_requires_staff_when_multiple_roster_members():
+    info = {
+        "staff": [
+            {"id": "a", "name": "Sam", "phone": "+15551111111"},
+            {"id": "b", "name": "Alex", "phone": "+15552222222"},
+        ],
+    }
+    assert main._booking_staff_id_from_roster({"staff": ""}, info) is None
+    assert main._booking_staff_id_from_roster({"staff": "Alex"}, info) == "b"
+
+
+def test_booking_auto_assigns_single_roster_member():
+    info = {"staff": [{"id": "only", "name": "Jamie", "phone": "+15551111111"}]}
+    assert main._booking_staff_id_from_roster({"staff": ""}, info) == "only"

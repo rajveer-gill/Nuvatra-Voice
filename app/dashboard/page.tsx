@@ -328,10 +328,9 @@ export default function DashboardPage() {
                   <div>
                     <h2 className="text-lg font-bold text-amber-50 md:text-xl">Team roster required</h2>
                     <p className="mt-1 max-w-2xl text-sm leading-relaxed text-amber-100/95">
-                      Your AI receptionist cannot book appointments or answer calls normally until you add at least one team
+                      Your AI receptionist cannot book appointments or transfer calls until you add at least one team
                       member with a <strong className="font-semibold text-white">name</strong> and{' '}
-                      <strong className="font-semibold text-white">phone number</strong>. Callers will hear a message and be
-                      transferred to your store until this is fixed.
+                      <strong className="font-semibold text-white">phone number</strong> on the team roster.
                     </p>
                   </div>
                 </div>

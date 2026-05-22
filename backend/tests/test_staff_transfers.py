@@ -1,13 +1,15 @@
 """Unit tests for staff_transfers module."""
 from staff_transfers import (
+    bookable_staff_members,
     finalize_transfer_targets_for_storage,
     get_transfer_phone_by_name,
+    resolve_live_transfer_phone,
     resolve_transfer_destinations,
     TransferTarget,
 )
 
 
-def test_resolve_transfer_targets_linked_staff_phone_authoritative():
+def test_resolve_transfer_destinations_uses_roster_only():
     info = {
         "staff": [{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "name": "Jamie", "phone": "+15559876543"}],
         "transfer_targets": [
@@ -24,7 +26,7 @@ def test_resolve_transfer_targets_linked_staff_phone_authoritative():
     assert dests[0]["phone"] == "+15559876543"
 
 
-def test_legacy_staff_phones_when_no_transfer_targets():
+def test_resolve_roster_member_with_phone():
     info = {
         "staff": [{"id": "a", "name": "Sam", "phone": "+15551234567"}],
         "transfer_targets": [],
@@ -34,13 +36,28 @@ def test_legacy_staff_phones_when_no_transfer_targets():
     assert dests[0]["phone"] == "+15551234567"
 
 
-def test_get_transfer_phone_by_name():
+def test_get_transfer_phone_by_name_from_roster():
     info = {
-        "transfer_targets": [{"id": "x", "name": "Alex", "phone": "+15552223333"}],
-        "staff": [],
+        "staff": [{"id": "x", "name": "Alex", "phone": "+15552223333"}],
     }
     assert get_transfer_phone_by_name("alex", info) == "+15552223333"
     assert get_transfer_phone_by_name("nobody", info) is None
+
+
+def test_resolve_live_transfer_single_roster_generic_request():
+    info = {"staff": [{"id": "a", "name": "Front desk", "phone": "+15551234567"}]}
+    assert resolve_live_transfer_phone(info, user_text="I need a real person") == "+15551234567"
+
+
+def test_resolve_live_transfer_requires_name_when_multiple():
+    info = {
+        "staff": [
+            {"id": "a", "name": "Sam", "phone": "+15551234567"},
+            {"id": "b", "name": "Alex", "phone": "+15559876543"},
+        ],
+    }
+    assert resolve_live_transfer_phone(info, user_text="talk to someone") is None
+    assert resolve_live_transfer_phone(info, staff_name="Alex") == "+15559876543"
 
 
 def test_finalize_rejects_duplicate_staff_link():
@@ -54,3 +71,13 @@ def test_finalize_rejects_duplicate_staff_link():
         assert False, "expected ValueError"
     except ValueError as e:
         assert "once" in str(e).lower()
+
+
+def test_bookable_staff_members_filters_incomplete_rows():
+    info = {
+        "staff": [
+            {"name": "Alex", "phone": "+15551234567"},
+            {"name": "No Phone", "phone": ""},
+        ]
+    }
+    assert len(bookable_staff_members(info)) == 1

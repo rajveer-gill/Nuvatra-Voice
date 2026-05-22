@@ -18,7 +18,6 @@ import {
   AlertTriangle,
   Clock,
   Users,
-  PhoneForwarded,
 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import {
@@ -32,11 +31,6 @@ import {
 } from '@/components/settings/constants'
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
 import { StaffMembersSection, normalizeStaffFromApi, type StaffRow } from '@/components/settings/StaffMembersSection'
-import {
-  TransferTargetsSection,
-  normalizeTransferFromApi,
-  type TransferRow,
-} from '@/components/settings/TransferTargetsSection'
 import {
   normalizeServices,
   normalizeSpecials,
@@ -113,7 +107,6 @@ export default function Settings() {
     name: '',
     business_type: '',
     hours: '',
-    forwarding_phone: '',
     email: '',
     address: '',
     menu_link: '',
@@ -125,8 +118,6 @@ export default function Settings() {
   const [industryLocked, setIndustryLocked] = useState(false)
   const [verticalLabel, setVerticalLabel] = useState('')
   const [staff, setStaff] = useState<StaffRow[]>([])
-  const [transferTargets, setTransferTargets] = useState<TransferRow[]>([])
-  const [transferMax, setTransferMax] = useState<number | null>(null)
   const [greetingPreview, setGreetingPreview] = useState<{
     spoken_text: string
     main_greeting: string
@@ -203,8 +194,7 @@ export default function Settings() {
         if (cancelled) return
         setMessage(null)
         try {
-          const limits = (subRes?.data as { limits?: { transfer_max?: number; sms_automations_max?: number } } | null)?.limits
-          if (limits?.transfer_max != null) setTransferMax(limits.transfer_max)
+          const limits = (subRes?.data as { limits?: { sms_automations_max?: number } } | null)?.limits
           if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
           setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
           setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
@@ -220,7 +210,6 @@ export default function Settings() {
           }
           setVoice((d.voice as string) || 'fable')
           setStaff(normalizeStaffFromApi(d.staff ?? []))
-          setTransferTargets(normalizeTransferFromApi(d.transfer_targets ?? []))
           const spd = typeof d.speed === 'number' ? d.speed : 1.0
           setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
           setReceptionistName((d.receptionist_name as string) || '')
@@ -230,7 +219,6 @@ export default function Settings() {
             name: (d.name as string) || '',
             business_type: (d.business_type as string) || '',
             hours: (d.hours as string) || '',
-            forwarding_phone: (d.forwarding_phone as string) || '',
             email: (d.email as string) || '',
             address: (d.address as string) || '',
             menu_link: (d.menu_link as string) || '',
@@ -370,7 +358,6 @@ export default function Settings() {
         name: form.name || undefined,
         ...(!industryLocked ? { business_type: form.business_type || undefined } : {}),
         hours: form.hours || undefined,
-        forwarding_phone: form.forwarding_phone || undefined,
         email: form.email || undefined,
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
@@ -472,7 +459,6 @@ export default function Settings() {
             [
               { key: 'name', label: 'Business name' },
               { key: 'hours', label: 'Hours of operation' },
-              { key: 'forwarding_phone', label: 'Store phone (real person)' },
               { key: 'address', label: 'Address' },
             ] as const
           ).map(({ key, label }) => {
@@ -483,14 +469,11 @@ export default function Settings() {
               layout
               initial={reduceMotion ? false : { opacity: 0, x: -8 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.05 * (['name', 'hours', 'forwarding_phone', 'address'].indexOf(key) + 1) }}
+              transition={{ delay: 0.05 * (['name', 'hours', 'address'].indexOf(key) + 1) }}
               className="flex items-center gap-2 text-sm"
             >
               {done ? <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" /> : <Circle className="w-4 h-4 text-gray-300 shrink-0" />}
               <span className={done ? 'text-gray-700' : 'text-gray-500'}>{label}</span>
-              {key === 'forwarding_phone' && (
-                <span className="text-gray-400 text-xs font-normal">(when callers want a real person)</span>
-              )}
             </motion.li>
             )
           })}
@@ -771,20 +754,6 @@ export default function Settings() {
             />
           </div>
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Store phone (talk to a real person)</label>
-            <input
-              type="text"
-              value={form.forwarding_phone}
-              onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
-              className="cs-field w-full"
-              placeholder="Number to transfer to when a caller wants a real person"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Used when someone asks to speak with a person at your business (not the AI receptionist line). If they name
-              someone on your transfer list, we use that number instead (see Call transfers below).
-            </p>
-          </div>
-          <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
             <input
               type="email"
@@ -887,36 +856,13 @@ export default function Settings() {
           Team roster
         </h2>
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
-          Staff your callers can book with (stylists, artists, providers, chairs). Add as many as you need. This list is only for
-          scheduling and AI context, not live call transfers.
+          Everyone callers can book with and reach by phone (stylists, front desk, providers). Add a name and phone for each person.
+          For a general line, add someone like &quot;Front desk&quot; with that number. Live transfers and appointments both use this roster.
         </p>
         <StaffMembersSection
           staff={staff}
           availableServices={serviceItems}
           onStaffChange={setStaff}
-          api={api}
-          onNotify={setMessage}
-          onAfterSave={refreshSetupStatus}
-        />
-      </SettingsSection>
-
-      <SettingsSection delay={6} aria-labelledby="call-transfers-settings-heading">
-        <h2
-          id="call-transfers-settings-heading"
-          className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"
-        >
-          <PhoneForwarded className="w-6 h-6 text-violet-600" />
-          Call transfers
-        </h2>
-        <p className="text-gray-600 text-sm mb-6 max-w-3xl">
-          When a caller asks to speak with someone by name, the AI can transfer only to numbers you list here. Your plan limits
-          how many destinations you can add, not how many people are on your booking roster above.
-        </p>
-        <TransferTargetsSection
-          transfers={transferTargets}
-          staff={staff}
-          transferMax={transferMax}
-          onTransfersChange={setTransferTargets}
           api={api}
           onNotify={setMessage}
           onAfterSave={refreshSetupStatus}
