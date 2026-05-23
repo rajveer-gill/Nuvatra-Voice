@@ -1,0 +1,26 @@
+# Local PostgreSQL for development (optional).
+# Start: docker compose up -d
+# Stop:  docker compose down
+# Then set in backend/.env:
+#   DATABASE_URL=postgresql://nuvatra:nuvatra_dev@localhost:5432/nuvatra
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nuvatra
+      POSTGRES_PASSWORD: nuvatra_dev
+      POSTGRES_DB: nuvatra
+    ports:
+      - "5434:5432"
+    volumes:
+      - nuvatra_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nuvatra -d nuvatra"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  nuvatra_pgdata:

@@ -195,8 +195,26 @@ export default function AdminPage() {
     setSuccess(null)
     setError(null)
     try {
-      await api.post('/api/admin/tenants', { ...form, plan: 'free' })
-      setSuccess(`Tenant "${form.name}" created. Invite sent to ${form.email}.`)
+      const { data } = await api.post<{
+        invite_sent?: boolean
+        user_relinked?: boolean
+        clerk_error?: string | null
+      }>('/api/admin/tenants', { ...form, plan: 'free' })
+      if (data.user_relinked) {
+        setSuccess(
+          `Tenant "${form.name}" created. That email already has a Clerk account — linked to this business. They can sign in and open Dashboard (refresh if needed).`
+        )
+      } else if (data.invite_sent) {
+        setSuccess(`Tenant "${form.name}" created. Invitation email sent to ${form.email}.`)
+      } else {
+        setError(
+          data.clerk_error ||
+            `Tenant "${form.name}" was created but no invite email was sent. Fix the issue below, then use Resend invite on the tenant.`
+        )
+        if (data.clerk_error) {
+          setSuccess(`Tenant "${form.name}" created (pending invite).`)
+        }
+      }
       setForm({
         client_id: '',
         name: '',
@@ -281,13 +299,17 @@ export default function AdminPage() {
         invite_sent?: boolean
         user_relinked?: boolean
         pending_invite_stored?: boolean
+        clerk_error?: string | null
       }>(`/api/admin/tenants/${tenantId}/resend-invite`, { email })
       if (data.user_relinked) {
-        setSuccess('Existing account linked to this business. They can refresh the dashboard.')
+        setSuccess('Existing account linked to this business. Sign out, sign in again, then open Dashboard.')
       } else if (data.invite_sent) {
-        setSuccess('Invitation email sent. They should open that link to finish access.')
+        setSuccess('Invitation email sent. Open that link from the inbox (same email you entered here).')
       } else {
-        setSuccess('Pending invite saved. Resend may require Clerk dashboard if email was not sent.')
+        setError(
+          data.clerk_error ||
+            'Invite was not sent. Check Render CLERK_SECRET_KEY and Clerk Dashboard → Invitations.'
+        )
       }
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } }
@@ -451,12 +473,14 @@ export default function AdminPage() {
                 <input
                   type="email"
                   required
-                  placeholder="client@example.com"
+                  placeholder="you@yourdomain.com"
                   value={form.email}
                   onChange={(e) => setForm({ ...form, email: e.target.value })}
                   className={inputClass}
                 />
-                <p className="mt-1 text-xs text-zinc-500">Clerk will send an invite. New tenants get a 7-day free trial.</p>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Real inbox only (not @example.com). Must match the email used to sign in — including Google OAuth.
+                </p>
               </div>
               <button
                 type="submit"
@@ -554,7 +578,7 @@ export default function AdminPage() {
                               onChange={(e) =>
                                 setInviteEmailByTenant((d) => ({ ...d, [t.id]: e.target.value }))
                               }
-                              placeholder="client@example.com"
+                              placeholder="you@yourdomain.com"
                               className={inputClass}
                             />
                           </div>

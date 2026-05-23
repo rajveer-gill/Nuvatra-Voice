@@ -2933,16 +2933,38 @@ class AdminResendInviteRequest(BaseModel):
 def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
     """
     Queue pending invite by email and either re-link an existing Clerk user or send a new invitation.
-  """
+    """
     email = (email or "").strip()
     if not email or "@" not in email:
-        return {"invite_sent": False, "user_relinked": False, "pending_invite_stored": False}
+        return {
+            "invite_sent": False,
+            "user_relinked": False,
+            "pending_invite_stored": False,
+            "clerk_error": "Valid email required",
+        }
+    lowered = email.lower()
+    if lowered.endswith("@example.com") or lowered.endswith("@example.org") or lowered.endswith("@test.com"):
+        return {
+            "invite_sent": False,
+            "user_relinked": False,
+            "pending_invite_stored": True,
+            "clerk_error": (
+                f"{email} is a placeholder address and cannot receive mail. "
+                "Use the client's real email (must match how they sign in)."
+            ),
+        }
     db_tenant_invite_upsert(email, tenant_id)
     invite_sent = False
     user_relinked = False
+    clerk_error: Optional[str] = None
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     if not clerk_secret:
-        return {"invite_sent": False, "user_relinked": False, "pending_invite_stored": True}
+        return {
+            "invite_sent": False,
+            "user_relinked": False,
+            "pending_invite_stored": True,
+            "clerk_error": "CLERK_SECRET_KEY is not set on the backend (Render). Invites cannot be sent.",
+        }
     import httpx
     headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
     existing_user_id = None
@@ -2973,6 +2995,7 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
             user_relinked = True
             print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant_id}")
         except Exception as e:
+            clerk_error = f"Re-link failed: {e}"
             print(f"[Admin] Error re-linking user: {e}")
     else:
         try:
@@ -2989,13 +3012,16 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
             if resp.status_code < 400:
                 invite_sent = True
             else:
-                print(f"[Admin] Clerk invite failed: {resp.status_code} {resp.text}")
+                clerk_error = f"Clerk API {resp.status_code}: {(resp.text or '')[:240]}"
+                print(f"[Admin] Clerk invite failed: {clerk_error}")
         except Exception as e:
+            clerk_error = str(e)[:240]
             print(f"[Admin] Clerk invite error: {e}")
     return {
         "invite_sent": invite_sent,
         "user_relinked": user_relinked,
         "pending_invite_stored": True,
+        "clerk_error": clerk_error,
     }
 
 
@@ -3063,8 +3089,8 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
     link = _clerk_link_email_to_tenant(req.email, tenant["id"])
     invite_sent = bool(link.get("invite_sent"))
     user_relinked = bool(link.get("user_relinked"))
-    audit_log("admin", "tenant_created", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant["id"], client_id=tenant["client_id"], details={"name": req.name}, request=request)
-    return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked}
+    audit_log("admin", "tenant_created", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant["id"], client_id=tenant["client_id"], details={"name": req.name, **link}, request=request)
+    return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked, "clerk_error": link.get("clerk_error")}
 
 
 @app.post("/api/admin/tenants/{tenant_id}/resend-invite")
@@ -3093,15 +3119,10 @@ async def admin_resend_invite(
         resource_type="tenant",
         resource_id=tenant_id,
         client_id=tenant.get("client_id"),
-        details={"email": email, "invite_sent": invite_sent},
+        details={"email": email, **link},
         request=request,
     )
-    return {
-        "success": True,
-        "invite_sent": invite_sent,
-        "user_relinked": user_relinked,
-        "pending_invite_stored": True,
-    }
+    return {"success": True, **link}
 
 
 @app.get("/api/admin/tenants")

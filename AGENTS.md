@@ -8,7 +8,7 @@ Nuvatra Voice is an AI voice receptionist SaaS with two services:
 - **Frontend**: Next.js 14 (TypeScript/React/Tailwind) — deployed on Vercel (e.g. `nuvatra-voice.vercel.app`)
 - **Backend**: Python FastAPI — deployed on Render at `nuvatra-voice.onrender.com`
 
-See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `npm run dev:backend`, `npm run lint`, `npm run build`).
+See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `npm run dev:backend`, `npm run lint`, `npm run build`). For a full local stack (env files, Postgres, Clerk parity with production), see **`LOCAL-DEV.md`** (`npm run setup:dev`, `npm run dev:check`).
 
 ### Running services locally
 

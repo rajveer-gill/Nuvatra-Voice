@@ -56,6 +56,7 @@ See [DEPLOYMENT.md](./DEPLOYMENT.md) for Render/Vercel setup; [PHONE-SETUP.md](.
 3. **Run both servers (one command)**
    - Windows: `bin\dev.cmd` or `npm run dev`
    - Mac/Linux: `./bin/dev` or `npm run dev`
+   - First time: `npm run setup:dev` then `npm run dev:check` — see **[LOCAL-DEV.md](./LOCAL-DEV.md)** for Postgres, Clerk, and production-parity setup.
 
 4. Open **http://localhost:3000** – marketing home (public). Log in to access **Dashboard** (Nuvatra Voice).
 

@@ -7,6 +7,8 @@
     "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "cd backend && python main.py",
     "dev:frontend": "next dev --hostname 0.0.0.0 --port 3000 --turbo",
+    "setup:dev": "powershell -ExecutionPolicy Bypass -File ./scripts/setup-dev.ps1",
+    "dev:check": "powershell -ExecutionPolicy Bypass -File ./scripts/dev-check.ps1",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
