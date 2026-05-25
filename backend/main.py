@@ -2930,6 +2930,46 @@ class AdminResendInviteRequest(BaseModel):
     email: str
 
 
+def _clerk_api_json_list(resp) -> list:
+    """Clerk list endpoints may return {data: [...]} or a bare list."""
+    if getattr(resp, "status_code", 500) >= 400:
+        return []
+    try:
+        body = resp.json()
+    except Exception:
+        return []
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        data = body.get("data")
+        return data if isinstance(data, list) else []
+    return []
+
+
+def _clerk_revoke_active_sessions(user_id: str, headers: dict) -> None:
+    """Force a fresh Clerk session so JWT public_metadata (tenant_id) is current."""
+    import httpx
+
+    try:
+        sessions_resp = httpx.get(
+            f"https://api.clerk.com/v1/sessions?user_id={user_id}&status=active",
+            headers=headers,
+            timeout=10.0,
+        )
+        for session in _clerk_api_json_list(sessions_resp):
+            sid = session.get("id") if isinstance(session, dict) else None
+            if not sid:
+                continue
+            httpx.post(
+                f"https://api.clerk.com/v1/sessions/{sid}/revoke",
+                headers=headers,
+                timeout=10.0,
+            )
+        print(f"[Admin] Revoked active Clerk sessions for user {user_id}")
+    except Exception as e:
+        print(f"[Admin] Error revoking sessions for Clerk user {user_id}: {e}")
+
+
 def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
     """
     Queue pending invite by email and either re-link an existing Clerk user or send a new invitation.
@@ -2993,6 +3033,7 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
             db_tenant_member_add(existing_user_id, tenant_id)
             db_tenant_invite_delete(email)
             user_relinked = True
+            _clerk_revoke_active_sessions(existing_user_id, headers)
             print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant_id}")
         except Exception as e:
             clerk_error = f"Re-link failed: {e}"
@@ -3214,13 +3255,15 @@ async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: s
                     headers=headers,
                     timeout=10.0,
                 )
-                if sessions_resp.status_code < 400:
-                    for session in sessions_resp.json().get("data", []):
-                        httpx.post(
-                            f"https://api.clerk.com/v1/sessions/{session['id']}/revoke",
-                            headers=headers,
-                            timeout=10.0,
-                        )
+                for session in _clerk_api_json_list(sessions_resp):
+                    sid = session.get("id") if isinstance(session, dict) else None
+                    if not sid:
+                        continue
+                    httpx.post(
+                        f"https://api.clerk.com/v1/sessions/{sid}/revoke",
+                        headers=headers,
+                        timeout=10.0,
+                    )
                 revoked_users.append(uid)
             except Exception as e:
                 print(f"[Admin] Error revoking access for Clerk user {uid}: {e}")

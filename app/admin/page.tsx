@@ -202,7 +202,7 @@ export default function AdminPage() {
       }>('/api/admin/tenants', { ...form, plan: 'free' })
       if (data.user_relinked) {
         setSuccess(
-          `Tenant "${form.name}" created. That email already has a Clerk account — linked to this business. They can sign in and open Dashboard (refresh if needed).`
+          `Tenant "${form.name}" created. That email already has a Clerk account — linked (no invite email). Sign out and sign in again, then open Dashboard.`
         )
       } else if (data.invite_sent) {
         setSuccess(`Tenant "${form.name}" created. Invitation email sent to ${form.email}.`)
@@ -302,7 +302,9 @@ export default function AdminPage() {
         clerk_error?: string | null
       }>(`/api/admin/tenants/${tenantId}/resend-invite`, { email })
       if (data.user_relinked) {
-        setSuccess('Existing account linked to this business. Sign out, sign in again, then open Dashboard.')
+        setSuccess(
+          'Account linked (no email — Clerk account already exists). Sign out and sign in again, then open Dashboard.'
+        )
       } else if (data.invite_sent) {
         setSuccess('Invitation email sent. Open that link from the inbox (same email you entered here).')
       } else {
