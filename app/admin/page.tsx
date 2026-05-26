@@ -199,10 +199,13 @@ export default function AdminPage() {
         invite_sent?: boolean
         user_relinked?: boolean
         clerk_error?: string | null
+        linked_clerk_user_id?: string | null
       }>('/api/admin/tenants', { ...form, plan: 'free' })
       if (data.user_relinked) {
         setSuccess(
-          `Tenant "${form.name}" created. That email already has a Clerk account — linked (no invite email). Sign out and sign in again, then open Dashboard.`
+          `Tenant "${form.name}" created. That email already has a Clerk account — linked (no invite email).${
+            data.linked_clerk_user_id ? ` Clerk user: ${data.linked_clerk_user_id}.` : ''
+          } Sign out and sign in again, then open Dashboard.`
         )
       } else if (data.invite_sent) {
         setSuccess(`Tenant "${form.name}" created. Invitation email sent to ${form.email}.`)
@@ -300,10 +303,13 @@ export default function AdminPage() {
         user_relinked?: boolean
         pending_invite_stored?: boolean
         clerk_error?: string | null
+        linked_clerk_user_id?: string | null
       }>(`/api/admin/tenants/${tenantId}/resend-invite`, { email })
       if (data.user_relinked) {
         setSuccess(
-          'Account linked (no email — Clerk account already exists). Sign out and sign in again, then open Dashboard.'
+          `Account linked (no email — Clerk account already exists).${
+            data.linked_clerk_user_id ? ` Clerk user: ${data.linked_clerk_user_id}.` : ''
+          } Sign out and sign in again, then open Dashboard.`
         )
       } else if (data.invite_sent) {
         setSuccess('Invitation email sent. Open that link from the inbox (same email you entered here).')

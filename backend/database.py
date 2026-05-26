@@ -483,6 +483,30 @@ def db_tenant_member_add(clerk_user_id: str, tenant_id: str) -> bool:
         return False
 
 
+def db_tenant_member_set_single(clerk_user_id: str, tenant_id: str) -> bool:
+    """Replace all tenant memberships for a user with one tenant (admin re-link / invite accept)."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tenant_members WHERE clerk_user_id = %s", (clerk_user_id,))
+        cur.execute(
+            """
+            INSERT INTO tenant_members (clerk_user_id, tenant_id)
+            VALUES (%s, %s)
+            ON CONFLICT (clerk_user_id, tenant_id) DO NOTHING
+            """,
+            (clerk_user_id, tenant_id),
+        )
+        cur.close()
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to set single tenant member: {e}")
+        return False
+
+
 def _normalize_invite_email(email: str) -> str:
     return (email or "").strip().lower()
 
@@ -564,6 +588,7 @@ def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
         FROM tenants t
         JOIN tenant_members m ON m.tenant_id = t.id
         WHERE m.clerk_user_id = %s
+        ORDER BY m.created_at DESC NULLS LAST, t.created_at DESC
         LIMIT 1
     """, (clerk_user_id,))
     row = cur.fetchone()

@@ -39,6 +39,14 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'appointments' | 'leads' | 'settings'>('appointments')
   const [access, setAccess] = useState<'loading' | 'granted' | 'denied' | 'subscription_required'>('loading')
   const [deniedKind, setDeniedKind] = useState<'no_membership' | 'verification_failed'>('no_membership')
+  const [deniedDetail, setDeniedDetail] = useState<string | null>(null)
+  const [accessDebug, setAccessDebug] = useState<{
+    user_id?: string
+    clerk_emails?: string[]
+    db_tenant_client_id?: string | null
+    has_tenant_membership?: boolean
+    is_admin?: boolean
+  } | null>(null)
   const [subscription, setSubscription] = useState<SubscriptionState | null>(null)
   const [setupStatus, setSetupStatus] = useState<SetupStatusSnapshot | null>(null)
 
@@ -54,8 +62,10 @@ export default function DashboardPage() {
     return base
   }, [subscription?.limits?.has_lead_capture])
 
-  const applySubscriptionError = useCallback((err: { response?: { status?: number } }) => {
+  const applySubscriptionError = useCallback((err: { response?: { status?: number; data?: { detail?: string } } }) => {
     const status = err.response?.status
+    const detail = typeof err.response?.data?.detail === 'string' ? err.response.data.detail : null
+    if (detail) setDeniedDetail(detail)
     if (status === 401 || status === 403) {
       setDeniedKind('no_membership')
     } else {
@@ -167,6 +177,28 @@ export default function DashboardPage() {
   }, [api, router, applySubscriptionError])
 
   useEffect(() => {
+    if (access !== 'denied' || deniedKind !== 'no_membership') return
+    let cancelled = false
+    api
+      .get<{
+        user_id?: string
+        clerk_emails?: string[]
+        db_tenant_client_id?: string | null
+        has_tenant_membership?: boolean
+        is_admin?: boolean
+      }>('/api/me/access', sameOriginApiConfig())
+      .then((res) => {
+        if (!cancelled) setAccessDebug(res.data)
+      })
+      .catch(() => {
+        if (!cancelled) setAccessDebug(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [access, deniedKind, api])
+
+  useEffect(() => {
     if (access !== 'granted' && access !== 'subscription_required') return
     const refresh = () => {
       if (document.visibilityState === 'visible') fetchSubscription()
@@ -243,8 +275,39 @@ export default function DashboardPage() {
               <p className="mt-3 text-center text-sm leading-relaxed text-zinc-400">
                 {deniedKind === 'verification_failed'
                   ? 'We could not confirm your account with the server. Check your connection and try again.'
-                  : 'Your sign-in is not linked to a business yet (this is not a trial or billing issue). Ask your administrator to resend the invite, then sign out and open the link from that email. If you already signed up, use the same email address that was invited.'}
+                  : deniedDetail ||
+                    'Your sign-in is not linked to a business yet (this is not a trial or billing issue). Ask your administrator to resend the invite, then sign out and open the link from that email. If you already signed up, use the same email address that was invited.'}
               </p>
+              {deniedKind === 'no_membership' && accessDebug && (
+                <motion.div
+                  initial={reduceMotion ? false : { opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="mt-5 rounded-xl border border-white/10 bg-zinc-950/60 p-4 text-left text-xs text-zinc-400"
+                >
+                  <p className="font-medium text-zinc-300">Signed-in account</p>
+                  {accessDebug.user_id && <p className="mt-1 break-all font-mono text-zinc-500">{accessDebug.user_id}</p>}
+                  {accessDebug.clerk_emails && accessDebug.clerk_emails.length > 0 && (
+                    <p className="mt-3">
+                      Email on this account:{' '}
+                      <span className="text-zinc-200">{accessDebug.clerk_emails.join(', ')}</span>
+                    </p>
+                  )}
+                  <p className="mt-2">
+                    Tenant linked in database:{' '}
+                    <span className={accessDebug.has_tenant_membership ? 'text-emerald-400' : 'text-amber-300'}>
+                      {accessDebug.has_tenant_membership
+                        ? accessDebug.db_tenant_client_id || 'yes'
+                        : 'none — admin must invite one of the emails above'}
+                    </span>
+                  </p>
+                  {accessDebug.is_admin && (
+                    <p className="mt-2 text-cyan-300">
+                      This account is a platform admin. Use <Link href="/admin" className="underline">/admin</Link> instead
+                      of the client dashboard.
+                    </p>
+                  )}
+                </motion.div>
+              )}
               <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
                 {deniedKind === 'verification_failed' && (
                   <button

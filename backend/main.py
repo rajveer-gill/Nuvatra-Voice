@@ -538,6 +538,7 @@ try:
         db_archive_purge_and_delete_tenant,
         db_tenant_get_members,
         db_tenant_member_add,
+        db_tenant_member_set_single,
         db_tenant_invite_upsert,
         db_tenant_invite_delete,
         db_tenant_invite_consume,
@@ -1277,12 +1278,13 @@ def require_tenant(request: Request):
     user_id, tenant_id_from_meta = verify_clerk_token(token)
     _ensure_db_ready()
     tenant = None
-    if tenant_id_from_meta and USE_DB:
-        tenant = db_tenant_get_by_id(tenant_id_from_meta)
+    # DB membership is authoritative — JWT public_metadata can be stale after tenant delete/relink.
+    if USE_DB and user_id:
+        tenant = db_tenant_get_for_user(user_id)
+    if not tenant and tenant_id_from_meta and USE_DB:
+        tenant = db_tenant_get_by_id(str(tenant_id_from_meta))
         if tenant and user_id:
             db_tenant_member_add(user_id, tenant["id"])
-    if not tenant and USE_DB:
-        tenant = db_tenant_get_for_user(user_id)
     if not tenant and USE_DB:
         # JWT often omits public_metadata; resolve via Clerk API + pending invite email.
         link = _clerk_fetch_user_link(user_id)
@@ -1304,13 +1306,19 @@ def require_tenant(request: Request):
                         _clerk_patch_user_tenant_metadata(user_id, tenant["id"])
                         print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via invite email {em}")
                         break
+    if tenant and user_id:
+        tid = str(tenant.get("id") or "").strip()
+        meta_tid = str(tenant_id_from_meta or "").strip()
+        if tid and meta_tid != tid:
+            _clerk_patch_user_tenant_metadata(user_id, tid)
     if not tenant:
+        print(f"[Auth] no_tenant user_id={user_id} jwt_metadata_tenant_id={tenant_id_from_meta!r}")
         audit_log("user", "auth_failure", actor_id=user_id, details={"reason": "no_tenant"}, request=request)
         raise HTTPException(
             status_code=403,
             detail=(
                 "No tenant assigned to your account. Open the invite link from your email to finish sign-up, "
-                "or ask your administrator to resend the invite."
+                "or ask your administrator to resend the invite using the exact email you use to sign in."
             ),
         )
     set_request_client_id(tenant["client_id"])
@@ -2997,6 +3005,7 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
     invite_sent = False
     user_relinked = False
     clerk_error: Optional[str] = None
+    linked_clerk_user_id: Optional[str] = None
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     if not clerk_secret:
         return {
@@ -3024,17 +3033,19 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
         print(f"[Admin] Error looking up Clerk user: {e}")
     if existing_user_id:
         try:
-            httpx.patch(
-                f"https://api.clerk.com/v1/users/{existing_user_id}",
-                headers=headers,
-                json={"public_metadata": {"tenant_id": tenant_id}},
-                timeout=10.0,
-            )
-            db_tenant_member_add(existing_user_id, tenant_id)
+            if not _clerk_patch_user_tenant_metadata(existing_user_id, tenant_id):
+                raise RuntimeError(
+                    f"Clerk metadata patch failed for {existing_user_id} (tenant_id={tenant_id})"
+                )
+            if not db_tenant_member_set_single(existing_user_id, tenant_id):
+                raise RuntimeError(
+                    f"Database membership update failed for {existing_user_id} (tenant_id={tenant_id})"
+                )
             db_tenant_invite_delete(email)
             user_relinked = True
+            linked_clerk_user_id = existing_user_id
             _clerk_revoke_active_sessions(existing_user_id, headers)
-            print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant_id}")
+            print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant_id} (email={email})")
         except Exception as e:
             clerk_error = f"Re-link failed: {e}"
             print(f"[Admin] Error re-linking user: {e}")
@@ -3063,6 +3074,7 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
         "user_relinked": user_relinked,
         "pending_invite_stored": True,
         "clerk_error": clerk_error,
+        "linked_clerk_user_id": linked_clerk_user_id,
     }
 
 
@@ -3108,6 +3120,36 @@ async def admin_session(request: Request):
         return {"is_admin": False}
     return {"is_admin": user_id in admin_ids}
 
+
+@app.get("/api/me/access")
+async def me_access(request: Request):
+    """
+    Debug helper for dashboard access issues: shows which Clerk user is signed in,
+    which emails Clerk has on file, and whether a tenant membership exists in the DB.
+    """
+    token = get_bearer_token(request)
+    if not token:
+        return {"signed_in": False}
+    try:
+        user_id, jwt_tid = verify_clerk_token(token)
+    except HTTPException:
+        return {"signed_in": False, "token_invalid": True}
+    _ensure_db_ready()
+    tenant = db_tenant_get_for_user(user_id) if USE_DB else None
+    link = _clerk_fetch_user_link(user_id) if USE_DB else None
+    admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+    return {
+        "signed_in": True,
+        "user_id": user_id,
+        "is_admin": user_id in admin_ids,
+        "jwt_metadata_tenant_id": jwt_tid,
+        "clerk_api_tenant_id": (link or {}).get("tenant_id"),
+        "clerk_emails": (link or {}).get("emails") or [],
+        "db_tenant_client_id": (tenant or {}).get("client_id"),
+        "db_tenant_id": (tenant or {}).get("id"),
+        "has_tenant_membership": tenant is not None,
+    }
+
 @app.get("/api/debug/cors")
 async def debug_cors():
     """No-auth endpoint to verify CORS config on deployed backend. e.g. curl https://your-api/api/debug/cors"""
@@ -3131,7 +3173,7 @@ async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, a
     invite_sent = bool(link.get("invite_sent"))
     user_relinked = bool(link.get("user_relinked"))
     audit_log("admin", "tenant_created", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant["id"], client_id=tenant["client_id"], details={"name": req.name, **link}, request=request)
-    return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked, "clerk_error": link.get("clerk_error")}
+    return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked, "clerk_error": link.get("clerk_error"), "linked_clerk_user_id": link.get("linked_clerk_user_id")}
 
 
 @app.post("/api/admin/tenants/{tenant_id}/resend-invite")
