@@ -50,6 +50,37 @@ function isUsTenantTwilioDraft(raw: string | undefined): boolean {
   return raw === undefined || raw === '' || raw.startsWith(US_E164_PREFIX)
 }
 
+type InviteLinkResult = {
+  invite_sent?: boolean
+  user_relinked?: boolean
+  clerk_error?: string | null
+  linked_clerk_user_id?: string | null
+  linked_clerk_user_ids?: string[] | null
+  clerk_users_matched_count?: number
+}
+
+function formatRelinkSuccessMessage(data: InviteLinkResult): string {
+  const ids =
+    data.linked_clerk_user_ids?.length ?
+      data.linked_clerk_user_ids
+    : data.linked_clerk_user_id ? [data.linked_clerk_user_id]
+    : []
+  const matched = data.clerk_users_matched_count ?? ids.length
+  let msg =
+    'Account linked (no invite email — Clerk account already exists).'
+  if (matched > 1) {
+    msg += ` Clerk had ${matched} accounts for this email; linked ${ids.length}.`
+  }
+  if (ids.length) {
+    msg += ` Clerk user${ids.length > 1 ? 's' : ''}: ${ids.join(', ')}.`
+  }
+  msg += ' Client should sign out and sign in again, then open Dashboard.'
+  if (data.clerk_error) {
+    msg += ` (${data.clerk_error})`
+  }
+  return msg
+}
+
 function UsTwilioPhoneInput({
   value,
   onChange,
@@ -195,18 +226,9 @@ export default function AdminPage() {
     setSuccess(null)
     setError(null)
     try {
-      const { data } = await api.post<{
-        invite_sent?: boolean
-        user_relinked?: boolean
-        clerk_error?: string | null
-        linked_clerk_user_id?: string | null
-      }>('/api/admin/tenants', { ...form, plan: 'free' })
+      const { data } = await api.post<InviteLinkResult>('/api/admin/tenants', { ...form, plan: 'free' })
       if (data.user_relinked) {
-        setSuccess(
-          `Tenant "${form.name}" created. That email already has a Clerk account — linked (no invite email).${
-            data.linked_clerk_user_id ? ` Clerk user: ${data.linked_clerk_user_id}.` : ''
-          } Sign out and sign in again, then open Dashboard.`
-        )
+        setSuccess(`Tenant "${form.name}" created. ${formatRelinkSuccessMessage(data)}`)
       } else if (data.invite_sent) {
         setSuccess(`Tenant "${form.name}" created. Invitation email sent to ${form.email}.`)
       } else {
@@ -298,19 +320,12 @@ export default function AdminPage() {
     setError(null)
     setSuccess(null)
     try {
-      const { data } = await api.post<{
-        invite_sent?: boolean
-        user_relinked?: boolean
-        pending_invite_stored?: boolean
-        clerk_error?: string | null
-        linked_clerk_user_id?: string | null
-      }>(`/api/admin/tenants/${tenantId}/resend-invite`, { email })
+      const { data } = await api.post<InviteLinkResult & { pending_invite_stored?: boolean }>(
+        `/api/admin/tenants/${tenantId}/resend-invite`,
+        { email }
+      )
       if (data.user_relinked) {
-        setSuccess(
-          `Account linked (no email — Clerk account already exists).${
-            data.linked_clerk_user_id ? ` Clerk user: ${data.linked_clerk_user_id}.` : ''
-          } Sign out and sign in again, then open Dashboard.`
-        )
+        setSuccess(formatRelinkSuccessMessage(data))
       } else if (data.invite_sent) {
         setSuccess('Invitation email sent. Open that link from the inbox (same email you entered here).')
       } else {

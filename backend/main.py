@@ -2978,9 +2978,47 @@ def _clerk_revoke_active_sessions(user_id: str, headers: dict) -> None:
         print(f"[Admin] Error revoking sessions for Clerk user {user_id}: {e}")
 
 
+def _clerk_user_ids_for_email(email: str, headers: dict) -> List[str]:
+    """All Clerk user IDs with this email (duplicates can exist after repeated test sign-ups)."""
+    import httpx
+
+    email_q = quote((email or "").strip(), safe="")
+    if not email_q or "@" not in email_q:
+        return []
+    try:
+        users_resp = httpx.get(
+            f"https://api.clerk.com/v1/users?email_address[]={email_q}",
+            headers=headers,
+            timeout=10.0,
+        )
+        if users_resp.status_code >= 400:
+            print(f"[Admin] Clerk user lookup {users_resp.status_code}: {(users_resp.text or '')[:200]}")
+            return []
+        users = users_resp.json()
+        user_list = users if isinstance(users, list) else users.get("data", [])
+        ids: List[str] = []
+        for row in user_list or []:
+            if isinstance(row, dict) and row.get("id"):
+                ids.append(str(row["id"]))
+        return ids
+    except Exception as e:
+        print(f"[Admin] Error looking up Clerk users for {email!r}: {e}")
+        return []
+
+
+def _clerk_relink_user_to_tenant(clerk_user_id: str, tenant_id: str, headers: dict) -> None:
+    """Patch metadata, set sole tenant membership, revoke sessions for one Clerk user."""
+    if not _clerk_patch_user_tenant_metadata(clerk_user_id, tenant_id):
+        raise RuntimeError(f"Clerk metadata patch failed for {clerk_user_id} (tenant_id={tenant_id})")
+    if not db_tenant_member_set_single(clerk_user_id, tenant_id):
+        raise RuntimeError(f"Database membership update failed for {clerk_user_id} (tenant_id={tenant_id})")
+    _clerk_revoke_active_sessions(clerk_user_id, headers)
+
+
 def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
     """
     Queue pending invite by email and either re-link an existing Clerk user or send a new invitation.
+    When multiple Clerk users share the email, link all of them (common after OAuth + email test accounts).
     """
     email = (email or "").strip()
     if not email or "@" not in email:
@@ -3006,6 +3044,8 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
     user_relinked = False
     clerk_error: Optional[str] = None
     linked_clerk_user_id: Optional[str] = None
+    linked_clerk_user_ids: List[str] = []
+    clerk_users_matched_count = 0
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     if not clerk_secret:
         return {
@@ -3016,39 +3056,34 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
         }
     import httpx
     headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
-    existing_user_id = None
-    try:
-        email_q = quote(email, safe="")
-        users_resp = httpx.get(
-            f"https://api.clerk.com/v1/users?email_address[]={email_q}",
-            headers=headers,
-            timeout=10.0,
-        )
-        if users_resp.status_code < 400:
-            users = users_resp.json()
-            user_list = users if isinstance(users, list) else users.get("data", [])
-            if user_list:
-                existing_user_id = user_list[0]["id"]
-    except Exception as e:
-        print(f"[Admin] Error looking up Clerk user: {e}")
-    if existing_user_id:
-        try:
-            if not _clerk_patch_user_tenant_metadata(existing_user_id, tenant_id):
-                raise RuntimeError(
-                    f"Clerk metadata patch failed for {existing_user_id} (tenant_id={tenant_id})"
-                )
-            if not db_tenant_member_set_single(existing_user_id, tenant_id):
-                raise RuntimeError(
-                    f"Database membership update failed for {existing_user_id} (tenant_id={tenant_id})"
-                )
+    existing_user_ids = _clerk_user_ids_for_email(email, headers)
+    clerk_users_matched_count = len(existing_user_ids)
+    if existing_user_ids:
+        link_errors: List[str] = []
+        for uid in existing_user_ids:
+            try:
+                _clerk_relink_user_to_tenant(uid, tenant_id, headers)
+                linked_clerk_user_ids.append(uid)
+                print(f"[Admin] Re-linked existing user {uid} to tenant {tenant_id} (email={email})")
+            except Exception as e:
+                link_errors.append(f"{uid}: {e}")
+                print(f"[Admin] Error re-linking user {uid}: {e}")
+        if linked_clerk_user_ids:
             db_tenant_invite_delete(email)
             user_relinked = True
-            linked_clerk_user_id = existing_user_id
-            _clerk_revoke_active_sessions(existing_user_id, headers)
-            print(f"[Admin] Re-linked existing user {existing_user_id} to tenant {tenant_id} (email={email})")
-        except Exception as e:
-            clerk_error = f"Re-link failed: {e}"
-            print(f"[Admin] Error re-linking user: {e}")
+            linked_clerk_user_id = linked_clerk_user_ids[0]
+        if link_errors and not linked_clerk_user_ids:
+            clerk_error = f"Re-link failed: {'; '.join(link_errors[:3])}"
+        elif link_errors:
+            clerk_error = (
+                f"Linked {len(linked_clerk_user_ids)} of {clerk_users_matched_count} Clerk account(s); "
+                f"failures: {'; '.join(link_errors[:2])}"
+            )
+        if clerk_users_matched_count > 1:
+            print(
+                f"[Admin] Clerk returned {clerk_users_matched_count} users for {email!r}; "
+                f"linked {len(linked_clerk_user_ids)}"
+            )
     else:
         try:
             resp = httpx.post(
@@ -3075,6 +3110,8 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
         "pending_invite_stored": True,
         "clerk_error": clerk_error,
         "linked_clerk_user_id": linked_clerk_user_id,
+        "linked_clerk_user_ids": linked_clerk_user_ids,
+        "clerk_users_matched_count": clerk_users_matched_count,
     }
 
 
