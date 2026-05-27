@@ -109,25 +109,27 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
           <span className="text-sm font-semibold text-white">Schedule view</span>
           {loading && <Loader2 className="h-4 w-4 animate-spin text-cyan-400" aria-label="Loading" />}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Filter className="h-4 w-4 text-zinc-500" aria-hidden />
-          <label htmlFor="cal-staff-filter" className="sr-only">
-            Staff filter
-          </label>
-          <select
-            id="cal-staff-filter"
-            value={staffFilter}
-            onChange={(e) => setStaffFilter(e.target.value)}
-            className="min-w-[12rem] rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
-          >
-            <option value="">All staff</option>
-            {staffList.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {staffList.length > 1 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Filter className="h-4 w-4 text-zinc-500" aria-hidden />
+            <label htmlFor="cal-staff-filter" className="text-sm text-zinc-400">
+              Stylist
+            </label>
+            <select
+              id="cal-staff-filter"
+              value={staffFilter}
+              onChange={(e) => setStaffFilter(e.target.value)}
+              className="min-w-[12rem] rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+            >
+              <option value="">All stylists</option>
+              {staffList.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
       </div>
 
       <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80 p-3 shadow-inner shadow-black/20 sm:p-4">

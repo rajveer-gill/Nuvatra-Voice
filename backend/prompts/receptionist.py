@@ -209,25 +209,42 @@ def build_system_prompt(
         today_utc = datetime.now(timezone.utc).date()
         today_str = today_utc.isoformat()
         tomorrow_str = (today_utc + timedelta(days=1)).isoformat()
+        roster_names = [(s.get("name") or "").strip() for s in staff if (s.get("name") or "").strip()]
+        multi_staff = len(roster_names) >= 2
+        staff_booking_rules = ""
+        if multi_staff:
+            staff_booking_rules = (
+                f"- STYLIST: Multiple team members on the roster ({', '.join(roster_names)}). "
+                "Before BOOKING, you MUST ask which stylist they prefer (or if anyone is fine). "
+                "Put the exact name in the 7th BOOKING field when they choose; leave staff empty only if they have no preference.\n"
+            )
+        elif len(roster_names) == 1:
+            staff_booking_rules = (
+                f"- STYLIST: One provider on the roster ({roster_names[0]}). "
+                f"Confirm the appointment is with {roster_names[0]}; put their name in the staff field.\n"
+            )
         if has_configured_services:
             service_booking_rules = (
                 "- SERVICES: This business has a configured service menu. Only offer or confirm services from that list—never invent services. "
-                "Ask which service they want only when booking and only if they have not already said one. "
-                "If they pick a staff member who only provides certain services (see staff/service list), only offer those services for that person.\n"
-                "- When they have confirmed name, date, time, and service (service name goes in the reason field), and the slot is available, "
+                "Before BOOKING you MUST ask which service they want unless they already clearly named one from the menu. "
+                "Put the exact service name in the reason field. "
+                "If they pick a stylist who only provides certain services (see staff/service list), only offer those services for that person.\n"
+                f"{staff_booking_rules}"
+                "- When they have confirmed name, date, time, and service (service name in reason), and stylist preference when applicable, and the slot is available, "
             )
         else:
             service_booking_rules = (
-                "- SERVICES: This business has NOT configured a service menu. Do NOT ask callers to choose a service or treatment type. "
-                "Book using name, date, and time only. If they mention why they are visiting, put a short note in the reason field; otherwise leave reason empty.\n"
-                "- When they have confirmed name, date, and time and the slot is available, "
+                "- SERVICES: This business has NOT configured a service menu in Settings. Do NOT ask callers to pick a service type—"
+                "the owner must add services online for that. Book using name, date, and time; put a short visit note in reason if they mention why they are coming.\n"
+                f"{staff_booking_rules}"
+                "- When they have confirmed name, date, time, and stylist preference when applicable, and the slot is available, "
             )
         slots_block += f"""
 - TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date and time, and optionally email for confirmations.
-{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). The reason field holds the service name when services are configured, or a short visit note otherwise. The 7th field staff is OPTIONAL: use the exact staff/stylist name from the staff list if they requested someone; otherwise leave it empty (still include the trailing pipe if no staff). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
+{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). The reason field holds the service name when a service menu exists, or a short visit note otherwise. The 7th field staff holds the stylist name when they chose one (required when multiple stylists are on the roster unless they have no preference). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
 
     help_section = (
         "\n".join(help_lines)
