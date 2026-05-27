@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
   Calendar,
@@ -65,7 +65,7 @@ export default function Appointments() {
     staff_id: '',
   })
 
-  const fetchAppointments = async () => {
+  const fetchAppointments = useCallback(async () => {
     try {
       const res = await api.get('/api/appointments')
       setAppointments(res.data.appointments || [])
@@ -78,13 +78,13 @@ export default function Appointments() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [api])
 
   useEffect(() => {
     fetchAppointments()
     const interval = setInterval(fetchAppointments, 30000)
     return () => clearInterval(interval)
-  }, [api])
+  }, [fetchAppointments])
 
   useEffect(() => {
     api
