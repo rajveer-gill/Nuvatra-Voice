@@ -1329,6 +1329,56 @@ def db_appointments_get_by_phone_for_sms(
     return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
 
 
+def db_appointments_get_active_for_sms_context(
+    phone: str,
+    *,
+    client_id: Optional[str] = None,
+    limit: int = 5,
+) -> List[dict]:
+    """
+    Return recent non-cancelled appointments for this phone for conversational SMS context.
+    Includes accepted and pending statuses so the AI can answer "how many appointments do I have?".
+    """
+    conn = _get_conn()
+    if not conn:
+        return []
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return []
+    cid = (client_id or "").strip() or _client_id()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, name, email, phone, date, time, reason, status, source, created_at
+        FROM appointments
+        WHERE client_id = %s
+          AND status IN ('pending_customer', 'pending_review', 'accepted')
+          AND (regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = %s
+               OR regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = right(%s, 10))
+        ORDER BY date ASC, time ASC, created_at DESC
+        LIMIT %s
+        """,
+        (cid, norm, norm, max(1, int(limit))),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {
+            "id": row[0],
+            "name": row[1],
+            "email": row[2] or "",
+            "phone": row[3] or "",
+            "date": row[4],
+            "time": row[5] or "",
+            "reason": row[6] or "",
+            "status": row[7],
+            "source": row[8] or "manual",
+            "created_at": row[9].isoformat() if row[9] else "",
+        }
+        for row in rows
+    ]
+
+
 def db_appointments_latest_identity_for_phone(
     phone: str,
     *,

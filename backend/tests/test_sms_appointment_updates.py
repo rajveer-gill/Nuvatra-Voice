@@ -92,6 +92,31 @@ def test_apply_from_bodies_name_on_prior_turn_confirm_yes():
     assert changed_yes == []
 
 
+def test_apply_updates_name_for_accepted_appointment():
+    stored = {"id": 9, "status": "accepted", "name": "Jake", "email": "old@example.com"}
+
+    def fake_update(aid, client_id, **kwargs):
+        stored.update(kwargs)
+        return dict(stored)
+
+    from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
+
+    out, changed = apply_sms_appointment_detail_updates_from_bodies(
+        ["my name is Raj and my email is raj@example.com"],
+        stored,
+        client_id="test",
+        from_number="+15551234567",
+        db_appointments_update=fake_update,
+        db_appointments_get_by_id=lambda aid, client_id: dict(stored),
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=__import__("logging").getLogger("test"),
+    )
+    assert out["name"] == "Raj"
+    assert out["email"] == "raj@example.com"
+    assert set(changed) == {"name", "email"}
+
+
 def test_format_appointment_details_confirmation_sms():
     from main import _format_appointment_details_confirmation_sms
 

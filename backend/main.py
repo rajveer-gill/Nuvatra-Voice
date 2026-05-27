@@ -573,6 +573,7 @@ try:
         db_sms_opt_out_clear,
         db_appointments_get_pending_by_phone,
         db_appointments_get_by_phone_for_sms,
+        db_appointments_get_active_for_sms_context,
         db_appointments_latest_identity_for_phone,
         db_appointments_resolve_for_sms,
         db_appointments_get_accepted_for_date,
@@ -5609,7 +5610,7 @@ async def handle_incoming_sms(request: Request):
         messages = (session["messages"] if session else []) if session else []
         prior_turns = len(messages)
         # Persist name/email from this text and recent inbound SMS (e.g. "my name is Raj" then "Yes")
-        if apt and apt.get("status") in ("pending_customer", "pending_review") and USE_DB and apt.get("id"):
+        if apt and apt.get("status") in ("pending_customer", "pending_review", "accepted") and USE_DB and apt.get("id"):
             from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
 
             prior_user_bodies = [
@@ -5649,7 +5650,7 @@ async def handle_incoming_sms(request: Request):
             apt
             and detail_fields_updated
             and not _is_sms_confirmation(body)
-            and (apt.get("status") or "") in ("pending_customer", "pending_review")
+            and (apt.get("status") or "") in ("pending_customer", "pending_review", "accepted")
         ):
             summary_sms = _format_appointment_details_confirmation_sms(apt)
             send_ok = send_sms(from_number, summary_sms, from_override=to_number)
@@ -5818,11 +5819,35 @@ async def handle_incoming_sms(request: Request):
                 content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 media_type="application/xml",
             )
+        sms_context_apts: list[dict] = []
+        if USE_DB:
+            try:
+                sms_context_apts = db_appointments_get_active_for_sms_context(
+                    from_number, client_id=tenant["client_id"], limit=5
+                )
+            except Exception as context_err:
+                logger.warning("db_appointments_get_active_for_sms_context failed: %s", context_err, exc_info=True)
         apt_info = ""
-        if apt:
-            apt_info = f"The customer has a PENDING appointment: Name {apt.get('name','')}, {apt.get('date','')} at {_hhmm_to_ampm(apt.get('time','') or '')}, service: {apt.get('reason','')}."
+        if sms_context_apts:
+            lines = []
+            for row in sms_context_apts[:5]:
+                lines.append(
+                    f"- {row.get('date','')} at {_hhmm_to_ampm(row.get('time','') or '')} "
+                    f"(status: {row.get('status','')}), service: {row.get('reason','')}, "
+                    f"name on file: {row.get('name','')}"
+                )
+            apt_info = (
+                f"The customer has {len(sms_context_apts)} active appointment(s) in the system:\n"
+                + "\n".join(lines)
+            )
+        elif apt:
+            apt_info = (
+                f"The customer has one active appointment: {apt.get('date','')} at "
+                f"{_hhmm_to_ampm(apt.get('time','') or '')}, status {apt.get('status','')}, "
+                f"service: {apt.get('reason','')}, name on file: {apt.get('name','')}."
+            )
         else:
-            apt_info = "The customer does not have a pending appointment in the system."
+            apt_info = "The customer has no active appointments in the system."
         pending_customer_note = ""
         if apt and apt.get("status") == "pending_customer":
             pending_customer_note = (

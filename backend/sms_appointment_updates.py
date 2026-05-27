@@ -66,7 +66,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
     if not apt or not apt.get("id"):
         return apt, []
     st = (apt.get("status") or "").strip()
-    if st not in ("pending_customer", "pending_review"):
+    if st not in ("pending_customer", "pending_review", "accepted"):
         return apt, []
     aid = int(apt["id"])
     prior_name = (apt.get("name") or "").strip()
@@ -150,7 +150,7 @@ def apply_sms_appointment_detail_updates(
     if not apt or not apt.get("id"):
         return apt, []
     st = (apt.get("status") or "").strip()
-    if st not in ("pending_customer", "pending_review"):
+    if st not in ("pending_customer", "pending_review", "accepted"):
         return apt, []
     aid = int(apt["id"])
     kwargs: dict[str, Any] = dict(_forced_kwargs or {})
