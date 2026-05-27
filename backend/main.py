@@ -2057,11 +2057,19 @@ def get_booked_slots(date: str) -> List[dict]:
     return [s for s in slots if s.get("date") == date]
 
 def _time_to_minutes(t: str) -> int:
-    """Parse time string (e.g. '10', '10:00', '10:00 AM') to minutes since midnight. Defensive against bad input."""
+    """Parse time string (e.g. '10', '10:00', '2:00 PM') to minutes since midnight."""
     if not t:
         return 0
-    t = (t or "").strip()
-    parts = t.replace("AM", "").replace("PM", "").strip().split(":")
+    raw = (t or "").strip()
+    upper = raw.upper()
+    meridian: Optional[str] = None
+    if re.search(r"\bP\.?\s*M\.?\b", upper) or re.search(r"\bPM\b", upper):
+        meridian = "pm"
+    elif re.search(r"\bA\.?\s*M\.?\b", upper) or re.search(r"\bAM\b", upper):
+        meridian = "am"
+    cleaned = re.sub(r"(?i)\s*(a\.?\s*m\.?|p\.?\s*m\.?)\s*$", "", raw).strip()
+    cleaned = re.sub(r"(?i)\s*(am|pm)\s*$", "", cleaned).strip()
+    parts = cleaned.split(":")
     h = 0
     m = 0
     try:
@@ -2071,6 +2079,18 @@ def _time_to_minutes(t: str) -> int:
             m = int("".join(c for c in parts[1] if c.isdigit()) or "0")
     except (ValueError, TypeError):
         pass
+    if meridian == "pm":
+        if h != 12:
+            h += 12
+    elif meridian == "am":
+        if h == 12:
+            h = 0
+    elif meridian is None and cleaned:
+        # Salon-style times without AM/PM: 9–11 → AM, 1–8 → PM, 12 → noon
+        if h == 12:
+            pass
+        elif 1 <= h <= 8:
+            h += 12
     return h * 60 + m
 
 def _normalize_time_to_hhmm(t: str) -> str:
@@ -4137,6 +4157,35 @@ async def update_appointment(
                 return {"success": True, "appointment": apt}
     raise HTTPException(status_code=404, detail="Appointment not found")
 
+def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
+    """Send submitted/confirmed email when customer has email on file and provider is configured."""
+    from email_notify import format_appointment_email, send_appointment_email
+
+    email = (apt.get("email") or "").strip()
+    if not email:
+        return False
+    business_name = (get_business_info().get("name") or "us").strip()
+    subject, html, text = format_appointment_email(
+        kind=kind,
+        business_name=business_name,
+        customer_name=(apt.get("name") or "").strip(),
+        date=apt.get("date") or "",
+        time_ampm=_hhmm_to_ampm(apt.get("time") or ""),
+        service=(apt.get("reason") or "").strip(),
+    )
+    ok = send_appointment_email(to=email, subject=subject, html_body=html, text_body=text)
+    from observability import email_hint_for_log
+
+    system_info(
+        "appointment_email_notification",
+        apt_id=apt.get("id"),
+        kind=kind,
+        sent=ok,
+        email_hint=email_hint_for_log(email),
+    )
+    return ok
+
+
 @app.post("/api/appointments/{appointment_id}/accept")
 async def accept_appointment(
     appointment_id: int,
@@ -4169,6 +4218,10 @@ async def accept_appointment(
     time_ampm = _hhmm_to_ampm(apt.get("time") or "")
     msg = f"Your appointment at {business_name} is confirmed for {date} at {time_ampm}. Reply if you need to change."
     send_sms(apt.get("phone") or "", msg, from_override=_tenant_sms_from_number())
+    try:
+        _send_appointment_email_notification(apt, kind="confirmed")
+    except Exception as e:
+        logger.warning("appointment_confirm_email_failed apt_id=%s: %s", appointment_id, e, exc_info=True)
     return {"success": True, "appointment": apt}
 
 
@@ -5534,40 +5587,39 @@ async def handle_incoming_sms(request: Request):
             )
             sms_debug("inbound_no_pending_appointment", body_len=len(body), from_number=from_number)
             sms_trace("inbound_no_appointment_for_number", request_id=rid, body_len=len(body))
-        # Persist email from SMS while appointment is still pending_customer (e.g. "my email is x@y.com")
-        if apt and apt.get("status") == "pending_customer" and USE_DB and apt.get("id"):
-            em_match = re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", body or "", re.I)
-            if em_match:
-                em = em_match.group(0).strip()
-                try:
-                    aid = int(apt["id"])
-                    db_appointments_update(aid, email=em, client_id=tenant["client_id"])
-                    apt = db_appointments_get_by_id(aid, client_id=tenant["client_id"]) or apt
-                    try:
-                        apt_name = (apt.get("name") or "").strip()
-                        update_caller_memory(
-                            from_number,
-                            name=apt_name or None,
-                            increment_count=False,
-                            data_patch={"email_on_file": em},
-                        )
-                    except Exception:
-                        pass
-                    sms_info(
-                        "inbound_customer_email_saved_from_reply",
-                        apt_id=aid,
-                        client_id=tenant["client_id"],
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "inbound save email from SMS failed apt_id=%s: %s",
-                        apt.get("id"),
-                        e,
-                        exc_info=True,
-                    )
         session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
         messages = (session["messages"] if session else []) if session else []
         prior_turns = len(messages)
+        # Persist name/email from this text and recent inbound SMS (e.g. "my name is Raj" then "Yes")
+        if apt and apt.get("status") in ("pending_customer", "pending_review") and USE_DB and apt.get("id"):
+            from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
+
+            prior_user_bodies = [
+                (m.get("content") or "")
+                for m in messages
+                if (m.get("role") or "").strip() == "user"
+            ][-8:]
+            sms_trace(
+                "sms_detail_updates_session_context",
+                request_id=rid,
+                apt_id=apt.get("id"),
+                prior_user_turns=len(prior_user_bodies),
+                current_body_len=len(body or ""),
+            )
+            apt = (
+                apply_sms_appointment_detail_updates_from_bodies(
+                    prior_user_bodies + [body],
+                    apt,
+                    client_id=tenant["client_id"],
+                    from_number=from_number,
+                    db_appointments_update=db_appointments_update,
+                    db_appointments_get_by_id=db_appointments_get_by_id,
+                    update_caller_memory=update_caller_memory,
+                    system_info=system_info,
+                    logger=logger,
+                )
+                or apt
+            )
         messages.append({"role": "user", "content": body})
         sms_trace(
             "inbound_session_loaded",
@@ -5590,6 +5642,20 @@ async def handle_incoming_sms(request: Request):
                 date = (apt_full.get("date") or "").strip()
                 time_raw = (apt_full.get("time") or "").strip()
                 time_hhmm = _normalize_time_to_hhmm(time_raw) or time_raw
+                from observability import email_hint_for_log, name_initial_for_log
+
+                sms_info(
+                    "sms_customer_confirm_snapshot",
+                    request_id=rid,
+                    apt_id=aid,
+                    client_id=tenant["client_id"],
+                    name_initial=name_initial_for_log(apt_full.get("name")),
+                    email_hint=email_hint_for_log(apt_full.get("email")),
+                    date=date,
+                    time_raw=time_raw,
+                    time_normalized=time_hhmm,
+                    time_was_normalized=bool(time_raw and time_hhmm and time_raw != time_hhmm),
+                )
                 staff_for = (apt_full.get("staff_id") or "").strip() or None
                 if not is_slot_available(date, time_hhmm, DEFAULT_SLOT_DURATION_MINUTES, staff_for):
                     sorry = (
@@ -5636,17 +5702,32 @@ async def handle_incoming_sms(request: Request):
             except Exception:
                 pass
             _notify_staff_pending_review(apt_after, tenant, to_number)
+            from observability import email_hint_for_log, name_initial_for_log
+
             sms_info(
                 "customer_confirmed_pending_to_review",
-                apt_id=apt.get("id"),
+                apt_id=apt_after.get("id"),
                 client_id=tenant["client_id"],
                 from_number=from_number,
+                name_initial=name_initial_for_log(apt_after.get("name")),
+                email_hint=email_hint_for_log(apt_after.get("email")),
+                time_normalized=_normalize_time_to_hhmm(apt_after.get("time") or "") or (apt_after.get("time") or ""),
+                date=apt_after.get("date") or "",
             )
             reply = (
                 "Thanks! We've sent this to the store. We'll text you when they confirm. "
                 "Msg & data rates may apply. Reply STOP to opt out."
             )
             send_ok = send_sms(from_number, reply, from_override=to_number)
+            try:
+                _send_appointment_email_notification(apt_after, kind="submitted")
+            except Exception as e:
+                logger.warning(
+                    "customer_confirm_submitted_email_failed apt_id=%s: %s",
+                    apt_after.get("id"),
+                    e,
+                    exc_info=True,
+                )
             sms_trace(
                 "inbound_customer_confirm_reply_sent",
                 request_id=rid,
@@ -5697,6 +5778,7 @@ async def handle_incoming_sms(request: Request):
             pending_customer_note = (
                 "\nThey are refining DETAILS before the booking goes to the shop for approval. "
                 "Echo date, time, name, and service back clearly when they change something. "
+                "Never change the appointment time unless they explicitly ask—use the time in the system prompt above. "
                 "Do not say the shop already confirmed it—only that you will pass it along once they finalize. "
                 "Ask them to reply YES or CONFIRM only when everything looks exactly right; that submits the request "
                 "to the business for approval (you cannot approve it yourself)."

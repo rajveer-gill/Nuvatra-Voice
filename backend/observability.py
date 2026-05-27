@@ -39,6 +39,24 @@ OBS_TRACE_SMS: bool = _truthy("OBS_TRACE_SMS")
 OBS_TRACE_VOICE: bool = _truthy("OBS_TRACE_VOICE")
 
 
+def name_initial_for_log(name: Optional[str]) -> str:
+    """First letter only — enough to verify Jake→Raj without logging full names."""
+    n = (name or "").strip()
+    if not n:
+        return "-"
+    return n[0].upper()
+
+
+def email_hint_for_log(email: Optional[str]) -> str:
+    """Domain + local initial only (e.g. r***@gmail.com)."""
+    e = (email or "").strip()
+    if not e or "@" not in e:
+        return "-"
+    local, _, domain = e.partition("@")
+    li = (local[:1] or "?") + "***"
+    return f"{li}@{domain}"
+
+
 def mask_phone(raw: Optional[str]) -> str:
     """Mask any Twilio-style phone string for logs."""
     if not raw:

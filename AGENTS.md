@@ -35,6 +35,8 @@ Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, 
 
 **Twilio SMS (two-way replies):** On each number that sends texts to customers, set **Messaging** → **A message comes in** to **`POST https://<PUBLIC_BASE_URL>/api/sms/incoming`** (same host as voice). If only **Voice** webhooks are configured, outbound booking texts work but **inbound replies are never received**—the AI cannot text back.
 
+**Appointment confirmation email (optional):** When a customer texts name/email corrections during `pending_customer`, the backend persists them to the appointment row (not only the GPT reply). After they confirm via SMS and when the store **Accepts**, the backend can email the customer if **`RESEND_API_KEY`** and **`APPOINTMENT_EMAIL_FROM`** (verified sender domain in Resend) are set on Render—or use **`SMTP_HOST`** / **`SMTP_USER`** / **`SMTP_PASSWORD`** as fallback. Without those env vars, confirmations remain SMS-only.
+
 **Do not set `CLIENT_ID` on multi-tenant production** unless you run a true single-tenant instance. If `CLIENT_ID` is set to a dev value like `test`, any code path that runs before `require_tenant` sets the request context (or background jobs) will look for `clients/test/config.json` on disk and merge the wrong tenant. Leave `CLIENT_ID` **unset** on Render when using Clerk + PostgreSQL for all tenants.
 
 Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`. Set **`ADMIN_CLERK_USER_IDS`** on Vercel too (same comma-separated Clerk user IDs as the backend) so server layouts route platform admins to `/admin` and everyone else to `/dashboard`; when omitted, the client still checks `/api/admin/session`.
@@ -135,6 +137,8 @@ Logs go to **stderr** with format `LEVEL|nuvatra|message`. Tune verbosity withou
 Front-end: **`NEXT_PUBLIC_DEBUG_SETTINGS=1`** logs which of those requests failed in the **browser console** (status / message only, no token).
 
 Structured prefixes (grep-friendly): **`[SMS]`** (outbound/inbound, Twilio result, staff commands; detailed pipeline steps when **`OBS_TRACE_SMS`** is on), **`[VOICE]`** (incoming call, tenant resolution, GPT/booking branch), **`[SYSTEM]`** (booking created/failed, slots), **`[USAGE]`** (plan cap, webhook rate limit), **`[AUTH]`** (invalid Twilio signature, subscription blocked), **`[HTTP]`** (webhook timing when **`OBS_TRACE_WEBHOOKS`** is on). Caller/callee phones are **masked** in those lines.
+
+**SMS booking detail fixes (always at INFO, no extra env):** grep Render logs for **`sms_detail_updates_scan`**, **`sms_detail_updates_parsed`**, **`sms_detail_updates_applied`**, **`sms_detail_updates_no_match`**, **`sms_customer_confirm_snapshot`**, **`customer_confirmed_pending_to_review`** — logs use **`name_initial`** (first letter only, e.g. `R` vs `J`) and **`email_hint`** (e.g. `r***@gmail.com`). Set **`OBS_TRACE_SMS=1`** for extra steps including **`sms_detail_updates_session_context`**. **`[SYSTEM] inbound_customer_details_updated_from_sms`** fires when the DB row is updated.
 
 After dependency updates, run **`pip install -r backend/requirements.txt`** on Render (includes **`email-validator`** for staff email validation).
 
