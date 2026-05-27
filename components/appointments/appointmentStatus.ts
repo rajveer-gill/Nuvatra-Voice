@@ -5,7 +5,7 @@ export const STATUS_LABELS: Record<string, string> = {
   confirmed: 'Accepted',
   accepted: 'Accepted',
   completed: 'Accepted',
-  cancelled: 'Declined',
+  cancelled: 'Cancelled',
   rejected: 'Declined',
 }
 

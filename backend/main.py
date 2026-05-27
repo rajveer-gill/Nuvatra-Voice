@@ -2052,6 +2052,101 @@ def _slot_overlaps(
     b_end = b_start + duration_b
     return a_start < b_end and b_start < a_end
 
+def _slot_blocking_details(
+    date: str,
+    time: str,
+    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES,
+    staff_id: Optional[str] = None,
+) -> List[dict]:
+    """Return merged slot rows (with appointment status) that block this window."""
+    want = _staff_slot_key(staff_id)
+    norm_time = _normalize_time_to_hhmm(time) or time
+    apt_by_id = _appointment_by_id_map(_appointment_rows_for_calendar_merge())
+    out: List[dict] = []
+    for s in _get_all_booked_slots_merged():
+        if s.get("date") != date or _staff_slot_key(s.get("staff_id")) != want:
+            continue
+        slot_time = s.get("time") or ""
+        d = s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES
+        if not _slot_overlaps(norm_time, duration_minutes, slot_time, d):
+            continue
+        aid = s.get("appointment_id")
+        apt_status = ""
+        if aid is not None:
+            apt = apt_by_id.get(int(aid))
+            if apt:
+                apt_status = (apt.get("status") or "").strip()
+        out.append(
+            {
+                "appointment_id": aid,
+                "time": slot_time,
+                "status": apt_status,
+            }
+        )
+    return out
+
+
+def _phones_match_for_booking(a: str, b: str) -> bool:
+    da = normalize_phone(a or "")
+    db = normalize_phone(b or "")
+    if not da or not db:
+        return not da and not db
+    return da == db or da.endswith(db[-10:]) or db.endswith(da[-10:])
+
+
+def _supersede_pending_customer_drafts_for_slot(
+    date: str,
+    time: str,
+    staff_id: Optional[str],
+    *,
+    client_id: Optional[str] = None,
+    phone: Optional[str] = None,
+) -> int:
+    """
+    Cancel unconfirmed voice drafts (pending_customer) for this slot so callers can rebook
+    after a failed/invisible flow. Does not touch pending_review (customer already confirmed).
+    """
+    if not USE_DB:
+        return 0
+    cid = (client_id or "").strip() or get_db_client_id()
+    if not cid:
+        return 0
+    want_staff = _staff_slot_key(staff_id)
+    norm_time = _normalize_time_to_hhmm(time) or time
+    cancelled = 0
+    for apt in _appointment_rows_for_calendar_merge():
+        if (apt.get("status") or "") != "pending_customer":
+            continue
+        if (apt.get("date") or "") != date:
+            continue
+        apt_time = _normalize_time_to_hhmm(apt.get("time") or "") or (apt.get("time") or "")
+        if apt_time != norm_time:
+            continue
+        if _staff_slot_key(apt.get("staff_id")) != want_staff:
+            continue
+        if phone and not _phones_match_for_booking(phone, apt.get("phone") or ""):
+            continue
+        aid = apt.get("id")
+        if not aid:
+            continue
+        try:
+            db_appointments_update(int(aid), status="cancelled", client_id=cid)
+            release_slot(int(aid))
+            cancelled += 1
+        except Exception as e:
+            logger.warning("supersede_pending_customer_draft failed apt_id=%s: %s", aid, e)
+    if cancelled:
+        _invalidate_booked_slots_cache()
+        system_info(
+            "pending_customer_draft_superseded",
+            count=cancelled,
+            date=date,
+            time=norm_time,
+            client_id=cid,
+        )
+    return cancelled
+
+
 def is_slot_available(
     date: str,
     time: str,
@@ -2059,20 +2154,17 @@ def is_slot_available(
     staff_id: Optional[str] = None,
 ) -> bool:
     """True if no overlapping booking for this date+time and staff column."""
-    want = _staff_slot_key(staff_id)
-    slots = [s for s in _get_all_booked_slots_merged() if s.get("date") == date and _staff_slot_key(s.get("staff_id")) == want]
-    for s in slots:
-        d = s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES
-        if _slot_overlaps(time, duration_minutes, s.get("time", ""), d):
-            system_debug(
-                "slot_unavailable",
-                date=date,
-                time=time,
-                staff_key=want,
-                overlaps_time=s.get("time"),
-            )
-            return False
-    system_debug("slot_available", date=date, time=time, staff_key=want)
+    blockers = _slot_blocking_details(date, time, duration_minutes, staff_id)
+    if blockers:
+        system_debug(
+            "slot_unavailable",
+            date=date,
+            time=time,
+            staff_key=_staff_slot_key(staff_id),
+            blockers=blockers,
+        )
+        return False
+    system_debug("slot_available", date=date, time=time, staff_key=_staff_slot_key(staff_id))
     return True
 
 def reserve_slot(
@@ -2257,14 +2349,27 @@ def _create_appointment_from_booking(
     name = (booking.get("name") or "").strip()
     if not name or not date or not time:
         return None
+    cid_for_slot = (client_id_override or "").strip() or get_db_client_id()
+    if cid_for_slot:
+        set_request_client_id(cid_for_slot)
     staff_key = resolve_staff_id_from_booking_fragment(booking.get("staff"))
+    _supersede_pending_customer_drafts_for_slot(
+        date,
+        time,
+        staff_key,
+        client_id=cid_for_slot,
+        phone=(booking.get("phone") or "").strip(),
+    )
     if not is_slot_available(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key):
         _invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
+        blockers = _slot_blocking_details(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
         system_info(
             "booking_create_failed_slot_taken",
             name=name,
             date=date,
             time=time,
+            client_id=cid_for_slot,
+            blocking=blockers,
         )
         return None
     appointment_data = {
