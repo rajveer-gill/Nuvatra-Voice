@@ -15,14 +15,12 @@ const LEGEND = [
   { label: 'Needs approval', color: '#d97706' },
   { label: 'Awaiting text confirm', color: '#0ea5e9' },
   { label: 'Confirmed', color: '#16a34a' },
-  { label: 'Declined / cancelled', color: '#dc2626' },
 ] as const
 
 function eventColor(status: string): string {
   if (status === 'accepted' || status === 'confirmed' || status === 'completed') return '#16a34a'
   if (status === 'pending_review') return '#d97706'
   if (status === 'pending_customer') return '#0ea5e9'
-  if (status === 'rejected' || status === 'cancelled') return '#dc2626'
   return '#6366f1'
 }
 

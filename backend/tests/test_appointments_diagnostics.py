@@ -7,6 +7,15 @@ from unittest.mock import patch
 import database
 
 
+def test_db_appointments_in_date_range_excludes_cancelled_rejected():
+    with patch.object(database, "_get_conn") as mock_conn:
+        cur = mock_conn.return_value.cursor.return_value
+        cur.fetchall.return_value = []
+        database.db_appointments_in_date_range("2026-05-24", "2026-05-30", client_id="my-tenant")
+        sql = cur.execute.call_args[0][0]
+    assert "status NOT IN ('cancelled', 'rejected')" in sql
+
+
 def test_db_appointments_get_all_uses_explicit_client_id():
     with patch.object(database, "_get_conn") as mock_conn:
         cur = mock_conn.return_value.cursor.return_value

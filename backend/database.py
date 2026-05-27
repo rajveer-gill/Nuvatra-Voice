@@ -1187,7 +1187,7 @@ def db_appointments_in_date_range(
     *,
     client_id: Optional[str] = None,
 ) -> List[dict]:
-    """Appointments for calendar view (inclusive date range). staff_id None = all staff."""
+    """Active appointments for calendar grid (inclusive date range). Excludes cancelled/rejected."""
     conn = _get_conn()
     if not conn:
         return []
@@ -1199,6 +1199,7 @@ def db_appointments_in_date_range(
             SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
             FROM appointments
             WHERE client_id = %s AND date >= %s AND date <= %s AND staff_id = %s
+              AND status NOT IN ('cancelled', 'rejected')
             ORDER BY date, time
             """,
             (cid, date_from, date_to, staff_id),
@@ -1209,6 +1210,7 @@ def db_appointments_in_date_range(
             SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
             FROM appointments
             WHERE client_id = %s AND date >= %s AND date <= %s
+              AND status NOT IN ('cancelled', 'rejected')
             ORDER BY date, time
             """,
             (cid, date_from, date_to),

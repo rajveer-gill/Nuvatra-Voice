@@ -4240,7 +4240,7 @@ async def appointments_calendar(
     staff_id: Optional[str] = None,
     tenant: Optional[dict] = Depends(require_active_subscription),
 ):
-    """Return appointments for calendar grid (optionally filtered by staff UUID)."""
+    """Return active appointments for calendar grid (excludes cancelled/rejected)."""
     if not USE_DB:
         return {"events": []}
     cid = _bind_tenant_db_context(tenant)
