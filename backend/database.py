@@ -1014,7 +1014,12 @@ def db_appointments_insert(data: dict) -> dict:
     print(f"[DB] db_appointments_insert OK id={apt_id} client_id={cid}")
     return {"id": apt_id, "created_at": row[1].isoformat() if row[1] else "", **data}
 
-def db_appointments_update(appointment_id: int, **kwargs) -> Optional[dict]:
+def db_appointments_update(
+    appointment_id: int,
+    *,
+    client_id: Optional[str] = None,
+    **kwargs,
+) -> Optional[dict]:
     conn = _get_conn()
     if not conn:
         return None
@@ -1028,7 +1033,8 @@ def db_appointments_update(appointment_id: int, **kwargs) -> Optional[dict]:
     if not updates:
         return None
     vals.append(appointment_id)
-    vals.append(_client_id())
+    cid = (client_id or "").strip() or _client_id()
+    vals.append(cid)
     cur = conn.cursor()
     cur.execute(
         f"UPDATE appointments SET {', '.join(updates)} WHERE id = %s AND client_id = %s "
@@ -1055,15 +1061,20 @@ def db_appointments_update(appointment_id: int, **kwargs) -> Optional[dict]:
         "owner_decline_reason": row[11] if len(row) > 11 else None,
     }
 
-def db_appointments_get_by_id(appointment_id: int) -> Optional[dict]:
+def db_appointments_get_by_id(
+    appointment_id: int,
+    *,
+    client_id: Optional[str] = None,
+) -> Optional[dict]:
     conn = _get_conn()
     if not conn:
         return None
+    cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
         """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
            FROM appointments WHERE id = %s AND client_id = %s""",
-        (appointment_id, _client_id()),
+        (appointment_id, cid),
     )
     row = cur.fetchone()
     cur.close()
@@ -1209,7 +1220,11 @@ def db_appointments_get_pending_by_phone(phone: str) -> Optional[dict]:
         return None
     return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
 
-def db_appointments_get_by_phone_for_sms(phone: str) -> Optional[dict]:
+def db_appointments_get_by_phone_for_sms(
+    phone: str,
+    *,
+    client_id: Optional[str] = None,
+) -> Optional[dict]:
     """Return most recent appointment for this phone with status pending_customer or pending_review (for SMS reply context and confirm flow)."""
     conn = _get_conn()
     if not conn:
@@ -1217,6 +1232,7 @@ def db_appointments_get_by_phone_for_sms(phone: str) -> Optional[dict]:
     norm = _normalize_phone(phone or "")
     if not norm:
         return None
+    cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute("""
         SELECT id, name, email, phone, date, time, reason, status, source, created_at
@@ -1226,12 +1242,40 @@ def db_appointments_get_by_phone_for_sms(phone: str) -> Optional[dict]:
                OR regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = right(%s, 10))
         ORDER BY created_at DESC
         LIMIT 1
-    """, (_client_id(), norm, norm))
+    """, (cid, norm, norm))
     row = cur.fetchone()
     cur.close()
     if not row:
         return None
     return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
+
+
+def db_appointments_resolve_for_sms(
+    phone: str, client_id: str
+) -> tuple[Optional[dict], str]:
+    """
+    Find the active voice-booking appointment for an inbound SMS: match caller phone, then fall back
+    to the SMS session's linked appointment_id (set when the confirmation text is sent after a call).
+
+    Returns (appointment_or_none, resolve_via) where resolve_via is phone|session|none.
+    """
+    cid = (client_id or "").strip()
+    if not cid:
+        return None, "none"
+    apt = db_appointments_get_by_phone_for_sms(phone, client_id=cid)
+    if apt:
+        return apt, "phone"
+    session = db_sms_session_get(phone, cid)
+    if not session:
+        return None, "none"
+    aid = session.get("appointment_id")
+    if not aid:
+        return None, "none"
+    row = db_appointments_get_by_id(int(aid), client_id=cid)
+    if row and (row.get("status") or "") in ("pending_customer", "pending_review"):
+        return row, "session"
+    return None, "none"
+
 
 # --- SMS Sessions ---
 def db_sms_session_get(phone: str, client_id: str) -> Optional[dict]:

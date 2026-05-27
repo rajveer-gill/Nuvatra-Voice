@@ -5192,10 +5192,17 @@ async def handle_incoming_sms(request: Request):
             )
             if total >= cap:
                 audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": cap}, request=request)
-        apt = (
-            db_appointments_resolve_for_sms(from_number, tenant["client_id"])
-            if USE_DB
-            else None
+        apt = None
+        resolve_via = "none"
+        if USE_DB:
+            apt, resolve_via = db_appointments_resolve_for_sms(from_number, tenant["client_id"])
+        sms_info(
+            "inbound_appointment_resolve",
+            client_id=tenant["client_id"],
+            resolve_via=resolve_via,
+            apt_id=apt.get("id") if apt else None,
+            apt_status=(apt.get("status") or "") if apt else None,
+            body_len=len(body),
         )
         if apt:
             sms_debug(
@@ -5213,6 +5220,12 @@ async def handle_incoming_sms(request: Request):
                 body_len=len(body),
             )
         else:
+            sms_info(
+                "inbound_no_pending_appointment",
+                client_id=tenant["client_id"],
+                body_len=len(body),
+                looks_like_confirm=_is_sms_confirmation(body),
+            )
             sms_debug("inbound_no_pending_appointment", body_len=len(body), from_number=from_number)
             sms_trace("inbound_no_appointment_for_number", request_id=rid, body_len=len(body))
         # Persist email from SMS while appointment is still pending_customer (e.g. "my email is x@y.com")
