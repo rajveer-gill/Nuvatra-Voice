@@ -572,6 +572,7 @@ try:
         db_sms_opt_out_clear,
         db_appointments_get_pending_by_phone,
         db_appointments_get_by_phone_for_sms,
+        db_appointments_resolve_for_sms,
         db_appointments_get_accepted_for_date,
         db_appointments_mark_reminder_sent,
         db_appointments_in_date_range,
@@ -2476,6 +2477,34 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                                 success=ok,
                             )
                             if ok:
+                                if USE_DB and cid and apt.get("id"):
+                                    try:
+                                        db_sms_session_upsert(
+                                            to_number_sms,
+                                            cid,
+                                            [
+                                                {
+                                                    "role": "assistant",
+                                                    "content": (
+                                                        "Appointment details sent by text. "
+                                                        "Reply YES or CONFIRM when everything looks right."
+                                                    ),
+                                                }
+                                            ],
+                                            int(apt["id"]),
+                                        )
+                                        sms_info(
+                                            "post_booking_sms_session_linked",
+                                            client_id=cid,
+                                            apt_id=apt.get("id"),
+                                        )
+                                    except Exception as sess_err:
+                                        logger.warning(
+                                            "post_booking_sms_session_link_failed apt_id=%s: %s",
+                                            apt.get("id"),
+                                            sess_err,
+                                            exc_info=True,
+                                        )
                                 ai_text = (
                                     "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
                                     "The time is not finalized until you confirm by text."
@@ -5163,7 +5192,11 @@ async def handle_incoming_sms(request: Request):
             )
             if total >= cap:
                 audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": cap}, request=request)
-        apt = db_appointments_get_by_phone_for_sms(from_number) if USE_DB else None
+        apt = (
+            db_appointments_resolve_for_sms(from_number, tenant["client_id"])
+            if USE_DB
+            else None
+        )
         if apt:
             sms_debug(
                 "inbound_context",
@@ -5255,8 +5288,10 @@ async def handle_incoming_sms(request: Request):
                         logger.warning("db_sms_session_upsert failed (slot taken path): %s", upsert_err, exc_info=True)
                     return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
                 reserve_slot(date, time_hhmm, aid, DEFAULT_SLOT_DURATION_MINUTES, staff_for)
-                db_appointments_update(aid, status="pending_review")
-                apt_after = db_appointments_get_by_id(aid) or apt_full
+                db_appointments_update(
+                    aid, status="pending_review", client_id=tenant["client_id"]
+                )
+                apt_after = db_appointments_get_by_id(aid, client_id=tenant["client_id"]) or apt_full
             try:
                 update_caller_memory(
                     from_number,
@@ -5985,6 +6020,9 @@ async def handle_call_status(request: Request):
             if call_sid in active_calls:
                 call_data = active_calls[call_sid]
                 outcome = call_data.get("outcome")
+                if not outcome and appointment_created:
+                    outcome = "answered_by_ai"
+                    call_data["outcome"] = outcome
                 if outcome:
                     call_log_set_outcome(call_sid, outcome)
                 from_number = call_data.get("from_number")
