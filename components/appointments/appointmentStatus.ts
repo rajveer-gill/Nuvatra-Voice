@@ -26,6 +26,11 @@ export function canAcceptOrDecline(status: string): boolean {
   return status === 'pending_review'
 }
 
+/** Store can cancel confirmed bookings (frees the calendar slot). */
+export function canCancelAccepted(status: string): boolean {
+  return status === 'accepted' || status === 'confirmed' || status === 'completed'
+}
+
 export function needsResponse(status: string): boolean {
   return status === 'pending' || status === 'pending_review' || status === 'pending_customer'
 }

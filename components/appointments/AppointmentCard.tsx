@@ -15,6 +15,7 @@ import {
   STATUS_CLASSES,
   STATUS_LABELS,
   canAcceptOrDecline,
+  canCancelAccepted,
 } from '@/components/appointments/appointmentStatus'
 import type { Appointment } from '@/components/appointments/types'
 
@@ -33,6 +34,7 @@ export function AppointmentCard({
   acceptRejectMsg,
   onAccept,
   onDecline,
+  onCancel,
 }: {
   apt: Appointment
   staffLabel: string
@@ -42,6 +44,7 @@ export function AppointmentCard({
   acceptRejectMsg: { id: number; msg: string; ok?: boolean } | null
   onAccept: (id: number) => Promise<void>
   onDecline: (id: number) => void
+  onCancel: (id: number) => void
 }) {
   const isUpdating = updatingId === apt.id
   const showMsg = acceptRejectMsg?.id === apt.id
@@ -152,6 +155,22 @@ export function AppointmentCard({
                 Decline
               </motion.button>
             </div>
+          ) : canCancelAccepted(apt.status) ? (
+            <motion.button
+              type="button"
+              disabled={isUpdating}
+              whileTap={reduceMotion ? undefined : { scale: 0.94 }}
+              whileHover={reduceMotion ? undefined : { scale: 1.03 }}
+              onClick={() => onCancel(apt.id)}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-sm font-semibold text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+            >
+              {isUpdating ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <X className="h-4 w-4" />
+              )}
+              Cancel appointment
+            </motion.button>
           ) : (
             <span className="text-xs text-zinc-500">No actions</span>
           )}

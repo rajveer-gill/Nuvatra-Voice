@@ -39,8 +39,11 @@ export default function Appointments() {
     ok?: boolean
   } | null>(null)
   const [view, setView] = useState<'list' | 'calendar'>('list')
-  const [rejectModalId, setRejectModalId] = useState<number | null>(null)
-  const [rejectReason, setRejectReason] = useState('')
+  const [ownerActionModal, setOwnerActionModal] = useState<{
+    id: number
+    kind: 'reject' | 'cancel'
+  } | null>(null)
+  const [ownerActionReason, setOwnerActionReason] = useState('')
   const [declinePreview, setDeclinePreview] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [staffOptions, setStaffOptions] = useState<{ id: string; name: string }[]>([])
@@ -164,21 +167,27 @@ export default function Appointments() {
     }
   }
 
-  const confirmReject = async () => {
-    if (rejectModalId == null || !rejectReason.trim()) return
-    const id = rejectModalId
+  const confirmOwnerAction = async () => {
+    if (ownerActionModal == null || !ownerActionReason.trim()) return
+    const { id, kind } = ownerActionModal
     setUpdatingId(id)
     setAcceptRejectMsg(null)
     try {
-      await api.post(`/api/appointments/${id}/reject`, { reason: rejectReason.trim() })
-      await fetchAppointments()
-      setAcceptRejectMsg({ id, msg: 'Declined — customer notified.', ok: true })
-      setRejectModalId(null)
-      setRejectReason('')
+      if (kind === 'cancel') {
+        await api.post(`/api/appointments/${id}/cancel`, { reason: ownerActionReason.trim() })
+        await fetchAppointments()
+        setAcceptRejectMsg({ id, msg: 'Cancelled — customer notified.', ok: true })
+      } else {
+        await api.post(`/api/appointments/${id}/reject`, { reason: ownerActionReason.trim() })
+        await fetchAppointments()
+        setAcceptRejectMsg({ id, msg: 'Declined — customer notified.', ok: true })
+      }
+      setOwnerActionModal(null)
+      setOwnerActionReason('')
       setDeclinePreview(null)
       setTimeout(() => setAcceptRejectMsg(null), 4000)
     } catch (e) {
-      console.error('Failed to reject', e)
+      console.error(`Failed to ${kind}`, e)
       setAcceptRejectMsg({ id, msg: apiDetail(e), ok: false })
       setTimeout(() => setAcceptRejectMsg(null), 5000)
     } finally {
@@ -476,8 +485,13 @@ export default function Appointments() {
                       acceptRejectMsg={acceptRejectMsg}
                       onAccept={handleAccept}
                       onDecline={(id) => {
-                        setRejectModalId(id)
-                        setRejectReason('')
+                        setOwnerActionModal({ id, kind: 'reject' })
+                        setOwnerActionReason('')
+                        setDeclinePreview(null)
+                      }}
+                      onCancel={(id) => {
+                        setOwnerActionModal({ id, kind: 'cancel' })
+                        setOwnerActionReason('')
                         setDeclinePreview(null)
                       }}
                     />
@@ -490,7 +504,7 @@ export default function Appointments() {
       </motion.div>
 
       <AnimatePresence>
-        {rejectModalId != null && (
+        {ownerActionModal != null && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -504,16 +518,26 @@ export default function Appointments() {
               transition={{ type: 'spring', stiffness: 380, damping: 28 }}
               className="w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl"
             >
-              <h3 className="text-lg font-semibold text-white">Decline appointment</h3>
+              <h3 className="text-lg font-semibold text-white">
+                {ownerActionModal.kind === 'cancel'
+                  ? 'Cancel appointment'
+                  : 'Decline appointment'}
+              </h3>
               <p className="mt-1 text-sm text-zinc-400">
-                We&apos;ll polish this and text the customer.
+                {ownerActionModal.kind === 'cancel'
+                  ? 'This frees the time slot and texts the customer.'
+                  : "We'll polish this and text the customer."}
               </p>
               <textarea
                 className="mt-4 w-full min-h-[100px] rounded-xl border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
-                placeholder="e.g. That time is full — can we do 3 PM?"
-                value={rejectReason}
+                placeholder={
+                  ownerActionModal.kind === 'cancel'
+                    ? 'e.g. Need to clear test bookings — please rebook online'
+                    : 'e.g. That time is full — can we do 3 PM?'
+                }
+                value={ownerActionReason}
                 onChange={(e) => {
-                  setRejectReason(e.target.value)
+                  setOwnerActionReason(e.target.value)
                   setDeclinePreview(null)
                 }}
               />
@@ -532,24 +556,25 @@ export default function Appointments() {
                   type="button"
                   className="rounded-xl border border-white/10 px-4 py-2 text-sm text-zinc-300"
                   onClick={() => {
-                    setRejectModalId(null)
-                    setRejectReason('')
+                    setOwnerActionModal(null)
+                    setOwnerActionReason('')
                     setDeclinePreview(null)
                   }}
                 >
-                  Cancel
+                  Close
                 </button>
                 <button
                   type="button"
-                  disabled={!rejectReason.trim() || previewLoading}
+                  disabled={!ownerActionReason.trim() || previewLoading}
                   className="rounded-xl border border-cyan-500/40 px-4 py-2 text-sm text-cyan-300 disabled:opacity-50"
                   onClick={async () => {
-                    if (!rejectReason.trim() || rejectModalId == null) return
+                    if (!ownerActionReason.trim() || ownerActionModal == null) return
                     setPreviewLoading(true)
                     try {
                       const res = await api.post('/api/appointments/preview-decline-sms', {
-                        reason: rejectReason.trim(),
-                        appointment_id: rejectModalId,
+                        reason: ownerActionReason.trim(),
+                        appointment_id: ownerActionModal.id,
+                        event: ownerActionModal.kind,
                       })
                       setDeclinePreview(String(res.data?.polished_message || '').trim() || null)
                     } catch {
@@ -564,11 +589,11 @@ export default function Appointments() {
                 <motion.button
                   type="button"
                   whileTap={{ scale: 0.96 }}
-                  disabled={!rejectReason.trim() || updatingId === rejectModalId}
-                  onClick={() => void confirmReject()}
+                  disabled={!ownerActionReason.trim() || updatingId === ownerActionModal.id}
+                  onClick={() => void confirmOwnerAction()}
                   className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
                 >
-                  Send decline
+                  {ownerActionModal.kind === 'cancel' ? 'Send cancellation' : 'Send decline'}
                 </motion.button>
               </div>
             </motion.div>
