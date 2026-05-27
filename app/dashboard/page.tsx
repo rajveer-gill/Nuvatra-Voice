@@ -19,6 +19,8 @@ type SetupStatusSnapshot = {
   roster_ready?: boolean
   forwarding_phone_ready?: boolean
   voice_ready?: boolean
+  /** Store phone set but roster empty — callers are transferred, AI stays off */
+  roster_only_gap?: boolean
 }
 
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
@@ -251,10 +253,13 @@ export default function DashboardPage() {
     return () => window.removeEventListener('call-surge-setup-status', onRefresh)
   }, [access, fetchSetupStatus])
 
-  const showRosterWarning = access === 'granted' && setupStatus?.roster_ready === false
-  const showStorePhoneWarning = access === 'granted' && setupStatus?.forwarding_phone_ready === false
-  const showVoiceSetupWarning =
-    access === 'granted' && setupStatus?.voice_ready === false && (showRosterWarning || showStorePhoneWarning)
+  const showVoiceSetupWarning = access === 'granted' && setupStatus?.voice_ready === false
+  const rosterOnlyGap =
+    showVoiceSetupWarning &&
+    setupStatus?.forwarding_phone_ready === true &&
+    setupStatus?.roster_ready === false
+  const needsStorePhone =
+    showVoiceSetupWarning && setupStatus?.forwarding_phone_ready === false
 
   const panelTransition = reduceMotion ? { duration: 0 } : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const }
 
@@ -407,10 +412,30 @@ export default function DashboardPage() {
                 <div className="flex gap-4">
                   <AlertTriangle className="h-10 w-10 shrink-0 text-amber-300" aria-hidden />
                   <div>
-                    <h2 className="text-lg font-bold text-amber-50 md:text-xl">Setup required before calls work</h2>
+                    <h2 className="text-lg font-bold text-amber-50 md:text-xl">
+                      {rosterOnlyGap
+                        ? 'Team roster required for AI receptionist'
+                        : 'Setup required before calls work'}
+                    </h2>
                     <p className="mt-1 max-w-2xl text-sm leading-relaxed text-amber-100/95">
-                      Your AI receptionist cannot take calls normally until both of these are configured. Callers will hear a
-                      message and be transferred to your store when a store phone is set.
+                      {rosterOnlyGap ? (
+                        <>
+                          Your store phone is set, so callers hear a short message and are{' '}
+                          <strong className="font-semibold text-white">transferred to your store</strong> until you add at
+                          least one team member with a name. The AI receptionist cannot book or answer normally until the
+                          roster is updated.
+                        </>
+                      ) : needsStorePhone ? (
+                        <>
+                          Your AI receptionist cannot take calls until setup is finished in Settings. Callers hear a message
+                          and the call ends — add your store phone and team roster so the receptionist can work or transfer
+                          callers.
+                        </>
+                      ) : (
+                        <>
+                          Your AI receptionist cannot take calls normally until setup is complete in Settings.
+                        </>
+                      )}
                     </p>
                     <ul className="mt-3 space-y-1 text-sm text-amber-50/95 list-disc pl-5">
                       {!setupStatus?.roster_ready && (

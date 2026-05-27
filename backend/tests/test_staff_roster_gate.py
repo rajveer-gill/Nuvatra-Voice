@@ -1,4 +1,4 @@
-"""Team roster and store phone must be configured before voice booking / AI answers."""
+"""Team roster and store phone gate inbound voice and setup status."""
 
 from __future__ import annotations
 
@@ -33,13 +33,28 @@ def test_voice_receptionist_requires_roster_and_store_phone():
     assert main.voice_receptionist_ready({"forwarding_phone": "+15551111111", "staff": []}) is False
 
 
-def test_setup_not_ready_call_message_lists_both_requirements():
+def test_setup_transfers_only_when_store_phone_without_roster():
+    gap = {"forwarding_phone": "+15551111111", "staff": []}
+    assert main.setup_transfers_to_store_after_message(gap) is True
+    assert main.setup_transfers_to_store_after_message({"forwarding_phone": "", "staff": []}) is False
+    assert main.setup_transfers_to_store_after_message(
+        {"forwarding_phone": "", "staff": [{"id": "1", "name": "Alex", "phone": ""}]}
+    ) is False
+
+
+def test_setup_not_ready_call_message_roster_only_gap_mentions_transfer():
+    msg = main.setup_not_ready_call_message({"staff": [], "forwarding_phone": "+15551111111"})
+    assert "roster" in msg.lower()
+    assert "transfer" in msg.lower()
+
+
+def test_setup_not_ready_call_message_no_store_phone_no_transfer_hint():
     msg = main.setup_not_ready_call_message({"staff": [], "forwarding_phone": ""})
-    assert "team members" in msg.lower()
-    assert "store phone" in msg.lower()
+    assert "transfer" not in msg.lower()
+    assert "store phone" in msg.lower() or "settings" in msg.lower()
 
 
-def test_setup_status_warns_without_roster():
+def test_setup_status_roster_only_gap_flag():
     body = main.get_setup_status(
         {
             "name": "Spa",
@@ -50,9 +65,8 @@ def test_setup_status_warns_without_roster():
             "services": [{"id": "s1", "name": "Cut"}],
         }
     )
-    assert body.get("roster_ready") is False
+    assert body.get("roster_only_gap") is True
     assert body.get("voice_ready") is False
-    assert any("team member" in w.lower() for w in body.get("warnings") or [])
 
 
 def test_setup_status_warns_without_store_phone():
@@ -67,11 +81,11 @@ def test_setup_status_warns_without_store_phone():
         }
     )
     assert body.get("forwarding_phone_ready") is False
-    assert body.get("voice_ready") is False
+    assert body.get("roster_only_gap") is False
     assert any("store phone number" in w for w in body.get("warnings") or [])
 
 
-def test_setup_not_ready_twiml_includes_message_and_dial(monkeypatch):
+def test_setup_not_ready_twiml_dials_store_when_roster_only_gap(monkeypatch):
     monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
     twiml = str(
         main.twiml_setup_not_ready_handoff(
@@ -81,11 +95,11 @@ def test_setup_not_ready_twiml_includes_message_and_dial(monkeypatch):
         )
     )
     assert "tts-audio" in twiml
-    assert "team members" in unquote(twiml).lower()
     assert "+15557654321" in twiml.replace(" ", "")
+    assert "transfer" in unquote(twiml).lower()
 
 
-def test_setup_not_ready_twiml_mentions_both_when_missing(monkeypatch):
+def test_setup_not_ready_twiml_no_dial_without_store_phone(monkeypatch):
     monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
     twiml = str(
         main.twiml_setup_not_ready_handoff(
@@ -94,6 +108,6 @@ def test_setup_not_ready_twiml_mentions_both_when_missing(monkeypatch):
             call_sid="CA123",
         )
     )
+    assert "<Dial" not in twiml
     decoded = unquote(twiml).lower()
-    assert "team members" in decoded
-    assert "store phone" in decoded
+    assert "goodbye" in decoded
