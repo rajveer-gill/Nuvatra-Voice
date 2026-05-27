@@ -353,9 +353,7 @@ export default function Appointments() {
         )}
 
         {view === 'calendar' ? (
-          <div className="rounded-2xl border border-white/10 bg-zinc-950/50 p-4">
-            <AppointmentCalendar api={api} />
-          </div>
+          <AppointmentCalendar api={api} />
         ) : (
           <>
             <div className="mb-4 flex flex-wrap gap-3 rounded-2xl border border-white/10 bg-zinc-950/40 p-4">
