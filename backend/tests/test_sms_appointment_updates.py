@@ -36,7 +36,7 @@ def test_apply_updates_name_and_email():
     def fake_memory(phone, name=None, increment_count=False, data_patch=None):
         mem.append({"name": name, "data_patch": data_patch})
 
-    out = apply_sms_appointment_detail_updates(
+    out, changed = apply_sms_appointment_detail_updates(
         "my name is Raj, not jake and rajgill1abc@gmail.com",
         stored,
         client_id="test",
@@ -49,6 +49,7 @@ def test_apply_updates_name_and_email():
     )
     assert out["name"] == "Raj"
     assert out["email"] == "rajgill1abc@gmail.com"
+    assert set(changed) == {"name", "email"}
     assert "name" in updates_log[0]
     assert "email" in updates_log[0]
 
@@ -62,8 +63,8 @@ def test_apply_from_bodies_name_on_prior_turn_confirm_yes():
 
     from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
 
-    out = apply_sms_appointment_detail_updates_from_bodies(
-        ["my name is Raj, not jake", "Yes"],
+    out, changed_first = apply_sms_appointment_detail_updates_from_bodies(
+        ["my name is Raj, not jake"],
         stored,
         client_id="test",
         from_number="+15551234567",
@@ -74,3 +75,37 @@ def test_apply_from_bodies_name_on_prior_turn_confirm_yes():
         logger=__import__("logging").getLogger("test"),
     )
     assert out["name"] == "Raj"
+    assert changed_first == ["name"]
+
+    out2, changed_yes = apply_sms_appointment_detail_updates_from_bodies(
+        ["my name is Raj, not jake", "Yes"],
+        out,
+        client_id="test",
+        from_number="+15551234567",
+        db_appointments_update=fake_update,
+        db_appointments_get_by_id=lambda aid, client_id: dict(stored),
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=__import__("logging").getLogger("test"),
+    )
+    assert out2["name"] == "Raj"
+    assert changed_yes == []
+
+
+def test_format_appointment_details_confirmation_sms():
+    from main import _format_appointment_details_confirmation_sms
+
+    msg = _format_appointment_details_confirmation_sms(
+        {
+            "name": "Raj",
+            "phone": "+15551234567",
+            "email": "r@test.com",
+            "date": "2026-05-28",
+            "time": "14:00",
+            "reason": "Haircut",
+            "status": "pending_customer",
+        }
+    )
+    assert "Raj" in msg
+    assert "2:00 PM" in msg
+    assert "YES or CONFIRM" in msg

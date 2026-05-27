@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
+
+DetailUpdateResult = Tuple[Optional[dict], list[str]]
 
 from observability import email_hint_for_log, name_initial_for_log, sms_info, sms_trace
 
@@ -59,13 +61,13 @@ def apply_sms_appointment_detail_updates_from_bodies(
     update_caller_memory,
     system_info,
     logger,
-) -> Optional[dict]:
+) -> DetailUpdateResult:
     """Apply name/email from the latest values across recent inbound SMS texts."""
     if not apt or not apt.get("id"):
-        return apt
+        return apt, []
     st = (apt.get("status") or "").strip()
     if st not in ("pending_customer", "pending_review"):
-        return apt
+        return apt, []
     aid = int(apt["id"])
     prior_name = (apt.get("name") or "").strip()
     latest_name: Optional[str] = None
@@ -103,7 +105,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
             user_body_count=user_body_count,
             prior_name_initial=name_initial_for_log(prior_name),
         )
-        return apt
+        return apt, []
     sms_info(
         "sms_detail_updates_parsed",
         apt_id=aid,
@@ -140,16 +142,16 @@ def apply_sms_appointment_detail_updates(
     system_info,
     logger,
     _forced_kwargs: Optional[dict[str, Any]] = None,
-) -> Optional[dict]:
+) -> DetailUpdateResult:
     """
     Persist email/name from SMS before confirm or conversational replies.
-    Returns refreshed appointment row when updated.
+    Returns (appointment row, field names that actually changed).
     """
     if not apt or not apt.get("id"):
-        return apt
+        return apt, []
     st = (apt.get("status") or "").strip()
     if st not in ("pending_customer", "pending_review"):
-        return apt
+        return apt, []
     aid = int(apt["id"])
     kwargs: dict[str, Any] = dict(_forced_kwargs or {})
     if not kwargs:
@@ -160,11 +162,12 @@ def apply_sms_appointment_detail_updates(
         if nm:
             kwargs["name"] = nm
     if not kwargs:
-        return apt
+        return apt, []
+    prior = {k: (apt.get(k) or "").strip() for k in kwargs}
     try:
         updated = db_appointments_update(aid, client_id=client_id, **kwargs)
         if not updated:
-            return apt
+            return apt, []
         apt = updated
         mem_patch: dict = {}
         if kwargs.get("email"):
@@ -201,7 +204,12 @@ def apply_sms_appointment_detail_updates(
             name_initial=name_initial_for_log(refreshed.get("name")),
             email_hint=email_hint_for_log(refreshed.get("email")),
         )
-        return refreshed
+        changed = [
+            k
+            for k in kwargs
+            if (refreshed.get(k) or "").strip() != prior.get(k, "")
+        ]
+        return refreshed, changed
     except Exception as e:
         logger.warning("apply_sms_appointment_detail_updates failed apt_id=%s: %s", aid, e, exc_info=True)
-        return apt
+        return apt, []

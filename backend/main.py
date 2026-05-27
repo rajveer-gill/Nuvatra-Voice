@@ -2101,6 +2101,37 @@ def _normalize_time_to_hhmm(t: str) -> str:
     h, m = divmod(mins, 60)
     return f"{h:02d}:{m:02d}"
 
+def _format_appointment_details_confirmation_sms(apt: dict) -> str:
+    """Full appointment summary for SMS — used after voice booking and when customer updates details."""
+    phone_display = (apt.get("phone") or "").strip() or "Not provided"
+    email_display = (apt.get("email") or "").strip() or "Not provided"
+    time_display = _hhmm_to_ampm(apt.get("time") or "") or (apt.get("time") or "")
+    service = (apt.get("reason") or "").strip() or "—"
+    status = (apt.get("status") or "").strip()
+    if status == "pending_customer":
+        intro = (
+            "Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:"
+        )
+        footer = (
+            "Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
+            "You can also reply with changes.\n\n"
+        )
+    else:
+        intro = "Here's your updated appointment info on file:"
+        footer = "Reply if anything still needs to change.\n\n"
+    return (
+        f"Hey! {intro}\n"
+        f"Name: {apt.get('name', '')}\n"
+        f"Phone: {phone_display}\n"
+        f"Email: {email_display}\n"
+        f"Date: {apt.get('date', '')}\n"
+        f"Time: {time_display}\n"
+        f"Service: {service}\n\n"
+        f"{footer}"
+        f"Msg & data rates may apply. Reply STOP to opt out."
+    )
+
+
 def _hhmm_to_ampm(hhmm: str) -> str:
     """Format HH:MM as 12-hour AM/PM (e.g. '13:00' -> '1:00 PM', '09:00' -> '9:00 AM')."""
     if not hhmm or not (hhmm or "").strip():
@@ -2681,20 +2712,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                                     db_appointments_update(apt["id"], phone=apt["phone"])
                                 except Exception:
                                     pass
-                        phone_display = (apt.get("phone") or "").strip() or "Not provided"
-                        email_display = (apt.get("email") or "").strip() or "Not provided"
-                        thanks_msg = (
-                            f"Hey! Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:\n"
-                            f"Name: {apt.get('name', '')}\n"
-                            f"Phone: {phone_display}\n"
-                            f"Email: {email_display}\n"
-                            f"Date: {apt.get('date', '')}\n"
-                            f"Time: {_hhmm_to_ampm(apt.get('time', '') or '')}\n"
-                            f"Service: {apt.get('reason', '')}\n\n"
-                            f"Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
-                            f"You can also reply with changes.\n\n"
-                            f"Msg & data rates may apply. Reply STOP to opt out."
-                        )
+                        thanks_msg = _format_appointment_details_confirmation_sms(apt)
                         to_number_sms = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
                         from_number_sms = (call_data.get("to_number") or "").strip() or None
                         if not from_number_sms and cid and USE_DB:
@@ -5606,20 +5624,19 @@ async def handle_incoming_sms(request: Request):
                 prior_user_turns=len(prior_user_bodies),
                 current_body_len=len(body or ""),
             )
-            apt = (
-                apply_sms_appointment_detail_updates_from_bodies(
-                    prior_user_bodies + [body],
-                    apt,
-                    client_id=tenant["client_id"],
-                    from_number=from_number,
-                    db_appointments_update=db_appointments_update,
-                    db_appointments_get_by_id=db_appointments_get_by_id,
-                    update_caller_memory=update_caller_memory,
-                    system_info=system_info,
-                    logger=logger,
-                )
-                or apt
+            apt, detail_fields_updated = apply_sms_appointment_detail_updates_from_bodies(
+                prior_user_bodies + [body],
+                apt,
+                client_id=tenant["client_id"],
+                from_number=from_number,
+                db_appointments_update=db_appointments_update,
+                db_appointments_get_by_id=db_appointments_get_by_id,
+                update_caller_memory=update_caller_memory,
+                system_info=system_info,
+                logger=logger,
             )
+        else:
+            detail_fields_updated = []
         messages.append({"role": "user", "content": body})
         sms_trace(
             "inbound_session_loaded",
@@ -5627,6 +5644,39 @@ async def handle_incoming_sms(request: Request):
             prior_turns=prior_turns,
             session_existed=session is not None,
         )
+        # After detail changes, text full summary so customer can verify before YES/CONFIRM
+        if (
+            apt
+            and detail_fields_updated
+            and not _is_sms_confirmation(body)
+            and (apt.get("status") or "") in ("pending_customer", "pending_review")
+        ):
+            summary_sms = _format_appointment_details_confirmation_sms(apt)
+            send_ok = send_sms(from_number, summary_sms, from_override=to_number)
+            sms_info(
+                "sms_detail_summary_sent",
+                request_id=rid,
+                apt_id=apt.get("id"),
+                client_id=tenant["client_id"],
+                fields=detail_fields_updated,
+                send_sms_ok=send_ok,
+            )
+            messages.append({"role": "assistant", "content": summary_sms})
+            try:
+                db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+            except Exception as upsert_err:
+                sms_info(
+                    "inbound_session_persist_failed",
+                    request_id=rid,
+                    client_id=tenant["client_id"],
+                    error_type=type(upsert_err).__name__,
+                    phase="detail_summary_reply",
+                )
+                logger.warning("db_sms_session_upsert failed (detail summary): %s", upsert_err, exc_info=True)
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
         # If they have an appointment awaiting their confirmation (pending_customer) and they reply yes/looks good, promote to pending_review so store can Accept/Decline
         if apt and apt.get("status") == "pending_customer" and _is_sms_confirmation(body):
             sms_trace(
