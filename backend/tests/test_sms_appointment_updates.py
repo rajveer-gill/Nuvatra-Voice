@@ -101,6 +101,8 @@ def test_apply_updates_name_for_accepted_appointment():
 
     from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
 
+    bulk_calls = []
+
     out, changed = apply_sms_appointment_detail_updates_from_bodies(
         ["my name is Raj and my email is raj@example.com"],
         stored,
@@ -109,12 +111,14 @@ def test_apply_updates_name_for_accepted_appointment():
         db_appointments_update=fake_update,
         db_appointments_get_by_id=lambda aid, client_id: dict(stored),
         update_caller_memory=lambda *a, **k: None,
+        db_appointments_update_active_name_by_phone=lambda phone, client_id, name, exclude_appointment_id=None: bulk_calls.append((phone, name, exclude_appointment_id)) or 1,
         system_info=lambda *a, **k: None,
         logger=__import__("logging").getLogger("test"),
     )
     assert out["name"] == "Raj"
     assert out["email"] == "raj@example.com"
     assert set(changed) == {"name", "email"}
+    assert bulk_calls and bulk_calls[0][1] == "Raj"
 
 
 def test_format_appointment_details_confirmation_sms():

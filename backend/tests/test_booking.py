@@ -1,6 +1,6 @@
-"""Unit tests for parse_booking."""
+"""Unit tests for parse_booking and booking requirement guards."""
 import pytest
-from main import _strip_booking_directive_for_voice, parse_booking
+from main import _strip_booking_directive_for_voice, _validate_booking_requirements, parse_booking
 
 
 def test_parse_booking_valid():
@@ -71,3 +71,54 @@ def test_strip_booking_directive_for_voice():
     raw = "Great!\nBOOKING: X|y| |2026-01-02|10:00|Z|\nSee you then."
     assert "BOOKING" not in _strip_booking_directive_for_voice(raw)
     assert "Great" in _strip_booking_directive_for_voice(raw)
+
+
+def test_validate_booking_requires_stylist_when_staff_configured(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "Mia"}],
+            "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "", "reason": "Haircut"}
+    )
+    assert not ok
+    assert "choose a stylist" in (msg or "").lower()
+    assert staff_id is None
+    assert service is None
+
+
+def test_validate_booking_requires_known_service_when_services_configured(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "Mia"}],
+            "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "Mia", "reason": ""}
+    )
+    assert not ok
+    assert "choose a service" in (msg or "").lower()
+    assert staff_id == "s1"
+    assert service is None
+
+
+def test_validate_booking_normalizes_service_name(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "Mia"}],
+            "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "Mia", "reason": "haircut please"}
+    )
+    assert ok
+    assert msg is None
+    assert staff_id == "s1"
+    assert service == "Haircut"

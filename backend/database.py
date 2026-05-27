@@ -1379,6 +1379,54 @@ def db_appointments_get_active_for_sms_context(
     ]
 
 
+def db_appointments_update_active_name_by_phone(
+    phone: str,
+    *,
+    client_id: str,
+    name: str,
+    exclude_appointment_id: Optional[int] = None,
+) -> int:
+    """Update name across active appointments for this phone (pending/accepted) and return row count."""
+    conn = _get_conn()
+    if not conn:
+        return 0
+    norm = _normalize_phone(phone or "")
+    cid = (client_id or "").strip()
+    nm = (name or "").strip()
+    if not norm or not cid or not nm:
+        return 0
+    cur = conn.cursor()
+    if exclude_appointment_id:
+        cur.execute(
+            """
+            UPDATE appointments
+            SET name = %s
+            WHERE client_id = %s
+              AND status IN ('pending_customer', 'pending_review', 'accepted')
+              AND id <> %s
+              AND (regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = %s
+                   OR regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = right(%s, 10))
+            """,
+            (nm, cid, int(exclude_appointment_id), norm, norm),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE appointments
+            SET name = %s
+            WHERE client_id = %s
+              AND status IN ('pending_customer', 'pending_review', 'accepted')
+              AND (regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = %s
+                   OR regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = right(%s, 10))
+            """,
+            (nm, cid, norm, norm),
+        )
+    count = cur.rowcount or 0
+    conn.commit()
+    cur.close()
+    return int(count)
+
+
 def db_appointments_latest_identity_for_phone(
     phone: str,
     *,

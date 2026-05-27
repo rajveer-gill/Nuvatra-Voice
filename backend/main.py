@@ -574,6 +574,7 @@ try:
         db_appointments_get_pending_by_phone,
         db_appointments_get_by_phone_for_sms,
         db_appointments_get_active_for_sms_context,
+        db_appointments_update_active_name_by_phone,
         db_appointments_latest_identity_for_phone,
         db_appointments_resolve_for_sms,
         db_appointments_get_accepted_for_date,
@@ -2490,6 +2491,52 @@ def resolve_staff_id_from_booking_fragment(fragment: Optional[str]) -> Optional[
     return None
 
 
+def _normalize_service_choice_for_booking(reason_raw: Optional[str], info: Optional[dict] = None) -> tuple[Optional[str], bool]:
+    """Return (canonical_service_name_or_none, service_required)."""
+    biz = info or get_business_info()
+    services = _normalize_service_entries((biz or {}).get("services") or [])
+    if not services:
+        return (reason_raw or "").strip() or None, False
+    reason = (reason_raw or "").strip()
+    if not reason or reason == "—":
+        return None, True
+    reason_l = reason.lower()
+    for s in services:
+        nm = (s.get("name") or "").strip()
+        if not nm:
+            continue
+        nml = nm.lower()
+        if reason_l == nml or reason_l in nml or nml in reason_l:
+            return nm, True
+    return None, True
+
+
+def _validate_booking_requirements(booking: dict, info: Optional[dict] = None) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    """
+    Validate required stylist/service when configured.
+    Returns: (ok, fail_message, staff_id, canonical_service_name)
+    """
+    biz = info or get_business_info()
+    staff_rows = [s for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
+    staff_id = resolve_staff_id_from_booking_fragment(booking.get("staff"))
+    if staff_rows and not staff_id:
+        choices = ", ".join((s.get("name") or "").strip() for s in staff_rows[:5] if (s.get("name") or "").strip())
+        msg = (
+            "Before I can book this, please choose a stylist."
+            + (f" Available stylists: {choices}." if choices else "")
+        )
+        return False, msg, None, None
+    service_name, service_required = _normalize_service_choice_for_booking(booking.get("reason"), biz)
+    if service_required and not service_name:
+        service_choices = ", ".join((s.get("name") or "").strip() for s in _normalize_service_entries(biz.get("services") or [])[:5] if (s.get("name") or "").strip())
+        msg = (
+            "Before I can book this, please choose a service."
+            + (f" Available services: {service_choices}." if service_choices else "")
+        )
+        return False, msg, staff_id, None
+    return True, None, staff_id, service_name
+
+
 def _optional_staff_id_validated(raw: Optional[str]) -> Optional[str]:
     """If staff_id is set, ensure it matches a row in this tenant's staff list."""
     sid = (raw or "").strip()
@@ -2520,6 +2567,9 @@ def _create_appointment_from_booking(
     if cid_for_slot:
         set_request_client_id(cid_for_slot)
     staff_key = resolve_staff_id_from_booking_fragment(booking.get("staff"))
+    canonical_service, _ = _normalize_service_choice_for_booking(booking.get("reason"))
+    if canonical_service:
+        booking["reason"] = canonical_service
     _supersede_pending_customer_drafts_for_slot(
         date,
         time,
@@ -2678,6 +2728,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
         if booking:
+            fail_msg = None
             if not staff_roster_ready_for_booking():
                 ai_text = (
                     "I'm not able to book appointments until the business adds team members to their roster online. "
@@ -2701,9 +2752,16 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     if from_num:
                         booking["phone"] = (booking.get("phone") or "").strip() or from_num
                     cid = (call_data.get("client_id") or "").strip() or None
-                    apt = _create_appointment_from_booking(
-                        booking, client_id_override=cid, reserve_slot_immediately=False
-                    )
+                    ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(booking)
+                    if not ok_booking:
+                        ai_text = fail_msg or "I need your stylist and service before I can book that."
+                        apt = None
+                    else:
+                        if canonical_service:
+                            booking["reason"] = canonical_service
+                        apt = _create_appointment_from_booking(
+                            booking, client_id_override=cid, reserve_slot_immediately=False
+                        )
                     if apt:
                         call_data["appointment_created"] = True
                         if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
@@ -2809,7 +2867,10 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         name_ok = bool((booking.get("name") or "").strip())
                         date_ok = bool((booking.get("date") or "").strip())
                         time_ok = bool((booking.get("time") or "").strip())
-                        reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
+                        if fail_msg:
+                            reason = "missing_required_booking_fields"
+                        else:
+                            reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
                         system_info(
                             "voice_booking_not_created",
                             reason=reason,
@@ -2817,7 +2878,9 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                             date_ok=date_ok,
                             time_ok=time_ok,
                         )
-                        if not name_ok:
+                        if fail_msg:
+                            ai_text = fail_msg
+                        elif not name_ok:
                             ai_text = "I'd love to book that for you—what's your name?"
                         elif not date_ok or not time_ok:
                             ai_text = "I need the date and time again to confirm—which day and time would you like?"
@@ -3800,7 +3863,13 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
         # BOOKING: create appointment from AI output if present
         booking = parse_booking(ai_response)
         if booking:
-            apt = _create_appointment_from_booking(booking)
+            ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(booking)
+            if not ok_booking:
+                apt = None
+            else:
+                if canonical_service:
+                    booking["reason"] = canonical_service
+                apt = _create_appointment_from_booking(booking)
             if apt:
                 ai_response = f"You're all set! We have you down for {apt['date']} at {_hhmm_to_ampm(apt.get('time', '') or '')}. The store will confirm shortly."
                 action = "schedule_appointment"
@@ -3809,7 +3878,9 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
                 name_ok = bool((booking.get("name") or "").strip())
                 date_ok = bool((booking.get("date") or "").strip())
                 time_ok = bool((booking.get("time") or "").strip())
-                if not name_ok:
+                if not ok_booking:
+                    ai_response = fail_msg or "Before I can book this, please choose a stylist and service."
+                elif not name_ok:
                     ai_response = "I'd love to book that for you—what's your name?"
                 elif not date_ok or not time_ok:
                     ai_response = "I need the date and time again to confirm—which day and time would you like?"
@@ -5633,6 +5704,7 @@ async def handle_incoming_sms(request: Request):
                 db_appointments_update=db_appointments_update,
                 db_appointments_get_by_id=db_appointments_get_by_id,
                 update_caller_memory=update_caller_memory,
+                db_appointments_update_active_name_by_phone=db_appointments_update_active_name_by_phone if USE_DB else None,
                 system_info=system_info,
                 logger=logger,
             )

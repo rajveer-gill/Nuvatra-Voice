@@ -59,6 +59,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
     db_appointments_update,
     db_appointments_get_by_id,
     update_caller_memory,
+    db_appointments_update_active_name_by_phone=None,
     system_info,
     logger,
 ) -> DetailUpdateResult:
@@ -124,6 +125,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
         db_appointments_update=db_appointments_update,
         db_appointments_get_by_id=db_appointments_get_by_id,
         update_caller_memory=update_caller_memory,
+        db_appointments_update_active_name_by_phone=db_appointments_update_active_name_by_phone,
         system_info=system_info,
         logger=logger,
         _forced_kwargs=kwargs,
@@ -139,6 +141,7 @@ def apply_sms_appointment_detail_updates(
     db_appointments_update,
     db_appointments_get_by_id,
     update_caller_memory,
+    db_appointments_update_active_name_by_phone=None,
     system_info,
     logger,
     _forced_kwargs: Optional[dict[str, Any]] = None,
@@ -204,6 +207,24 @@ def apply_sms_appointment_detail_updates(
             name_initial=name_initial_for_log(refreshed.get("name")),
             email_hint=email_hint_for_log(refreshed.get("email")),
         )
+        if kwargs.get("name") and callable(db_appointments_update_active_name_by_phone):
+            try:
+                updated_n = db_appointments_update_active_name_by_phone(
+                    from_number,
+                    client_id=client_id,
+                    name=kwargs["name"],
+                    exclude_appointment_id=aid,
+                )
+                if updated_n:
+                    sms_info(
+                        "sms_detail_updates_bulk_name_applied",
+                        apt_id=aid,
+                        client_id=client_id,
+                        updated_rows=updated_n,
+                        name_initial=name_initial_for_log(kwargs.get("name")),
+                    )
+            except Exception:
+                pass
         changed = [
             k
             for k in kwargs
