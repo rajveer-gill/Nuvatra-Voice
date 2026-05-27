@@ -1163,7 +1163,7 @@ class ConversationResponse(BaseModel):
 
 class AppointmentRequest(BaseModel):
     name: str
-    email: str
+    email: str = ""
     phone: str
     date: str
     time: str
@@ -2110,7 +2110,6 @@ def _normalize_time_to_hhmm(t: str) -> str:
 def _format_appointment_details_confirmation_sms(apt: dict) -> str:
     """Full appointment summary for SMS — used after voice booking and when customer updates details."""
     phone_display = (apt.get("phone") or "").strip() or "Not provided"
-    email_display = (apt.get("email") or "").strip() or "Not provided"
     time_display = _hhmm_to_ampm(apt.get("time") or "") or (apt.get("time") or "")
     service = (apt.get("reason") or "").strip() or "—"
     status = (apt.get("status") or "").strip()
@@ -2129,7 +2128,6 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
         f"Hey! {intro}\n"
         f"Name: {apt.get('name', '')}\n"
         f"Phone: {phone_display}\n"
-        f"Email: {email_display}\n"
         f"Date: {apt.get('date', '')}\n"
         f"Time: {time_display}\n"
         f"Service: {service}\n\n"
@@ -4277,8 +4275,20 @@ async def update_appointment(
                 return {"success": True, "appointment": apt}
     raise HTTPException(status_code=404, detail="Appointment not found")
 
+def _appointment_email_enabled() -> bool:
+    """Off by default; set APPOINTMENT_EMAIL_ENABLED=1 to send Resend/SMTP confirmations."""
+    return (os.getenv("APPOINTMENT_EMAIL_ENABLED") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
-    """Send submitted/confirmed email when customer has email on file and provider is configured."""
+    """Send submitted/confirmed email when enabled and provider is configured."""
+    if not _appointment_email_enabled():
+        return False
     from email_notify import format_appointment_email, send_appointment_email
 
     email = (apt.get("email") or "").strip()
@@ -4338,10 +4348,6 @@ async def accept_appointment(
     time_ampm = _hhmm_to_ampm(apt.get("time") or "")
     msg = f"Your appointment at {business_name} is confirmed for {date} at {time_ampm}. Reply if you need to change."
     send_sms(apt.get("phone") or "", msg, from_override=_tenant_sms_from_number())
-    try:
-        _send_appointment_email_notification(apt, kind="confirmed")
-    except Exception as e:
-        logger.warning("appointment_confirm_email_failed apt_id=%s: %s", appointment_id, e, exc_info=True)
     return {"success": True, "appointment": apt}
 
 
@@ -5934,15 +5940,6 @@ async def handle_incoming_sms(request: Request):
                 "Msg & data rates may apply. Reply STOP to opt out."
             )
             send_ok = send_sms(from_number, reply, from_override=to_number)
-            try:
-                _send_appointment_email_notification(apt_after, kind="submitted")
-            except Exception as e:
-                logger.warning(
-                    "customer_confirm_submitted_email_failed apt_id=%s: %s",
-                    apt_after.get("id"),
-                    e,
-                    exc_info=True,
-                )
             sms_trace(
                 "inbound_customer_confirm_reply_sent",
                 request_id=rid,

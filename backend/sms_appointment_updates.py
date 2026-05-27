@@ -1,4 +1,4 @@
-"""Parse and persist appointment detail corrections from inbound SMS (name, email)."""
+"""Parse and persist appointment name corrections from inbound SMS."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any, Optional, Tuple
 
 DetailUpdateResult = Tuple[Optional[dict], list[str]]
 
-from observability import email_hint_for_log, name_initial_for_log, sms_info, sms_trace
+from observability import name_initial_for_log, sms_info, sms_trace
 
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _NAME_PATTERNS = (
@@ -72,7 +72,6 @@ def apply_sms_appointment_detail_updates_from_bodies(
     aid = int(apt["id"])
     prior_name = (apt.get("name") or "").strip()
     latest_name: Optional[str] = None
-    latest_email: Optional[str] = None
     cur_name = prior_name
     user_body_count = sum(1 for b in bodies if (b or "").strip())
     sms_info(
@@ -86,16 +85,11 @@ def apply_sms_appointment_detail_updates_from_bodies(
     for body in bodies:
         if not (body or "").strip():
             continue
-        em = parse_email_from_sms(body)
-        if em:
-            latest_email = em
         nm = parse_name_from_sms(body, current_name=cur_name)
         if nm:
             latest_name = nm
             cur_name = nm
     kwargs: dict[str, Any] = {}
-    if latest_email:
-        kwargs["email"] = latest_email
     if latest_name:
         kwargs["name"] = latest_name
     if not kwargs:
@@ -112,10 +106,8 @@ def apply_sms_appointment_detail_updates_from_bodies(
         apt_id=aid,
         client_id=client_id,
         will_update_name=bool(latest_name),
-        will_update_email=bool(latest_email),
         prior_name_initial=name_initial_for_log(prior_name),
         new_name_initial=name_initial_for_log(latest_name),
-        email_hint=email_hint_for_log(latest_email),
     )
     return apply_sms_appointment_detail_updates(
         " ".join(bodies),
@@ -158,9 +150,6 @@ def apply_sms_appointment_detail_updates(
     aid = int(apt["id"])
     kwargs: dict[str, Any] = dict(_forced_kwargs or {})
     if not kwargs:
-        em = parse_email_from_sms(body)
-        if em:
-            kwargs["email"] = em
         nm = parse_name_from_sms(body, current_name=(apt.get("name") or ""))
         if nm:
             kwargs["name"] = nm
@@ -172,15 +161,11 @@ def apply_sms_appointment_detail_updates(
         if not updated:
             return apt, []
         apt = updated
-        mem_patch: dict = {}
-        if kwargs.get("email"):
-            mem_patch["email_on_file"] = kwargs["email"]
         try:
             update_caller_memory(
                 from_number,
                 name=kwargs.get("name") or (apt.get("name") or "").strip() or None,
                 increment_count=False,
-                data_patch=mem_patch if mem_patch else None,
             )
         except Exception:
             pass
@@ -197,7 +182,6 @@ def apply_sms_appointment_detail_updates(
             client_id=client_id,
             fields=list(kwargs.keys()),
             name_initial=name_initial_for_log(refreshed.get("name")),
-            email_hint=email_hint_for_log(refreshed.get("email")),
         )
         sms_trace(
             "sms_detail_updates_applied_verbose",
@@ -205,7 +189,6 @@ def apply_sms_appointment_detail_updates(
             client_id=client_id,
             fields=list(kwargs.keys()),
             name_initial=name_initial_for_log(refreshed.get("name")),
-            email_hint=email_hint_for_log(refreshed.get("email")),
         )
         if kwargs.get("name") and callable(db_appointments_update_active_name_by_phone):
             try:

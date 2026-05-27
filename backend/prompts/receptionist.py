@@ -173,8 +173,6 @@ def build_system_prompt(
         count = caller_memory.get("call_count", 0)
         last = caller_memory.get("last_reason") or "general inquiry"
         extras: List[str] = []
-        if caller_memory.get("email_on_file"):
-            extras.append(f"email they gave before: {caller_memory.get('email_on_file')}")
         ld = caller_memory.get("last_voice_booking_date")
         lt = caller_memory.get("last_voice_booking_time")
         if ld and lt:
@@ -243,8 +241,8 @@ def build_system_prompt(
 - TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
-- CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date and time, and optionally email for confirmations.
-{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). The reason field holds the service name when a service menu exists, or a short visit note otherwise. The 7th field staff holds the stylist name when they chose one (required when multiple stylists are on the roster unless they have no preference). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone: leave empty (we have it from the call). (3) If you don't have their email yet, ask for it before outputting BOOKING so we can send confirmations (leave email empty if they decline). (4) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (5) Time as HH:MM (e.g. 13:00 for 1 PM). (6) Do not output BOOKING until you have at least name, date, and time."""
+- CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date, time, service, and stylist when applicable. Do NOT ask for email—we confirm by text/SMS only.
+{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). The reason field holds the service name when a service menu exists, or a short visit note otherwise. The 7th field staff holds the stylist name when they chose one (required when multiple stylists are on the roster unless they have no preference). RULES: (1) You MUST include the caller's name—if they haven't given it, ask for their name first, then output BOOKING. (2) For phone and email: leave empty (we have phone from the call; we do not collect email). (3) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (4) Time as HH:MM (e.g. 13:00 for 1 PM). (5) Do not output BOOKING until you have at least name, date, and time."""
 
     help_section = (
         "\n".join(help_lines)

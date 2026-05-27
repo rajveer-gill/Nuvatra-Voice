@@ -24,6 +24,7 @@ def test_prompt_contains_booking_token_format(minimal_business):
     )
     assert "BOOKING:" in p
     assert "name|phone|email|date|time|reason" in p
+    assert "Do NOT ask for email" in p
 
 
 def test_prompt_requires_12_hour_spoken_times(minimal_business):

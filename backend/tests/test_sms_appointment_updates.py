@@ -19,7 +19,7 @@ def test_parse_name_unchanged_returns_none():
     assert parse_name_from_sms("my name is Jake", current_name="Jake") is None
 
 
-def test_apply_updates_name_and_email():
+def test_apply_updates_name_only_ignores_email_in_sms():
     stored = {"id": 1, "status": "pending_customer", "name": "Jake", "email": ""}
     updates_log = []
 
@@ -31,11 +31,6 @@ def test_apply_updates_name_and_email():
     def fake_get(aid, client_id):
         return dict(stored)
 
-    mem = []
-
-    def fake_memory(phone, name=None, increment_count=False, data_patch=None):
-        mem.append({"name": name, "data_patch": data_patch})
-
     out, changed = apply_sms_appointment_detail_updates(
         "my name is Raj, not jake and rajgill1abc@gmail.com",
         stored,
@@ -43,15 +38,13 @@ def test_apply_updates_name_and_email():
         from_number="+15551234567",
         db_appointments_update=fake_update,
         db_appointments_get_by_id=fake_get,
-        update_caller_memory=fake_memory,
+        update_caller_memory=lambda *a, **k: None,
         system_info=lambda *a, **k: None,
         logger=__import__("logging").getLogger("test"),
     )
     assert out["name"] == "Raj"
-    assert out["email"] == "rajgill1abc@gmail.com"
-    assert set(changed) == {"name", "email"}
-    assert "name" in updates_log[0]
-    assert "email" in updates_log[0]
+    assert out["email"] == ""
+    assert changed == ["name"]
 
 
 def test_apply_from_bodies_name_on_prior_turn_confirm_yes():
@@ -116,8 +109,8 @@ def test_apply_updates_name_for_accepted_appointment():
         logger=__import__("logging").getLogger("test"),
     )
     assert out["name"] == "Raj"
-    assert out["email"] == "raj@example.com"
-    assert set(changed) == {"name", "email"}
+    assert out["email"] == "old@example.com"
+    assert changed == ["name"]
     assert bulk_calls and bulk_calls[0][1] == "Raj"
 
 
@@ -138,3 +131,4 @@ def test_format_appointment_details_confirmation_sms():
     assert "Raj" in msg
     assert "2:00 PM" in msg
     assert "YES or CONFIRM" in msg
+    assert "Email:" not in msg
