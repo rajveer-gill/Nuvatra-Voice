@@ -1,34 +1,30 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Calendar, Plus, RefreshCw, Clock, Mail, Phone, LayoutGrid, List } from 'lucide-react'
-import { useApiClient } from '@/lib/api'
-import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
-import AppointmentCalendar from '@/components/AppointmentCalendar'
+import { useState, useEffect, useMemo } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
-  STATUS_CLASSES,
-  STATUS_LABELS,
-  canAcceptOrDecline,
-  needsResponse,
-} from '@/components/appointments/appointmentStatus'
+  Calendar,
+  Plus,
+  RefreshCw,
+  LayoutGrid,
+  List,
+  Sparkles,
+  Inbox,
+  CheckCircle2,
+  AlertCircle,
+} from 'lucide-react'
+import { useApiClient } from '@/lib/api'
+import AppointmentCalendar from '@/components/AppointmentCalendar'
+import { AppointmentCard, apiDetail } from '@/components/appointments/AppointmentCard'
+import { needsResponse } from '@/components/appointments/appointmentStatus'
+import type { Appointment } from '@/components/appointments/types'
+import { staggerContainer } from '@/components/motion/variants'
 
-export interface Appointment {
-  id: number
-  name: string
-  email: string
-  phone: string
-  date: string
-  time: string
-  reason: string
-  status: string
-  created_at: string
-  source?: string
-  staff_id?: string | null
-  owner_decline_reason?: string | null
-}
+export type { Appointment } from '@/components/appointments/types'
 
 export default function Appointments() {
   const api = useApiClient()
+  const reduceMotion = useReducedMotion()
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<string>('all')
@@ -37,7 +33,11 @@ export default function Appointments() {
   const [showForm, setShowForm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [updatingId, setUpdatingId] = useState<number | null>(null)
-  const [acceptRejectMsg, setAcceptRejectMsg] = useState<{ id: number; msg: string } | null>(null)
+  const [acceptRejectMsg, setAcceptRejectMsg] = useState<{
+    id: number
+    msg: string
+    ok?: boolean
+  } | null>(null)
   const [view, setView] = useState<'list' | 'calendar'>('list')
   const [rejectModalId, setRejectModalId] = useState<number | null>(null)
   const [rejectReason, setRejectReason] = useState('')
@@ -45,17 +45,14 @@ export default function Appointments() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [staffOptions, setStaffOptions] = useState<{ id: string; name: string }[]>([])
   const [calendarHolds, setCalendarHolds] = useState<
-    { date: string; time: string; appointment_id?: number; status: string; name: string; phone: string }[]
+    { date: string; time: string; appointment_id?: number; status: string; name: string }[]
   >([])
   const [tenantClientId, setTenantClientId] = useState<string | null>(null)
   const [diagnostics, setDiagnostics] = useState<{
     total?: number
-    by_status?: Record<string, number>
-    recent?: { id: number; status: string; date: string; time: string; source: string }[]
     likely_mismatch?: boolean
     env_client_id?: string | null
     env_client_id_appointment_count?: number | null
-    counts_by_client?: { client_id: string; count: number }[]
   } | null>(null)
   const [twilioPhone, setTwilioPhone] = useState<string | null>(null)
   const [form, setForm] = useState({
@@ -76,14 +73,6 @@ export default function Appointments() {
       setTenantClientId(res.data.client_id || null)
       setDiagnostics(res.data.diagnostics || null)
       setTwilioPhone(res.data.twilio_phone_number || null)
-      if (process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1') {
-        console.info('[appointments]', {
-          client_id: res.data.client_id,
-          count: (res.data.appointments || []).length,
-          holds: (res.data.calendar_holds || []).length,
-          diagnostics: res.data.diagnostics,
-        })
-      }
     } catch (e) {
       console.error('Failed to fetch appointments', e)
     } finally {
@@ -111,17 +100,28 @@ export default function Appointments() {
 
   const staffNameById = Object.fromEntries(staffOptions.map((s) => [s.id, s.name]))
 
-  const filtered = appointments.filter((a) => {
-    if (statusFilter === 'needs_response' && !needsResponse(a.status)) return false
-    if (statusFilter === 'accepted' && !['accepted', 'confirmed', 'completed'].includes(a.status)) return false
-    if (statusFilter === 'declined' && !['rejected', 'cancelled'].includes(a.status)) return false
-    if (dateFrom && a.date < dateFrom) return false
-    if (dateTo && a.date > dateTo) return false
-    return true
-  }).sort((a, b) => {
-    const d = (x: Appointment) => `${x.date}T${x.time || '00:00'}`
-    return d(a).localeCompare(d(b))
-  })
+  const filtered = appointments
+    .filter((a) => {
+      if (statusFilter === 'needs_response' && !needsResponse(a.status)) return false
+      if (statusFilter === 'accepted' && !['accepted', 'confirmed', 'completed'].includes(a.status))
+        return false
+      if (statusFilter === 'declined' && !['rejected', 'cancelled'].includes(a.status)) return false
+      if (dateFrom && a.date < dateFrom) return false
+      if (dateTo && a.date > dateTo) return false
+      return true
+    })
+    .sort((a, b) => {
+      const d = (x: Appointment) => `${x.date}T${x.time || '00:00'}`
+      return d(a).localeCompare(d(b))
+    })
+
+  const stats = useMemo(() => {
+    const needs = appointments.filter((a) => needsResponse(a.status)).length
+    const accepted = appointments.filter((a) =>
+      ['accepted', 'confirmed', 'completed'].includes(a.status)
+    ).length
+    return { total: appointments.length, needs, accepted }
+  }, [appointments])
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -153,12 +153,12 @@ export default function Appointments() {
     try {
       await api.post(`/api/appointments/${id}/accept`)
       await fetchAppointments()
-      setAcceptRejectMsg({ id, msg: 'Accepted; confirmation text sent.' })
-      setTimeout(() => setAcceptRejectMsg(null), 3000)
+      setAcceptRejectMsg({ id, msg: 'Accepted — confirmation text sent.', ok: true })
+      setTimeout(() => setAcceptRejectMsg(null), 4000)
     } catch (e) {
       console.error('Failed to accept', e)
-      setAcceptRejectMsg({ id, msg: 'Accept failed' })
-      setTimeout(() => setAcceptRejectMsg(null), 3000)
+      setAcceptRejectMsg({ id, msg: apiDetail(e), ok: false })
+      setTimeout(() => setAcceptRejectMsg(null), 5000)
     } finally {
       setUpdatingId(null)
     }
@@ -172,14 +172,15 @@ export default function Appointments() {
     try {
       await api.post(`/api/appointments/${id}/reject`, { reason: rejectReason.trim() })
       await fetchAppointments()
-      setAcceptRejectMsg({ id, msg: 'Declined; customer was notified.' })
-      setTimeout(() => setAcceptRejectMsg(null), 3000)
+      setAcceptRejectMsg({ id, msg: 'Declined — customer notified.', ok: true })
       setRejectModalId(null)
       setRejectReason('')
+      setDeclinePreview(null)
+      setTimeout(() => setAcceptRejectMsg(null), 4000)
     } catch (e) {
       console.error('Failed to reject', e)
-      setAcceptRejectMsg({ id, msg: 'Decline failed' })
-      setTimeout(() => setAcceptRejectMsg(null), 3000)
+      setAcceptRejectMsg({ id, msg: apiDetail(e), ok: false })
+      setTimeout(() => setAcceptRejectMsg(null), 5000)
     } finally {
       setUpdatingId(null)
     }
@@ -187,384 +188,331 @@ export default function Appointments() {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600" />
+      <div className="mx-auto max-w-5xl space-y-4 p-2">
+        {[0, 1, 2].map((i) => (
+          <motion.div
+            key={i}
+            initial={{ opacity: 0.4 }}
+            animate={{ opacity: [0.4, 0.7, 0.4] }}
+            transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.15 }}
+            className="h-36 rounded-2xl border border-white/10 bg-zinc-800/50"
+          />
+        ))}
       </div>
     )
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 text-gray-900">
-      <div className="bg-white rounded-2xl shadow-xl p-6">
-        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-          <h2 className="text-xl font-bold text-gray-900 flex items-center">
-            <Calendar className="w-6 h-6 mr-2 text-primary-600" />
-            Appointments
-          </h2>
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex rounded-lg border border-gray-200 p-0.5 bg-gray-50">
-              <button
-                type="button"
-                onClick={() => setView('list')}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium ${
-                  view === 'list' ? 'bg-white shadow text-primary-700' : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                <List className="w-4 h-4" />
-                List
-              </button>
-              <button
-                type="button"
-                onClick={() => setView('calendar')}
-                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium ${
-                  view === 'calendar' ? 'bg-white shadow text-primary-700' : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                <LayoutGrid className="w-4 h-4" />
-                Calendar
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowForm((v) => !v)}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium bg-primary-600 text-white hover:bg-primary-700 shadow"
+    <div className="mx-auto max-w-5xl space-y-6 text-zinc-100">
+      <motion.div
+        initial={reduceMotion ? false : { opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="relative overflow-hidden rounded-3xl border border-white/10 bg-zinc-900/80 p-6 shadow-2xl shadow-cyan-500/5 backdrop-blur-xl"
+      >
+        <div
+          className="pointer-events-none absolute inset-0 bg-gradient-to-br from-cyan-500/5 via-transparent to-indigo-600/10"
+          aria-hidden
+        />
+
+        <div className="relative mb-6 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <motion.div
+              animate={reduceMotion ? undefined : { rotate: [0, 8, -8, 0] }}
+              transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
+              className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-500 to-indigo-600 shadow-lg shadow-cyan-500/30"
             >
-              <Plus className="w-4 h-4" />
-              New appointment
-            </button>
-            <button
+              <Calendar className="h-6 w-6 text-white" />
+            </motion.div>
+            <div>
+              <h2 className="text-xl font-bold text-white">Appointments</h2>
+              {tenantClientId && (
+                <p className="text-xs text-zinc-500">Business · {tenantClientId}</p>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex rounded-xl border border-white/10 bg-zinc-950/60 p-1">
+              {(['list', 'calendar'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setView(v)}
+                  className={`relative flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                    view === v ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  {view === v && (
+                    <motion.span
+                      layoutId="apt-view-pill"
+                      className="absolute inset-0 rounded-lg bg-gradient-to-r from-cyan-600/80 to-indigo-600/80"
+                      transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+                    />
+                  )}
+                  <span className="relative z-10 flex items-center gap-1.5">
+                    {v === 'list' ? <List className="h-4 w-4" /> : <LayoutGrid className="h-4 w-4" />}
+                    {v === 'list' ? 'List' : 'Calendar'}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <motion.button
               type="button"
-              onClick={() => { setLoading(true); fetchAppointments(); }}
-              className="p-2 rounded-lg border border-gray-300 hover:bg-gray-50"
+              whileTap={reduceMotion ? undefined : { scale: 0.96 }}
+              onClick={() => setShowForm((s) => !s)}
+              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20"
+            >
+              <Plus className="h-4 w-4" />
+              New
+            </motion.button>
+            <motion.button
+              type="button"
+              whileTap={reduceMotion ? undefined : { scale: 0.92, rotate: 180 }}
+              onClick={() => {
+                setLoading(true)
+                void fetchAppointments()
+              }}
+              className="rounded-xl border border-white/10 p-2.5 text-zinc-300 hover:bg-white/5"
               title="Refresh"
             >
-              <RefreshCw className="w-4 h-4 text-gray-600" />
-            </button>
+              <RefreshCw className="h-4 w-4" />
+            </motion.button>
           </div>
         </div>
 
-        {diagnostics?.likely_mismatch && (
-          <div className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950">
-            <p className="font-semibold">Appointments may be under a different business id</p>
-            <p className="mt-1">
-              Your dashboard is signed in as <strong>{tenantClientId}</strong> ({diagnostics.total ?? 0}{' '}
-              appointments here), but the server has{' '}
-              <strong>{diagnostics.env_client_id_appointment_count ?? 0}</strong> under{' '}
-              <strong>{diagnostics.env_client_id}</strong> (often from <code>CLIENT_ID</code> on Render).
-              Voice bookings can land there while this list stays empty.
-            </p>
-            <p className="mt-2 text-xs">
-              Fix: In Render, remove <code>CLIENT_ID</code> and set your tenant&apos;s Twilio number in Settings
-              {twilioPhone ? ` (configured: ${twilioPhone})` : ' (not set on tenant yet)'} so calls match this account.
-            </p>
-          </div>
-        )}
+        <motion.div
+          variants={staggerContainer}
+          initial="hidden"
+          animate="visible"
+          className="relative mb-6 grid grid-cols-3 gap-3"
+        >
+          {[
+            { label: 'Total', value: stats.total, icon: Inbox, color: 'from-zinc-600 to-zinc-700' },
+            {
+              label: 'Needs response',
+              value: stats.needs,
+              icon: AlertCircle,
+              color: 'from-amber-500 to-orange-600',
+            },
+            {
+              label: 'Confirmed',
+              value: stats.accepted,
+              icon: CheckCircle2,
+              color: 'from-emerald-500 to-teal-600',
+            },
+          ].map((s, i) => (
+            <motion.div
+              key={s.label}
+              custom={i}
+              variants={{
+                hidden: { opacity: 0, y: 12 },
+                visible: (idx: number) => ({
+                  opacity: 1,
+                  y: 0,
+                  transition: { delay: idx * 0.08 },
+                }),
+              }}
+              className={`rounded-2xl border border-white/10 bg-gradient-to-br ${s.color} p-4 shadow-lg`}
+            >
+              <s.icon className="mb-2 h-5 w-5 text-white/90" />
+              <p className="text-2xl font-bold text-white">{s.value}</p>
+              <p className="text-xs font-medium text-white/80">{s.label}</p>
+            </motion.div>
+          ))}
+        </motion.div>
 
-        {diagnostics && appointments.length === 0 && (diagnostics.total ?? 0) > 0 && (
-          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-            <p className="font-semibold">Appointments exist but filters hide them</p>
-            <p className="mt-1">
-              Database has {diagnostics.total} row(s) for this business. Try Status &quot;All&quot; and clear date
-              filters.
-            </p>
-          </div>
+        {diagnostics?.likely_mismatch && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100"
+          >
+            Appointments may be stored under <strong>{diagnostics.env_client_id}</strong> while you are
+            viewing <strong>{tenantClientId}</strong>. Remove <code>CLIENT_ID</code> on Render and link your
+            Twilio number in Settings.
+          </motion.div>
         )}
 
         {calendarHolds.length > 0 && (
-          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-            <p className="font-semibold">Times the AI will not double-book</p>
-            <p className="mt-1 text-amber-900/90">
-              These slots are held on your calendar for this business
-              {tenantClientId ? ` (${tenantClientId})` : ''}. If the list below is empty, check Status
-              &quot;All&quot; or &quot;Needs response&quot;, or call the same business phone linked to this account.
-            </p>
-            <ul className="mt-2 list-disc pl-5 space-y-0.5">
-              {calendarHolds.slice(0, 8).map((h, i) => (
-                <li key={`${h.date}-${h.time}-${h.appointment_id ?? i}`}>
-                  {h.date} {formatTimeHhmmToAmPm(h.time)}
-                  {h.name ? ` — ${h.name}` : ''}
-                  {h.status ? ` (${STATUS_LABELS[h.status] || h.status})` : ''}
-                  {h.appointment_id ? ` #${h.appointment_id}` : ''}
+          <motion.details
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="mb-4 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-100"
+          >
+            <summary className="cursor-pointer font-semibold text-amber-200">
+              AI-blocked times ({calendarHolds.length})
+            </summary>
+            <ul className="mt-2 list-disc pl-5 space-y-0.5 text-amber-100/90">
+              {calendarHolds.slice(0, 6).map((h, i) => (
+                <li key={`${h.date}-${h.time}-${i}`}>
+                  {h.date} · {h.name || 'Held slot'} ({h.status})
                 </li>
               ))}
-              {calendarHolds.length > 8 && (
-                <li className="list-none pl-0 text-amber-800">…and {calendarHolds.length - 8} more</li>
-              )}
             </ul>
-          </div>
+          </motion.details>
         )}
 
         {view === 'calendar' ? (
-          <AppointmentCalendar api={api} />
-        ) : null}
+          <div className="rounded-2xl border border-white/10 bg-zinc-950/50 p-4">
+            <AppointmentCalendar api={api} />
+          </div>
+        ) : (
+          <>
+            <div className="mb-4 flex flex-wrap gap-3 rounded-2xl border border-white/10 bg-zinc-950/40 p-4">
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+              >
+                <option value="all">All statuses</option>
+                <option value="needs_response">Needs response</option>
+                <option value="accepted">Accepted</option>
+                <option value="declined">Declined</option>
+              </select>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                placeholder="From"
+              />
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                placeholder="To"
+              />
+            </div>
 
-        {/* Filters */}
-        {view === 'list' ? (
-        <div className="flex flex-wrap gap-4 mb-6 p-4 bg-gray-50 rounded-lg">
-          <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-gray-700">Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="cs-field-compact min-w-[11rem]"
-            >
-              <option value="all">All</option>
-              <option value="needs_response">Needs response</option>
-              <option value="accepted">Accepted</option>
-              <option value="declined">Declined</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-gray-700">From date</label>
-            <input
-              type="date"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="cs-field-compact min-w-[11rem]"
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-gray-700">To date</label>
-            <input
-              type="date"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="cs-field-compact min-w-[11rem]"
-            />
-          </div>
-        </div>
-        ) : null}
-
-        {/* Create form */}
-        {view === 'list' && showForm && (
-          <form onSubmit={handleCreate} className="mb-6 p-4 border border-primary-200 rounded-lg bg-primary-50/50 space-y-4">
-            <h3 className="font-semibold text-gray-900">Add appointment</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
-                <input
-                  type="text"
-                  value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  className="cs-field w-full"
-                  placeholder="Client name"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
-                <input
-                  type="tel"
-                  value={form.phone}
-                  onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                  className="cs-field w-full"
-                  placeholder="(555) 123-4567"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                <input
-                  type="email"
-                  value={form.email}
-                  onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                  className="cs-field w-full"
-                  placeholder="client@example.com"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Date *</label>
-                <input
-                  type="date"
-                  value={form.date}
-                  onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
-                  className="cs-field w-full"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Time *</label>
-                <input
-                  type="time"
-                  value={form.time}
-                  onChange={(e) => setForm((f) => ({ ...f, time: e.target.value }))}
-                  className="cs-field w-full"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Reason / Service</label>
-                <input
-                  type="text"
-                  value={form.reason}
-                  onChange={(e) => setForm((f) => ({ ...f, reason: e.target.value }))}
-                  className="cs-field w-full"
-                  placeholder="e.g. Haircut, Color"
-                />
-              </div>
-              {staffOptions.length > 0 && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Provider (optional)</label>
-                  <select
-                    value={form.staff_id}
-                    onChange={(e) => setForm((f) => ({ ...f, staff_id: e.target.value }))}
-                    className="cs-field w-full"
-                  >
-                    <option value="">Any / not specified</option>
-                    {staffOptions.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
+            <AnimatePresence mode="popLayout">
+              {showForm && (
+                <motion.form
+                  key="create-form"
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  onSubmit={handleCreate}
+                  className="mb-6 overflow-hidden rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-5"
+                >
+                  <h3 className="mb-4 flex items-center gap-2 font-semibold text-white">
+                    <Sparkles className="h-4 w-4 text-cyan-400" />
+                    New appointment
+                  </h3>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {[
+                      { key: 'name', label: 'Name *', type: 'text', required: true },
+                      { key: 'phone', label: 'Phone', type: 'tel' },
+                      { key: 'email', label: 'Email', type: 'email' },
+                      { key: 'date', label: 'Date *', type: 'date', required: true },
+                      { key: 'time', label: 'Time *', type: 'time', required: true },
+                      { key: 'reason', label: 'Service', type: 'text' },
+                    ].map((field) => (
+                      <div key={field.key}>
+                        <label className="mb-1 block text-xs font-medium text-zinc-400">
+                          {field.label}
+                        </label>
+                        <input
+                          type={field.type}
+                          required={field.required}
+                          value={form[field.key as keyof typeof form]}
+                          onChange={(e) =>
+                            setForm((f) => ({ ...f, [field.key]: e.target.value }))
+                          }
+                          className="w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                        />
+                      </div>
                     ))}
-                  </select>
-                </div>
+                  </div>
+                  <div className="mt-4 flex gap-2">
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      className="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                    >
+                      {submitting ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowForm(false)}
+                      className="rounded-xl border border-white/10 px-4 py-2 text-sm text-zinc-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </motion.form>
               )}
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="submit"
-                disabled={submitting}
-                className="px-4 py-2 rounded-lg font-medium bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
-              >
-                {submitting ? 'Saving…' : 'Save appointment'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowForm(false)}
-                className="px-4 py-2 rounded-lg font-medium border border-gray-300 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        )}
+            </AnimatePresence>
 
-        {/* List */}
-        {view === 'list' && filtered.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">
-            <Calendar className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p>No appointments match your filters.</p>
-            {appointments.length === 0 && calendarHolds.length === 0 && (
-              <p className="mt-1 text-sm">Create one with the button above or via the AI receptionist.</p>
-            )}
-            {appointments.length === 0 && calendarHolds.length > 0 && (
-              <p className="mt-2 text-sm text-amber-800 max-w-md mx-auto">
-                The phone agent still sees blocked times above (often a prior voice booking awaiting text
-                confirmation or a stale hold). Use Needs response, or check the mismatch warning above.
-              </p>
-            )}
-            {diagnostics && (diagnostics.recent?.length ?? 0) > 0 && (
-              <div className="mt-4 text-left text-xs text-gray-600 max-w-lg mx-auto">
-                <p className="font-medium text-gray-800">Recent in database for {tenantClientId}:</p>
-                <ul className="mt-1 list-disc pl-4">
-                  {diagnostics.recent!.map((r) => (
-                    <li key={r.id}>
-                      #{r.id} {r.date} {formatTimeHhmmToAmPm(r.time)} —{' '}
-                      {STATUS_LABELS[r.status] || r.status} ({r.source})
-                    </li>
+            {filtered.length === 0 ? (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="py-16 text-center"
+              >
+                <motion.div
+                  animate={reduceMotion ? undefined : { y: [0, -6, 0] }}
+                  transition={{ duration: 2.5, repeat: Infinity }}
+                >
+                  <Calendar className="mx-auto h-14 w-14 text-zinc-600" />
+                </motion.div>
+                <p className="mt-4 text-zinc-400">No appointments match your filters.</p>
+              </motion.div>
+            ) : (
+              <motion.div
+                layout
+                className="space-y-4"
+                variants={staggerContainer}
+                initial="hidden"
+                animate="visible"
+              >
+                <AnimatePresence mode="popLayout">
+                  {filtered.map((apt, i) => (
+                    <AppointmentCard
+                      key={apt.id}
+                      apt={apt}
+                      index={i}
+                      reduceMotion={!!reduceMotion}
+                      staffLabel={(apt.staff_id && staffNameById[apt.staff_id]) || ''}
+                      updatingId={updatingId}
+                      acceptRejectMsg={acceptRejectMsg}
+                      onAccept={handleAccept}
+                      onDecline={(id) => {
+                        setRejectModalId(id)
+                        setRejectReason('')
+                        setDeclinePreview(null)
+                      }}
+                    />
                   ))}
-                </ul>
-              </div>
+                </AnimatePresence>
+              </motion.div>
             )}
-          </div>
-        ) : view === 'list' ? (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left py-3 px-3 font-semibold text-gray-700">Client</th>
-                  <th className="text-left py-3 px-3 font-semibold text-gray-700">Date & time</th>
-                  <th className="text-left py-3 px-3 font-semibold text-gray-700">Reason</th>
-                  {staffOptions.length > 0 && (
-                    <th className="text-left py-3 px-3 font-semibold text-gray-700">Provider</th>
-                  )}
-                  <th className="text-left py-3 px-3 font-semibold text-gray-700">Source</th>
-                  <th className="text-left py-3 px-3 font-semibold text-gray-700">Status</th>
-                  <th className="text-left py-3 px-3 font-semibold text-gray-700">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((apt) => (
-                  <tr key={apt.id} className="border-b border-gray-100 hover:bg-gray-50">
-                    <td className="py-3 px-3">
-                      <div className="font-medium text-gray-900">{apt.name}</div>
-                      <div className="flex items-center gap-1 text-sm text-gray-500">
-                        <Phone className="w-3 h-3" /> {apt.phone || 'Not provided'}
-                      </div>
-                      <div className="flex items-center gap-1 text-sm text-gray-500">
-                        <Mail className="w-3 h-3" /> {apt.email || 'Not provided'}
-                      </div>
-                    </td>
-                    <td className="py-3 px-3">
-                      <div className="flex items-center gap-1">
-                        <Calendar className="w-4 h-4 text-gray-400" />
-                        {apt.date}
-                      </div>
-                      <div className="flex items-center gap-1 text-sm text-gray-600">
-                        <Clock className="w-3 h-3" />
-                        {formatTimeHhmmToAmPm(apt.time)}
-                      </div>
-                    </td>
-                    <td className="py-3 px-3 text-gray-700 max-w-xs truncate" title={apt.reason}>
-                      {apt.reason || '—'}
-                    </td>
-                    {staffOptions.length > 0 && (
-                      <td className="py-3 px-3 text-sm text-gray-600">
-                        {(apt.staff_id && staffNameById[apt.staff_id]) || '—'}
-                      </td>
-                    )}
-                    <td className="py-3 px-3 text-sm text-gray-600">
-                      {(apt as Appointment & { source?: string }).source === 'receptionist' ? 'Receptionist' : 'Manual'}
-                    </td>
-                    <td className="py-3 px-3">
-                      <span
-                        className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
-                          STATUS_CLASSES[apt.status] || 'bg-gray-100 text-gray-700'
-                        }`}
-                      >
-                        {STATUS_LABELS[apt.status] || apt.status}
-                      </span>
-                    </td>
-                    <td className="py-3 px-3">
-                      {apt.status === 'pending_customer' ? (
-                        <span className="text-sm text-gray-500">Customer must confirm by text first</span>
-                      ) : canAcceptOrDecline(apt.status) ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button type="button" onClick={() => handleAccept(apt.id)} disabled={updatingId === apt.id} className="text-sm px-3 py-1.5 rounded font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50">Accept</button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setRejectModalId(apt.id)
-                              setRejectReason('')
-                              setDeclinePreview(null)
-                            }}
-                            disabled={updatingId === apt.id}
-                            className="text-sm px-3 py-1.5 rounded font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
-                          >
-                            Decline
-                          </button>
-                          {acceptRejectMsg?.id === apt.id && <span className="text-xs text-gray-500">{acceptRejectMsg.msg}</span>}
-                        </div>
-                      ) : (
-                        <span className="text-sm text-gray-500">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
+          </>
+        )}
+      </motion.div>
 
+      <AnimatePresence>
         {rejectModalId != null && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
-              <h3 className="text-lg font-semibold text-gray-900">Decline appointment</h3>
-              <p className="mt-1 text-sm text-gray-600">
-                Brief reason for the customer (we&apos;ll polish the text before texting them).
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={reduceMotion ? undefined : { opacity: 0, scale: 0.95 }}
+              transition={{ type: 'spring', stiffness: 380, damping: 28 }}
+              className="w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl"
+            >
+              <h3 className="text-lg font-semibold text-white">Decline appointment</h3>
+              <p className="mt-1 text-sm text-zinc-400">
+                We&apos;ll polish this and text the customer.
               </p>
               <textarea
-                className="cs-field mt-4 w-full min-h-[100px]"
-                placeholder="e.g. Stylist booked — can we do 3 PM instead?"
+                className="mt-4 w-full min-h-[100px] rounded-xl border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                placeholder="e.g. That time is full — can we do 3 PM?"
                 value={rejectReason}
                 onChange={(e) => {
                   setRejectReason(e.target.value)
@@ -572,15 +520,19 @@ export default function Appointments() {
                 }}
               />
               {declinePreview != null && (
-                <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800">
-                  <span className="font-medium text-gray-600">Customer will receive:</span>
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="mt-3 rounded-xl border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-zinc-300"
+                >
+                  <span className="text-xs font-medium text-zinc-500">Preview</span>
                   <p className="mt-1 whitespace-pre-wrap">{declinePreview}</p>
-                </div>
+                </motion.div>
               )}
               <div className="mt-4 flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
-                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  className="rounded-xl border border-white/10 px-4 py-2 text-sm text-zinc-300"
                   onClick={() => {
                     setRejectModalId(null)
                     setRejectReason('')
@@ -592,11 +544,10 @@ export default function Appointments() {
                 <button
                   type="button"
                   disabled={!rejectReason.trim() || previewLoading}
-                  className="rounded-lg border border-primary-600 px-4 py-2 text-sm font-medium text-primary-700 hover:bg-primary-50 disabled:opacity-50"
+                  className="rounded-xl border border-cyan-500/40 px-4 py-2 text-sm text-cyan-300 disabled:opacity-50"
                   onClick={async () => {
                     if (!rejectReason.trim() || rejectModalId == null) return
                     setPreviewLoading(true)
-                    setDeclinePreview(null)
                     try {
                       const res = await api.post('/api/appointments/preview-decline-sms', {
                         reason: rejectReason.trim(),
@@ -610,21 +561,22 @@ export default function Appointments() {
                     }
                   }}
                 >
-                  {previewLoading ? 'Preview…' : 'Preview SMS'}
+                  {previewLoading ? '…' : 'Preview SMS'}
                 </button>
-                <button
+                <motion.button
                   type="button"
+                  whileTap={{ scale: 0.96 }}
                   disabled={!rejectReason.trim() || updatingId === rejectModalId}
-                  className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
                   onClick={() => void confirmReject()}
+                  className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
                 >
                   Send decline
-                </button>
+                </motion.button>
               </div>
-            </div>
-          </div>
+            </motion.div>
+          </motion.div>
         )}
-      </div>
+      </AnimatePresence>
     </div>
   )
 }

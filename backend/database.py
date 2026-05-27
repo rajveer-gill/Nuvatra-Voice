@@ -1181,12 +1181,17 @@ def db_appointments_max_id() -> int:
 
 
 def db_appointments_in_date_range(
-    date_from: str, date_to: str, staff_id: Optional[str] = None
+    date_from: str,
+    date_to: str,
+    staff_id: Optional[str] = None,
+    *,
+    client_id: Optional[str] = None,
 ) -> List[dict]:
     """Appointments for calendar view (inclusive date range). staff_id None = all staff."""
     conn = _get_conn()
     if not conn:
         return []
+    cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     if staff_id:
         cur.execute(
@@ -1196,7 +1201,7 @@ def db_appointments_in_date_range(
             WHERE client_id = %s AND date >= %s AND date <= %s AND staff_id = %s
             ORDER BY date, time
             """,
-            (_client_id(), date_from, date_to, staff_id),
+            (cid, date_from, date_to, staff_id),
         )
     else:
         cur.execute(
@@ -1206,7 +1211,7 @@ def db_appointments_in_date_range(
             WHERE client_id = %s AND date >= %s AND date <= %s
             ORDER BY date, time
             """,
-            (_client_id(), date_from, date_to),
+            (cid, date_from, date_to),
         )
     rows = cur.fetchall()
     cur.close()

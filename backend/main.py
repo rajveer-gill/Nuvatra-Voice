@@ -1361,6 +1361,14 @@ def require_active_subscription(tenant: Optional[dict] = Depends(require_tenant)
         )
     return tenant
 
+
+def _bind_tenant_db_context(tenant: Optional[dict]) -> str:
+    """Pin tenant client_id for DB queries (shared connection + async can lose context vars)."""
+    cid = ((tenant or {}).get("client_id") or "").strip() or get_db_client_id()
+    set_request_client_id(cid)
+    return cid
+
+
 def _phone_to_e164(phone: str) -> Optional[str]:
     """Convert to E.164 for Twilio SMS (e.g. +15551234567). Returns None if too short."""
     digits = "".join(c for c in phone if c.isdigit())
@@ -3990,7 +3998,8 @@ def _maybe_handle_staff_sms_approval(from_number: str, body: str, tenant: dict, 
 
 
 @app.post("/api/appointments")
-async def create_appointment(appointment: AppointmentRequest, _: None = Depends(require_active_subscription)):
+async def create_appointment(appointment: AppointmentRequest, tenant: Optional[dict] = Depends(require_active_subscription)):
+    cid = _bind_tenant_db_context(tenant)
     try:
         source = (appointment.source or "manual").strip().lower()
         if source not in ("receptionist", "manual"):
@@ -4012,6 +4021,7 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
             "source": source,
             "status": status,
             "staff_id": staff_key,
+            "client_id": cid,
         }
         if USE_DB:
             row = db_appointments_insert(appointment_data)
@@ -4033,8 +4043,7 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
 
 @app.get("/api/appointments")
 async def get_appointments(tenant: Optional[dict] = Depends(require_active_subscription)):
-    cid = ((tenant or {}).get("client_id") or "").strip() or get_db_client_id()
-    set_request_client_id(cid)
+    cid = _bind_tenant_db_context(tenant)
     orphans_removed = _reconcile_booked_slots_orphans() if USE_DB else 0
     lst = db_appointments_get_all(client_id=cid) if USE_DB else appointments
     for a in lst:
@@ -4075,8 +4084,7 @@ async def get_appointments(tenant: Optional[dict] = Depends(require_active_subsc
 @app.get("/api/appointments/diagnostics")
 async def get_appointments_diagnostics(tenant: Optional[dict] = Depends(require_active_subscription)):
     """Tenant-scoped appointment debug snapshot (for dashboard troubleshooting)."""
-    cid = ((tenant or {}).get("client_id") or "").strip() or get_db_client_id()
-    set_request_client_id(cid)
+    cid = _bind_tenant_db_context(tenant)
     holds = _voice_calendar_holds() if USE_DB else []
     diag = db_appointments_diagnostics(cid) if USE_DB else {}
     return {
@@ -4092,18 +4100,24 @@ async def appointments_calendar(
     date_from: str,
     date_to: str,
     staff_id: Optional[str] = None,
-    _: None = Depends(require_active_subscription),
+    tenant: Optional[dict] = Depends(require_active_subscription),
 ):
     """Return appointments for calendar grid (optionally filtered by staff UUID)."""
     if not USE_DB:
         return {"events": []}
-    events = db_appointments_in_date_range(date_from, date_to, staff_id)
+    cid = _bind_tenant_db_context(tenant)
+    events = db_appointments_in_date_range(date_from, date_to, staff_id, client_id=cid)
     return {"events": events}
 
 
 @app.patch("/api/appointments/{appointment_id}")
-async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: None = Depends(require_active_subscription)):
+async def update_appointment(
+    appointment_id: int,
+    update: AppointmentUpdate,
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """Update appointment status or details. Used by the appointments frontend."""
+    cid = _bind_tenant_db_context(tenant)
     kwargs = {}
     if update.status is not None: kwargs["status"] = update.status
     if update.date is not None: kwargs["date"] = update.date
@@ -4113,7 +4127,7 @@ async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: 
     if update.email is not None: kwargs["email"] = update.email
     if update.phone is not None: kwargs["phone"] = update.phone
     if USE_DB and kwargs:
-        apt = db_appointments_update(appointment_id, **kwargs)
+        apt = db_appointments_update(appointment_id, client_id=cid, **kwargs)
         if apt:
             return {"success": True, "appointment": apt}
     else:
@@ -4124,15 +4138,29 @@ async def update_appointment(appointment_id: int, update: AppointmentUpdate, _: 
     raise HTTPException(status_code=404, detail="Appointment not found")
 
 @app.post("/api/appointments/{appointment_id}/accept")
-async def accept_appointment(appointment_id: int, request: Request, _: None = Depends(require_active_subscription)):
+async def accept_appointment(
+    appointment_id: int,
+    request: Request,
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """Store accepted: mark appointment accepted and send confirmation SMS to customer."""
-    apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
+    cid = _bind_tenant_db_context(tenant)
+    apt = (
+        db_appointments_get_by_id(appointment_id, client_id=cid)
+        if USE_DB
+        else next((a for a in appointments if a["id"] == appointment_id), None)
+    )
     if not apt:
+        system_info(
+            "appointment_accept_not_found",
+            appointment_id=appointment_id,
+            client_id=cid,
+        )
         raise HTTPException(status_code=404, detail="Appointment not found")
     if str(apt.get("status") or "") != "pending_review":
         raise HTTPException(status_code=400, detail="Appointment is not awaiting approval")
     if USE_DB:
-        apt = db_appointments_update(appointment_id, status="accepted") or apt
+        apt = db_appointments_update(appointment_id, status="accepted", client_id=cid) or apt
     else:
         apt["status"] = "accepted"
     audit_log("user", "appointment_accepted", resource_type="appointment", resource_id=str(appointment_id), details={"date": apt.get("date"), "time": apt.get("time")}, request=request)
@@ -4149,10 +4177,15 @@ async def reject_appointment(
     appointment_id: int,
     body: AppointmentRejectBody,
     request: Request,
-    _: None = Depends(require_active_subscription),
+    tenant: Optional[dict] = Depends(require_active_subscription),
 ):
     """Reject request with owner-provided reason; AI-polished SMS to customer."""
-    apt = db_appointments_get_by_id(appointment_id) if USE_DB else next((a for a in appointments if a["id"] == appointment_id), None)
+    cid = _bind_tenant_db_context(tenant)
+    apt = (
+        db_appointments_get_by_id(appointment_id, client_id=cid)
+        if USE_DB
+        else next((a for a in appointments if a["id"] == appointment_id), None)
+    )
     if not apt:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if str(apt.get("status") or "") != "pending_review":
@@ -4160,7 +4193,10 @@ async def reject_appointment(
     reason_clean = body.reason.strip()
     if USE_DB:
         apt = db_appointments_update(
-            appointment_id, status="rejected", owner_decline_reason=reason_clean
+            appointment_id,
+            status="rejected",
+            owner_decline_reason=reason_clean,
+            client_id=cid,
         ) or apt
     else:
         apt["status"] = "rejected"
@@ -4180,11 +4216,15 @@ async def reject_appointment(
 
 
 @app.post("/api/appointments/preview-decline-sms")
-async def preview_decline_sms(body: PreviewDeclineSmsBody, _: None = Depends(require_active_subscription)):
+async def preview_decline_sms(
+    body: PreviewDeclineSmsBody,
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """Return AI-polished decline text without sending SMS (for owner review before reject)."""
+    cid = _bind_tenant_db_context(tenant)
     apt: dict = {}
     if body.appointment_id is not None and USE_DB:
-        apt = db_appointments_get_by_id(body.appointment_id) or {}
+        apt = db_appointments_get_by_id(body.appointment_id, client_id=cid) or {}
         if not apt:
             raise HTTPException(status_code=404, detail="Appointment not found")
     business_name = get_business_info().get("name", "us")

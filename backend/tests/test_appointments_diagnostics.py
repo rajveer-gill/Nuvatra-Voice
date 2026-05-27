@@ -30,3 +30,12 @@ def test_diagnostics_flags_env_mismatch():
     assert out["likely_mismatch"] is True
     assert out["env_client_id"] == "other-env"
     assert out["env_client_id_appointment_count"] == 5
+
+
+def test_bind_tenant_db_context_sets_explicit_client_id():
+    import main
+
+    with patch.object(main, "set_request_client_id") as set_cid:
+        cid = main._bind_tenant_db_context({"client_id": "my-tenant"})
+    assert cid == "my-tenant"
+    set_cid.assert_called_once_with("my-tenant")
