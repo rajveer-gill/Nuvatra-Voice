@@ -48,6 +48,16 @@ export default function Appointments() {
     { date: string; time: string; appointment_id?: number; status: string; name: string; phone: string }[]
   >([])
   const [tenantClientId, setTenantClientId] = useState<string | null>(null)
+  const [diagnostics, setDiagnostics] = useState<{
+    total?: number
+    by_status?: Record<string, number>
+    recent?: { id: number; status: string; date: string; time: string; source: string }[]
+    likely_mismatch?: boolean
+    env_client_id?: string | null
+    env_client_id_appointment_count?: number | null
+    counts_by_client?: { client_id: string; count: number }[]
+  } | null>(null)
+  const [twilioPhone, setTwilioPhone] = useState<string | null>(null)
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -64,6 +74,16 @@ export default function Appointments() {
       setAppointments(res.data.appointments || [])
       setCalendarHolds(res.data.calendar_holds || [])
       setTenantClientId(res.data.client_id || null)
+      setDiagnostics(res.data.diagnostics || null)
+      setTwilioPhone(res.data.twilio_phone_number || null)
+      if (process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1') {
+        console.info('[appointments]', {
+          client_id: res.data.client_id,
+          count: (res.data.appointments || []).length,
+          holds: (res.data.calendar_holds || []).length,
+          diagnostics: res.data.diagnostics,
+        })
+      }
     } catch (e) {
       console.error('Failed to fetch appointments', e)
     } finally {
@@ -222,6 +242,33 @@ export default function Appointments() {
             </button>
           </div>
         </div>
+
+        {diagnostics?.likely_mismatch && (
+          <div className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950">
+            <p className="font-semibold">Appointments may be under a different business id</p>
+            <p className="mt-1">
+              Your dashboard is signed in as <strong>{tenantClientId}</strong> ({diagnostics.total ?? 0}{' '}
+              appointments here), but the server has{' '}
+              <strong>{diagnostics.env_client_id_appointment_count ?? 0}</strong> under{' '}
+              <strong>{diagnostics.env_client_id}</strong> (often from <code>CLIENT_ID</code> on Render).
+              Voice bookings can land there while this list stays empty.
+            </p>
+            <p className="mt-2 text-xs">
+              Fix: In Render, remove <code>CLIENT_ID</code> and set your tenant&apos;s Twilio number in Settings
+              {twilioPhone ? ` (configured: ${twilioPhone})` : ' (not set on tenant yet)'} so calls match this account.
+            </p>
+          </div>
+        )}
+
+        {diagnostics && appointments.length === 0 && (diagnostics.total ?? 0) > 0 && (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+            <p className="font-semibold">Appointments exist but filters hide them</p>
+            <p className="mt-1">
+              Database has {diagnostics.total} row(s) for this business. Try Status &quot;All&quot; and clear date
+              filters.
+            </p>
+          </div>
+        )}
 
         {calendarHolds.length > 0 && (
           <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
@@ -402,9 +449,21 @@ export default function Appointments() {
             {appointments.length === 0 && calendarHolds.length > 0 && (
               <p className="mt-2 text-sm text-amber-800 max-w-md mx-auto">
                 The phone agent still sees blocked times above (often a prior voice booking awaiting text
-                confirmation or a stale hold). Use Needs response, or call again after deploying the latest
-                backend fix.
+                confirmation or a stale hold). Use Needs response, or check the mismatch warning above.
               </p>
+            )}
+            {diagnostics && (diagnostics.recent?.length ?? 0) > 0 && (
+              <div className="mt-4 text-left text-xs text-gray-600 max-w-lg mx-auto">
+                <p className="font-medium text-gray-800">Recent in database for {tenantClientId}:</p>
+                <ul className="mt-1 list-disc pl-4">
+                  {diagnostics.recent!.map((r) => (
+                    <li key={r.id}>
+                      #{r.id} {r.date} {formatTimeHhmmToAmPm(r.time)} —{' '}
+                      {STATUS_LABELS[r.status] || r.status} ({r.source})
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
         ) : view === 'list' ? (

@@ -954,15 +954,16 @@ def _normalize_phone(phone: str) -> str:
     return "".join(c for c in (phone or "") if c.isdigit())
 
 # --- Appointments ---
-def db_appointments_get_all() -> List[dict]:
+def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
     conn = _get_conn()
     if not conn:
         return []
+    cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
         """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
            FROM appointments WHERE client_id = %s ORDER BY date, time""",
-        (_client_id(),),
+        (cid,),
     )
     rows = cur.fetchall()
     cur.close()
@@ -983,6 +984,79 @@ def db_appointments_get_all() -> List[dict]:
         }
         for r in rows
     ]
+
+
+def db_appointments_diagnostics(dashboard_client_id: str) -> dict:
+    """
+    Compare appointment rows for the logged-in tenant vs other client_ids (counts only).
+    Helps debug voice bookings stored under a different client_id than the dashboard.
+    """
+    conn = _get_conn()
+    if not conn:
+        return {"error": "no_db"}
+    cid = (dashboard_client_id or "").strip()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT status, COUNT(*)::int
+        FROM appointments
+        WHERE client_id = %s
+        GROUP BY status
+        ORDER BY status
+        """,
+        (cid,),
+    )
+    by_status = {row[0]: row[1] for row in cur.fetchall()}
+    cur.execute("SELECT COUNT(*)::int FROM appointments WHERE client_id = %s", (cid,))
+    total = (cur.fetchone() or (0,))[0]
+    cur.execute(
+        """
+        SELECT id, status, date, time, source, created_at
+        FROM appointments
+        WHERE client_id = %s
+        ORDER BY created_at DESC
+        LIMIT 8
+        """,
+        (cid,),
+    )
+    recent = [
+        {
+            "id": r[0],
+            "status": r[1],
+            "date": r[2],
+            "time": r[3] or "",
+            "source": r[4] or "",
+            "created_at": r[5].isoformat() if r[5] else "",
+        }
+        for r in cur.fetchall()
+    ]
+    env_cid = (os.getenv("CLIENT_ID") or "").strip()
+    env_count = None
+    if env_cid and env_cid != cid:
+        cur.execute("SELECT COUNT(*)::int FROM appointments WHERE client_id = %s", (env_cid,))
+        env_count = (cur.fetchone() or (0,))[0]
+    cur.execute(
+        """
+        SELECT client_id, COUNT(*)::int AS n
+        FROM appointments
+        GROUP BY client_id
+        ORDER BY n DESC
+        LIMIT 6
+        """
+    )
+    counts_by_client = [{"client_id": r[0], "count": r[1]} for r in cur.fetchall()]
+    cur.close()
+    return {
+        "dashboard_client_id": cid,
+        "total": total,
+        "by_status": by_status,
+        "recent": recent,
+        "env_client_id": env_cid or None,
+        "env_client_id_appointment_count": env_count,
+        "counts_by_client": counts_by_client,
+        "likely_mismatch": bool(env_cid and env_cid != cid and env_count and env_count > 0 and total == 0),
+    }
+
 
 def db_appointments_insert(data: dict) -> dict:
     conn = _get_conn()

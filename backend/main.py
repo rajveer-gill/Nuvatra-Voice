@@ -514,6 +514,7 @@ try:
         set_request_client_id,
         _client_id as get_db_client_id,
         db_appointments_get_all,
+        db_appointments_diagnostics,
         db_appointments_insert,
         db_appointments_update,
         db_appointments_get_by_id,
@@ -4032,13 +4033,27 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
 
 @app.get("/api/appointments")
 async def get_appointments(tenant: Optional[dict] = Depends(require_active_subscription)):
+    cid = ((tenant or {}).get("client_id") or "").strip() or get_db_client_id()
+    set_request_client_id(cid)
     orphans_removed = _reconcile_booked_slots_orphans() if USE_DB else 0
-    lst = db_appointments_get_all() if USE_DB else appointments
+    lst = db_appointments_get_all(client_id=cid) if USE_DB else appointments
     for a in lst:
         a.setdefault("source", "manual")
         a.setdefault("status", "pending")
     holds = _voice_calendar_holds() if USE_DB else []
-    cid = (tenant or {}).get("client_id") or get_db_client_id()
+    diag = db_appointments_diagnostics(cid) if USE_DB else {}
+    twilio_on_tenant = ((tenant or {}).get("twilio_phone_number") or "").strip() or None
+    system_info(
+        "appointments_list_loaded",
+        client_id=cid,
+        count=len(lst),
+        calendar_holds=len(holds),
+        orphans_removed=orphans_removed,
+        likely_client_id_mismatch=bool(diag.get("likely_mismatch")),
+        env_client_id=diag.get("env_client_id"),
+        env_appointment_count=diag.get("env_client_id_appointment_count"),
+        twilio_phone_configured=bool(twilio_on_tenant),
+    )
     if USE_DB and holds and not lst:
         system_info(
             "appointments_list_empty_but_calendar_holds",
@@ -4052,6 +4067,23 @@ async def get_appointments(tenant: Optional[dict] = Depends(require_active_subsc
         "client_id": cid,
         "calendar_holds": holds,
         "orphan_slots_removed": orphans_removed,
+        "diagnostics": diag,
+        "twilio_phone_number": twilio_on_tenant,
+    }
+
+
+@app.get("/api/appointments/diagnostics")
+async def get_appointments_diagnostics(tenant: Optional[dict] = Depends(require_active_subscription)):
+    """Tenant-scoped appointment debug snapshot (for dashboard troubleshooting)."""
+    cid = ((tenant or {}).get("client_id") or "").strip() or get_db_client_id()
+    set_request_client_id(cid)
+    holds = _voice_calendar_holds() if USE_DB else []
+    diag = db_appointments_diagnostics(cid) if USE_DB else {}
+    return {
+        "client_id": cid,
+        "twilio_phone_number": ((tenant or {}).get("twilio_phone_number") or "").strip() or None,
+        "calendar_holds": holds,
+        **diag,
     }
 
 
@@ -5847,30 +5879,33 @@ async def handle_incoming_call(request: Request):
             to_number=to_number,
         )
 
-        # Multi-tenant: resolve tenant by To number and set request context
+        # Multi-tenant: resolve tenant (same order as SMS inbound — phone, then CLIENT_ID row, then default)
         tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
+        if not tenant and USE_DB:
+            cid_fb = (CLIENT_ID or "").strip()
+            if cid_fb:
+                tenant = db_tenant_get_by_client_id(cid_fb)
+            if not tenant:
+                tenant = db_tenant_get_by_client_id("default")
+        tenant_for_access = tenant
         if tenant:
             set_request_client_id(tenant["client_id"])
-            voice_info(
-                "tenant_resolved_by_to_number",
-                client_id=tenant["client_id"],
-                tenant_name=tenant.get("name") or "",
-                to_number=to_number,
-            )
-        elif CLIENT_ID:
-            set_request_client_id(CLIENT_ID)
-            voice_info(
-                "tenant_fallback_client_id_env",
-                client_id_env=CLIENT_ID,
-                to_number=to_number,
-            )
+            if (tenant.get("twilio_phone_number") or "").strip() == (to_number or "").strip():
+                voice_info(
+                    "tenant_resolved_by_to_number",
+                    client_id=tenant["client_id"],
+                    tenant_name=tenant.get("name") or "",
+                    to_number=to_number,
+                )
+            else:
+                voice_info(
+                    "tenant_resolved_by_client_id_fallback",
+                    client_id=tenant["client_id"],
+                    to_number=to_number,
+                    hint="set_twilio_phone_number_on_tenant_to_match_Twilio_To",
+                )
         else:
-            voice_info("tenant_fallback_default", to_number=to_number)
-
-        tenant_for_access = tenant
-        if not tenant_for_access and USE_DB:
-            cid_fb = (CLIENT_ID or "").strip() or "default"
-            tenant_for_access = db_tenant_get_by_client_id(cid_fb)
+            voice_info("tenant_not_resolved", to_number=to_number)
         from webhook_responses import check_webhook_tenant_access, subscription_denied_voice_twiml
 
         if not check_webhook_tenant_access(
@@ -5894,13 +5929,11 @@ async def handle_incoming_call(request: Request):
         
         # Pro: call log start + customer memory for repeat callers
         call_log_start(call_sid, from_number, to_number)
-        caller_memory = refresh_caller_memory_for_prompt(
-            from_number, tenant["client_id"] if tenant else None
-        )
+        client_id = (tenant or {}).get("client_id") or (CLIENT_ID or "default")
+        caller_memory = refresh_caller_memory_for_prompt(from_number, client_id)
         
         # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"
-        client_id = tenant["client_id"] if tenant else (CLIENT_ID or "default")
         set_request_client_id(client_id)
         greeting_plan = build_phone_greeting_payload(get_business_info(), tenant_for_access)
         _log_greeting_debug("incoming_call_greeting_plan", greeting_plan, call_sid=call_sid or "")
