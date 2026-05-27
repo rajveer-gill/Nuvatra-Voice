@@ -1714,7 +1714,7 @@ def twiml_roster_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str 
             call_log_set_outcome(call_sid, "forwarded")
     else:
         response.say(
-            "Please ask the business to complete their team roster online. Goodbye.",
+            "Please ask the business to add a store phone number and complete their team roster online. Goodbye.",
             voice="alice",
         )
         response.hangup()
@@ -4174,15 +4174,21 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
     if not (services or departments):
         warnings.append("Add services or departments so the AI knows what your business offers (e.g. appointments, estimates, emergency service)")
     roster_ready = staff_roster_ready_for_booking(info)
+    forwarding_phone_ready = bool((info.get("forwarding_phone") or "").strip())
     if not roster_ready:
         warnings.append(
             "Add at least one team member with a name and phone on the Team roster so callers can book appointments."
+        )
+    if not forwarding_phone_ready:
+        warnings.append(
+            "Add your store phone number so callers can be redirected to a real person when needed."
         )
     return {
         "complete": len(missing) == 0,
         "missing": missing,
         "warnings": warnings,
         "roster_ready": roster_ready,
+        "forwarding_phone_ready": forwarding_phone_ready,
     }
 
 @app.get("/api/setup-status")

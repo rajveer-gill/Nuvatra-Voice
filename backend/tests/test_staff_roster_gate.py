@@ -36,6 +36,21 @@ def test_setup_status_warns_without_roster():
     assert any("Team roster" in w for w in body.get("warnings") or [])
 
 
+def test_setup_status_warns_without_store_phone():
+    body = main.get_setup_status(
+        {
+            "name": "Spa",
+            "hours": "9-5",
+            "forwarding_phone": "",
+            "address": "123 Main",
+            "staff": [{"id": "1", "name": "Alex", "phone": "+15551112222"}],
+            "services": [{"id": "s1", "name": "Cut"}],
+        }
+    )
+    assert body.get("forwarding_phone_ready") is False
+    assert any("store phone number" in w for w in body.get("warnings") or [])
+
+
 def test_roster_not_ready_twiml_includes_message_and_dial(monkeypatch):
     monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
     twiml = str(
@@ -47,3 +62,15 @@ def test_roster_not_ready_twiml_includes_message_and_dial(monkeypatch):
     )
     assert "tts-audio" in twiml
     assert "+15557654321" in twiml.replace(" ", "")
+
+
+def test_roster_not_ready_twiml_mentions_store_phone_when_missing(monkeypatch):
+    monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
+    twiml = str(
+        main.twiml_roster_not_ready_handoff(
+            "https://api.example.com",
+            {"forwarding_phone": ""},
+            call_sid="CA123",
+        )
+    )
+    assert "store phone number" in twiml.lower()

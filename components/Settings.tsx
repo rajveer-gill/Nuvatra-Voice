@@ -770,7 +770,7 @@ export default function Settings() {
               onApply={(next) => setForm((f) => ({ ...f, hours: next }))}
             />
           </div>
-          <div className="md:col-span-2">
+          <div id="store-phone-settings" className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Store phone (talk to a real person)</label>
             <input
               type="text"

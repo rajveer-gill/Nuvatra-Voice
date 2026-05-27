@@ -13,9 +13,11 @@ import { AppChrome } from '@/components/layout/AppChrome'
 import { AlertTriangle, Users } from 'lucide-react'
 
 export const TEAM_ROSTER_SECTION_ID = 'team-roster-settings'
+export const STORE_PHONE_SECTION_ID = 'store-phone-settings'
 
 type SetupStatusSnapshot = {
   roster_ready?: boolean
+  forwarding_phone_ready?: boolean
 }
 
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
@@ -99,6 +101,13 @@ export default function DashboardPage() {
     setActiveTab('settings')
     window.setTimeout(() => {
       document.getElementById(TEAM_ROSTER_SECTION_ID)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 400)
+  }, [])
+
+  const goToStorePhone = useCallback(() => {
+    setActiveTab('settings')
+    window.setTimeout(() => {
+      document.getElementById(STORE_PHONE_SECTION_ID)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, 400)
   }, [])
 
@@ -237,6 +246,7 @@ export default function DashboardPage() {
   }, [access, fetchSetupStatus])
 
   const showRosterWarning = access === 'granted' && setupStatus?.roster_ready === false
+  const showStorePhoneWarning = access === 'granted' && setupStatus?.forwarding_phone_ready === false
 
   const panelTransition = reduceMotion ? { duration: 0 } : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const }
 
@@ -377,6 +387,34 @@ export default function DashboardPage() {
                   left.
                 </>
               )}
+            </div>
+          )}
+
+          {showStorePhoneWarning && (
+            <div
+              role="alert"
+              className="sticky top-4 z-20 mb-6 rounded-2xl border-2 border-rose-400/75 bg-gradient-to-br from-rose-500/20 via-red-600/15 to-orange-600/20 p-5 shadow-lg shadow-rose-900/30 md:p-6"
+            >
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div className="flex gap-4">
+                  <AlertTriangle className="h-10 w-10 shrink-0 text-rose-200" aria-hidden />
+                  <div>
+                    <h2 className="text-lg font-bold text-rose-50 md:text-xl">Store phone required</h2>
+                    <p className="mt-1 max-w-2xl text-sm leading-relaxed text-rose-100/95">
+                      Your AI receptionist has no store phone number to redirect callers to a real person. Add your
+                      <strong className="font-semibold text-white"> Store phone (real person)</strong> in Settings so transfer
+                      and fallback handoffs work.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={goToStorePhone}
+                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-rose-300 px-5 py-3 text-sm font-bold text-rose-950 shadow-md motion-safe-transition hover:bg-rose-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-200"
+                >
+                  Add store phone
+                </button>
+              </div>
             </div>
           )}
 
