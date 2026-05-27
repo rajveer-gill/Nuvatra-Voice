@@ -44,6 +44,10 @@ export default function Appointments() {
   const [declinePreview, setDeclinePreview] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [staffOptions, setStaffOptions] = useState<{ id: string; name: string }[]>([])
+  const [calendarHolds, setCalendarHolds] = useState<
+    { date: string; time: string; appointment_id?: number; status: string; name: string; phone: string }[]
+  >([])
+  const [tenantClientId, setTenantClientId] = useState<string | null>(null)
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -58,6 +62,8 @@ export default function Appointments() {
     try {
       const res = await api.get('/api/appointments')
       setAppointments(res.data.appointments || [])
+      setCalendarHolds(res.data.calendar_holds || [])
+      setTenantClientId(res.data.client_id || null)
     } catch (e) {
       console.error('Failed to fetch appointments', e)
     } finally {
@@ -217,6 +223,30 @@ export default function Appointments() {
           </div>
         </div>
 
+        {calendarHolds.length > 0 && (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+            <p className="font-semibold">Times the AI will not double-book</p>
+            <p className="mt-1 text-amber-900/90">
+              These slots are held on your calendar for this business
+              {tenantClientId ? ` (${tenantClientId})` : ''}. If the list below is empty, check Status
+              &quot;All&quot; or &quot;Needs response&quot;, or call the same business phone linked to this account.
+            </p>
+            <ul className="mt-2 list-disc pl-5 space-y-0.5">
+              {calendarHolds.slice(0, 8).map((h, i) => (
+                <li key={`${h.date}-${h.time}-${h.appointment_id ?? i}`}>
+                  {h.date} {formatTimeHhmmToAmPm(h.time)}
+                  {h.name ? ` — ${h.name}` : ''}
+                  {h.status ? ` (${STATUS_LABELS[h.status] || h.status})` : ''}
+                  {h.appointment_id ? ` #${h.appointment_id}` : ''}
+                </li>
+              ))}
+              {calendarHolds.length > 8 && (
+                <li className="list-none pl-0 text-amber-800">…and {calendarHolds.length - 8} more</li>
+              )}
+            </ul>
+          </div>
+        )}
+
         {view === 'calendar' ? (
           <AppointmentCalendar api={api} />
         ) : null}
@@ -366,8 +396,15 @@ export default function Appointments() {
           <div className="text-center py-12 text-gray-500">
             <Calendar className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No appointments match your filters.</p>
-            {appointments.length === 0 && (
+            {appointments.length === 0 && calendarHolds.length === 0 && (
               <p className="mt-1 text-sm">Create one with the button above or via the AI receptionist.</p>
+            )}
+            {appointments.length === 0 && calendarHolds.length > 0 && (
+              <p className="mt-2 text-sm text-amber-800 max-w-md mx-auto">
+                The phone agent still sees blocked times above (often a prior voice booking awaiting text
+                confirmation or a stale hold). Use Needs response, or call again after deploying the latest
+                backend fix.
+              </p>
             )}
           </div>
         ) : view === 'list' ? (

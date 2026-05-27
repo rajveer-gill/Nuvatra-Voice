@@ -572,6 +572,7 @@ try:
         db_sms_opt_out_clear,
         db_appointments_get_pending_by_phone,
         db_appointments_get_by_phone_for_sms,
+        db_appointments_latest_identity_for_phone,
         db_appointments_resolve_for_sms,
         db_appointments_get_accepted_for_date,
         db_appointments_mark_reminder_sent,
@@ -1595,6 +1596,56 @@ def get_caller_memory(phone: str) -> Optional[dict]:
     except Exception:
         return None
 
+
+def refresh_caller_memory_for_prompt(phone: str, client_id: Optional[str] = None) -> Optional[dict]:
+    """
+    Load caller memory for voice/SMS prompts, syncing name/email from the latest appointment
+    when the DB row is stale (e.g. still 'Jake' after the customer texted a new name).
+    """
+    mem = get_caller_memory(phone)
+    if not USE_DB:
+        return mem
+    cid = (client_id or "").strip() or get_db_client_id()
+    if not cid:
+        return mem
+    try:
+        set_request_client_id(cid)
+        identity = db_appointments_latest_identity_for_phone(phone, client_id=cid)
+    except Exception as e:
+        logger.warning("refresh_caller_memory_for_prompt failed: %s", e)
+        return mem
+    if not identity:
+        return mem
+    apt_name = (identity.get("name") or "").strip()
+    apt_email = (identity.get("email") or "").strip()
+    mem_name = ((mem or {}).get("name") or "").strip()
+    mem_email = ((mem or {}).get("email_on_file") or "").strip()
+    needs_sync = bool(apt_name and apt_name.lower() != mem_name.lower()) or bool(
+        apt_email and apt_email.lower() != mem_email.lower()
+    )
+    if not needs_sync:
+        return mem
+    dp: dict = {}
+    if apt_email:
+        dp["email_on_file"] = apt_email
+    try:
+        update_caller_memory(
+            phone,
+            name=apt_name or None,
+            increment_count=False,
+            data_patch=dp if dp else None,
+        )
+        system_info(
+            "caller_memory_synced_from_appointment",
+            client_id=cid,
+            had_prior_name=bool(mem_name),
+        )
+    except Exception as e:
+        logger.warning("caller_memory_sync_from_appointment failed: %s", e)
+        return mem
+    return get_caller_memory(phone)
+
+
 def update_caller_memory(
     phone: str,
     name: Optional[str] = None,
@@ -2103,8 +2154,9 @@ def _supersede_pending_customer_drafts_for_slot(
     phone: Optional[str] = None,
 ) -> int:
     """
-    Cancel unconfirmed voice drafts (pending_customer) for this slot so callers can rebook
-    after a failed/invisible flow. Does not touch pending_review (customer already confirmed).
+    Cancel stale voice bookings for this slot so the same caller can rebook after a failed flow.
+    - pending_customer: unconfirmed draft (slot not held until SMS YES).
+    - pending_review: same caller + receptionist source — frees a held slot when they call again.
     """
     if not USE_DB:
         return 0
@@ -2115,8 +2167,14 @@ def _supersede_pending_customer_drafts_for_slot(
     norm_time = _normalize_time_to_hhmm(time) or time
     cancelled = 0
     for apt in _appointment_rows_for_calendar_merge():
-        if (apt.get("status") or "") != "pending_customer":
+        st = (apt.get("status") or "")
+        if st not in ("pending_customer", "pending_review"):
             continue
+        if st == "pending_review":
+            if (apt.get("source") or "").strip() != "receptionist":
+                continue
+            if not phone or not _phones_match_for_booking(phone, apt.get("phone") or ""):
+                continue
         if (apt.get("date") or "") != date:
             continue
         apt_time = _normalize_time_to_hhmm(apt.get("time") or "") or (apt.get("time") or "")
@@ -2134,11 +2192,11 @@ def _supersede_pending_customer_drafts_for_slot(
             release_slot(int(aid))
             cancelled += 1
         except Exception as e:
-            logger.warning("supersede_pending_customer_draft failed apt_id=%s: %s", aid, e)
+            logger.warning("supersede_voice_booking_draft failed apt_id=%s: %s", aid, e)
     if cancelled:
         _invalidate_booked_slots_cache()
         system_info(
-            "pending_customer_draft_superseded",
+            "voice_booking_draft_superseded",
             count=cancelled,
             date=date,
             time=norm_time,
@@ -2200,6 +2258,54 @@ def release_slot(appointment_id: int) -> None:
     _save_booked_slots(slots)
     _invalidate_booked_slots_cache()
     system_debug("slot_released", appointment_id=appointment_id)
+
+
+def _reconcile_booked_slots_orphans() -> int:
+    """Drop booked_slots rows whose appointment no longer holds the calendar (fixes AI 'taken' with empty UI)."""
+    if not USE_DB:
+        return 0
+    apts = _appointment_rows_for_calendar_merge()
+    apt_by_id = _appointment_by_id_map(apts)
+    raw = _load_booked_slots()
+    kept = _booked_slot_rows_that_hold_calendar(raw, apt_by_id)
+    removed = len(raw) - len(kept)
+    if removed > 0:
+        _save_booked_slots(kept)
+        _invalidate_booked_slots_cache()
+        system_info(
+            "booked_slots_orphans_removed",
+            removed=removed,
+            client_id=get_db_client_id(),
+        )
+    return removed
+
+
+def _voice_calendar_holds() -> List[dict]:
+    """Slots the AI receptionist treats as unavailable, with linked appointment when one exists."""
+    apts = _appointment_rows_for_calendar_merge()
+    apt_by_id = _appointment_by_id_map(apts)
+    holds: List[dict] = []
+    for s in _get_all_booked_slots_merged():
+        aid = s.get("appointment_id")
+        apt = None
+        if aid is not None:
+            try:
+                apt = apt_by_id.get(int(aid))
+            except (TypeError, ValueError):
+                apt = None
+        holds.append(
+            {
+                "date": s.get("date"),
+                "time": _normalize_time_to_hhmm(s.get("time") or "") or (s.get("time") or ""),
+                "appointment_id": aid,
+                "status": (apt.get("status") if apt else None) or "unknown",
+                "name": (apt.get("name") if apt else None) or "",
+                "phone": (apt.get("phone") if apt else None) or "",
+                "source": (apt.get("source") if apt else None) or "",
+            }
+        )
+    return holds
+
 
 # Cache for booked slots prompt (avoids repeated DB hits during rapid turns)
 _booked_slots_cache: dict = {}  # {client_key: (text, expires_at)}
@@ -2480,6 +2586,11 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
     try:
         # Keep tenant context so SMS and DB use correct client_id (async runs outside request)
         set_request_client_id(call_data.get("client_id") or get_db_client_id())
+        fn_refresh = (call_data.get("from_number") or "").strip()
+        if fn_refresh:
+            call_data["caller_memory"] = refresh_caller_memory_for_prompt(
+                fn_refresh, call_data.get("client_id")
+            )
         voice_info(
             "generate_response_start",
             call_sid=call_sid,
@@ -2642,6 +2753,8 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                                     increment_count=False,
                                     data_patch=dp if dp else None,
                                 )
+                                if call_sid in active_calls:
+                                    active_calls[call_sid]["caller_memory"] = get_caller_memory(fn_mem)
                             except Exception:
                                 pass
                     else:
@@ -3918,12 +4031,28 @@ async def create_appointment(appointment: AppointmentRequest, _: None = Depends(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/appointments")
-async def get_appointments(_: None = Depends(require_active_subscription)):
+async def get_appointments(tenant: Optional[dict] = Depends(require_active_subscription)):
+    orphans_removed = _reconcile_booked_slots_orphans() if USE_DB else 0
     lst = db_appointments_get_all() if USE_DB else appointments
     for a in lst:
         a.setdefault("source", "manual")
         a.setdefault("status", "pending")
-    return {"appointments": lst}
+    holds = _voice_calendar_holds() if USE_DB else []
+    cid = (tenant or {}).get("client_id") or get_db_client_id()
+    if USE_DB and holds and not lst:
+        system_info(
+            "appointments_list_empty_but_calendar_holds",
+            client_id=cid,
+            hold_count=len(holds),
+            orphans_removed=orphans_removed,
+            sample_hold=holds[0] if holds else None,
+        )
+    return {
+        "appointments": lst,
+        "client_id": cid,
+        "calendar_holds": holds,
+        "orphan_slots_removed": orphans_removed,
+    }
 
 
 @app.get("/api/appointments/calendar")
@@ -5340,8 +5469,18 @@ async def handle_incoming_sms(request: Request):
                 em = em_match.group(0).strip()
                 try:
                     aid = int(apt["id"])
-                    db_appointments_update(aid, email=em)
-                    apt = db_appointments_get_by_id(aid) or apt
+                    db_appointments_update(aid, email=em, client_id=tenant["client_id"])
+                    apt = db_appointments_get_by_id(aid, client_id=tenant["client_id"]) or apt
+                    try:
+                        apt_name = (apt.get("name") or "").strip()
+                        update_caller_memory(
+                            from_number,
+                            name=apt_name or None,
+                            increment_count=False,
+                            data_patch={"email_on_file": em},
+                        )
+                    except Exception:
+                        pass
                     sms_info(
                         "inbound_customer_email_saved_from_reply",
                         apt_id=aid,
@@ -5411,11 +5550,16 @@ async def handle_incoming_sms(request: Request):
                 )
                 apt_after = db_appointments_get_by_id(aid, client_id=tenant["client_id"]) or apt_full
             try:
+                em_conf = (apt_after.get("email") or "").strip()
+                mem_patch: dict = {"last_pending_review_apt_id": apt.get("id")}
+                if em_conf:
+                    mem_patch["email_on_file"] = em_conf
                 update_caller_memory(
                     from_number,
+                    name=(apt_after.get("name") or "").strip() or None,
                     last_reason="details confirmed; awaiting store approval",
                     increment_count=False,
-                    data_patch={"last_pending_review_apt_id": apt.get("id")},
+                    data_patch=mem_patch,
                 )
             except Exception:
                 pass
@@ -5750,7 +5894,9 @@ async def handle_incoming_call(request: Request):
         
         # Pro: call log start + customer memory for repeat callers
         call_log_start(call_sid, from_number, to_number)
-        caller_memory = get_caller_memory(from_number)
+        caller_memory = refresh_caller_memory_for_prompt(
+            from_number, tenant["client_id"] if tenant else None
+        )
         
         # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"

@@ -1250,6 +1250,46 @@ def db_appointments_get_by_phone_for_sms(
     return {"id": row[0], "name": row[1], "email": row[2] or "", "phone": row[3] or "", "date": row[4], "time": row[5] or "", "reason": row[6] or "", "status": row[7], "source": row[8] or "manual", "created_at": row[9].isoformat() if row[9] else ""}
 
 
+def db_appointments_latest_identity_for_phone(
+    phone: str,
+    *,
+    client_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Most recent appointment for this phone with a name (excludes cancelled/rejected). Used to refresh caller memory."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return None
+    cid = (client_id or "").strip() or _client_id()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT name, email, status, source, created_at
+        FROM appointments
+        WHERE client_id = %s
+          AND COALESCE(NULLIF(TRIM(name), ''), '') <> ''
+          AND status NOT IN ('cancelled', 'rejected')
+          AND (regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = %s
+               OR regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = right(%s, 10))
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (cid, norm, norm),
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {
+        "name": (row[0] or "").strip(),
+        "email": (row[1] or "").strip(),
+        "status": row[2] or "",
+        "source": row[3] or "manual",
+    }
+
+
 def db_appointments_resolve_for_sms(
     phone: str, client_id: str
 ) -> tuple[Optional[dict], str]:
@@ -1894,6 +1934,7 @@ def db_caller_memory_upsert(
                 return {}
         return {}
 
+    name_clean = (name or "").strip() if name is not None else ""
     if row:
         base_count, raw_data = row[0], row[1]
         count = int(base_count or 0) + (1 if increment_count else 0)
@@ -1901,14 +1942,24 @@ def db_caller_memory_upsert(
         if data_patch:
             merged = {**merged, **data_patch}
         payload = Json(merged) if Json else json.dumps(merged, default=str)
-        cur.execute(
-            """
-            UPDATE caller_memory SET name = COALESCE(%s, name), call_count = %s, last_call_iso = %s,
-                last_reason = COALESCE(%s, last_reason), data = %s::jsonb, updated_at = NOW()
-            WHERE phone = %s AND client_id = %s
-            """,
-            (name, count, now, last_reason, payload, key, _client_id()),
-        )
+        if name_clean:
+            cur.execute(
+                """
+                UPDATE caller_memory SET name = %s, call_count = %s, last_call_iso = %s,
+                    last_reason = COALESCE(%s, last_reason), data = %s::jsonb, updated_at = NOW()
+                WHERE phone = %s AND client_id = %s
+                """,
+                (name_clean, count, now, last_reason, payload, key, _client_id()),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE caller_memory SET call_count = %s, last_call_iso = %s,
+                    last_reason = COALESCE(%s, last_reason), data = %s::jsonb, updated_at = NOW()
+                WHERE phone = %s AND client_id = %s
+                """,
+                (count, now, last_reason, payload, key, _client_id()),
+            )
     else:
         merged = dict(data_patch or {})
         payload = Json(merged) if Json else json.dumps(merged, default=str)

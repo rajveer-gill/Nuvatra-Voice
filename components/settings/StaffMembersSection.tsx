@@ -42,6 +42,10 @@ function maskPhone(phone: string): string {
   return `••••${d.slice(-4)}`
 }
 
+function hasBookablePhone(phone: string): boolean {
+  return phone.replace(/\D/g, '').length >= 10
+}
+
 type Notify = (msg: { type: 'success' | 'error'; text: string } | null) => void
 
 export function StaffMembersSection({
@@ -133,8 +137,13 @@ export function StaffMembersSection({
 
   const saveDraft = async () => {
     const name = draft.name.trim()
+    const phone = draft.phone.trim()
     if (!name) {
       setDraftError('Name is required.')
+      return
+    }
+    if (!hasBookablePhone(phone)) {
+      setDraftError('Phone is required (at least 10 digits) so callers can book with this person.')
       return
     }
     setDraftError(null)
@@ -147,7 +156,7 @@ export function StaffMembersSection({
               {
                 id: crypto.randomUUID(),
                 name,
-                phone: draft.phone.trim(),
+                phone,
                 email: draft.email.trim(),
                 notes: draft.notes,
                 service_ids: draft.service_ids,
@@ -158,7 +167,7 @@ export function StaffMembersSection({
                 ? {
                     ...s,
                     name,
-                    phone: draft.phone.trim(),
+                    phone,
                     email: draft.email.trim(),
                     notes: draft.notes,
                     service_ids: draft.service_ids,
@@ -223,8 +232,15 @@ export function StaffMembersSection({
         transition={{ duration: 3, repeat: Infinity }}
       >
         <Calendar className="h-3.5 w-3.5" />
-        {staff.length} on roster
+        {staff.filter((s) => hasBookablePhone(s.phone)).length}/{staff.length} ready for bookings
       </motion.p>
+
+      {staff.some((s) => s.name.trim() && !hasBookablePhone(s.phone)) && (
+        <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          Some team members are missing a phone number. Add at least one person with a name and phone (10+ digits) before
+          the AI can take calls.
+        </p>
+      )}
 
       <motion.ul
         className="space-y-2 mb-3 max-h-[min(420px,50vh)] overflow-y-auto pr-1"

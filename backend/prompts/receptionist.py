@@ -186,7 +186,8 @@ def build_system_prompt(
         extra_txt = (" " + " ".join(extras)) if extras else ""
         memory_block = (
             f"\n- This is a REPEAT CALLER. Greet them warmly; you may say welcome back. "
-            f"Name if we have it: {mem_name}. They have called {count} time(s) before; last time: {last}.{extra_txt}"
+            f"Name if we have it: {mem_name}. They have called {count} time(s) before; last time: {last}.{extra_txt} "
+            "If they give a different name on this call, use the name they say now—not the stored name."
         )
 
     slots_block = ""
