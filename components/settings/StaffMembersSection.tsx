@@ -42,8 +42,15 @@ function maskPhone(phone: string): string {
   return `••••${d.slice(-4)}`
 }
 
-function hasBookablePhone(phone: string): boolean {
+function hasStaffPhone(phone: string): boolean {
   return phone.replace(/\D/g, '').length >= 10
+}
+
+/** Empty is OK; if provided, must be at least 10 digits. */
+function isValidOptionalStaffPhone(phone: string): boolean {
+  const t = phone.trim()
+  if (!t) return true
+  return hasStaffPhone(t)
 }
 
 type Notify = (msg: { type: 'success' | 'error'; text: string } | null) => void
@@ -142,8 +149,8 @@ export function StaffMembersSection({
       setDraftError('Name is required.')
       return
     }
-    if (!hasBookablePhone(phone)) {
-      setDraftError('Phone is required (at least 10 digits) so callers can book with this person.')
+    if (!isValidOptionalStaffPhone(phone)) {
+      setDraftError('If you add a phone, use at least 10 digits (for SMS alerts and call transfers).')
       return
     }
     setDraftError(null)
@@ -232,13 +239,13 @@ export function StaffMembersSection({
         transition={{ duration: 3, repeat: Infinity }}
       >
         <Calendar className="h-3.5 w-3.5" />
-        {staff.filter((s) => hasBookablePhone(s.phone)).length}/{staff.length} ready for bookings
+        {staff.filter((s) => hasStaffPhone(s.phone)).length}/{staff.length} with phone for SMS & transfers
       </motion.p>
 
-      {staff.some((s) => s.name.trim() && !hasBookablePhone(s.phone)) && (
+      {staff.some((s) => s.name.trim() && !hasStaffPhone(s.phone)) && (
         <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          Some team members are missing a phone number. Add at least one person with a name and phone (10+ digits) before
-          the AI can take calls.
+          Team members without a phone can still be booked by name. Add a phone to text them about new bookings and to
+          allow call transfers to that person.
         </p>
       )}
 
@@ -399,12 +406,15 @@ export function StaffMembersSection({
                 </motion.div>
                 <motion.div layout>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Phone (optional)</label>
+                  <p className="text-xs text-gray-500 mb-1.5">
+                    When set, we can text this person about bookings with them and use their number for call transfers.
+                  </p>
                   <input
                     type="tel"
                     value={draft.phone}
                     onChange={(e) => setDraft((d) => ({ ...d, phone: e.target.value }))}
                     className="cs-field w-full tabular-nums"
-                    placeholder="+1... for SMS approvals or linking transfers"
+                    placeholder="+1 555 123 4567"
                     maxLength={32}
                     autoComplete="tel"
                   />

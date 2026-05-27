@@ -3984,12 +3984,15 @@ def _notify_staff_pending_review(apt: dict, tenant: dict, twilio_from_number: st
         return
     cfg = load_client_config(tenant["client_id"]) or {}
     staff_list = cfg.get("staff") or []
-    n_staff_phones = len([s for s in staff_list if (s.get("phone") or "").strip()])
+    from staff_transfers import staff_members_for_pending_review_sms
+
+    targets = staff_members_for_pending_review_sms(staff_list, apt)
     sms_info(
         "staff_pending_review_notify_start",
         apt_id=apt_id,
         client_id=tenant["client_id"],
-        staff_sms_targets=n_staff_phones,
+        staff_sms_targets=len(targets),
+        staff_id=(apt.get("staff_id") or "") or None,
     )
     nm = (apt.get("name") or "").strip() or "Customer"
     ds = (apt.get("date") or "").strip()
@@ -3998,7 +4001,7 @@ def _notify_staff_pending_review(apt: dict, tenant: dict, twilio_from_number: st
         f"New booking request #{apt_id}: {nm}, {ds} at {tm}. "
         f"Reply YES {apt_id} to approve or NO {apt_id} plus a short reason to decline."
     )
-    for s in staff_list:
+    for s in targets:
         phone = (s.get("phone") or "").strip()
         if not phone:
             continue
@@ -4896,6 +4899,17 @@ class StaffMember(BaseModel):
     @classmethod
     def sanitize_phone(cls, v):
         return _staff_sanitize_single_line(v if v is not None else "")[:32]
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone_optional(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            return ""
+        digits = "".join(c for c in s if c.isdigit())
+        if len(digits) < 10:
+            raise ValueError("Phone must be at least 10 digits when provided.")
+        return s
 
     @field_validator("notes", mode="before")
     @classmethod

@@ -23,6 +23,52 @@ def client(monkeypatch):
     return TestClient(app)
 
 
+def test_staff_empty_phone_allowed(client, monkeypatch):
+    app.dependency_overrides[require_tenant] = _tenant_pro
+    monkeypatch.setenv("CLIENT_ID", "test-spa")
+    try:
+        resp = client.patch(
+            "/api/business-info",
+            json={
+                "staff": [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "name": "Tom",
+                        "phone": "",
+                        "email": "",
+                        "notes": "",
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200
+    finally:
+        app.dependency_overrides.pop(require_tenant, None)
+
+
+def test_staff_short_phone_returns_422(client, monkeypatch):
+    app.dependency_overrides[require_tenant] = _tenant_pro
+    monkeypatch.setenv("CLIENT_ID", "test-spa")
+    try:
+        resp = client.patch(
+            "/api/business-info",
+            json={
+                "staff": [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "name": "Tom",
+                        "phone": "555",
+                        "email": "",
+                        "notes": "",
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 422
+    finally:
+        app.dependency_overrides.pop(require_tenant, None)
+
+
 def test_staff_invalid_email_returns_422(client, monkeypatch):
     app.dependency_overrides[require_tenant] = _tenant_pro
     monkeypatch.setenv("CLIENT_ID", "test-spa")

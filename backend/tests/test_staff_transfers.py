@@ -3,6 +3,7 @@ from staff_transfers import (
     finalize_transfer_targets_for_storage,
     get_transfer_phone_by_name,
     resolve_transfer_destinations,
+    staff_members_for_pending_review_sms,
     TransferTarget,
 )
 
@@ -41,6 +42,32 @@ def test_get_transfer_phone_by_name():
     }
     assert get_transfer_phone_by_name("alex", info) == "+15552223333"
     assert get_transfer_phone_by_name("nobody", info) is None
+
+
+def test_staff_pending_review_sms_assigned_stylist_only():
+    staff = [
+        {"id": "s1", "name": "Tom", "phone": "+15551111111"},
+        {"id": "s2", "name": "Alex", "phone": "+15552222222"},
+    ]
+    apt = {"staff_id": "s2"}
+    targets = staff_members_for_pending_review_sms(staff, apt)
+    assert len(targets) == 1
+    assert targets[0]["name"] == "Alex"
+
+
+def test_staff_pending_review_sms_assigned_without_phone():
+    staff = [{"id": "s1", "name": "Tom", "phone": ""}]
+    assert staff_members_for_pending_review_sms(staff, {"staff_id": "s1"}) == []
+
+
+def test_staff_pending_review_sms_broadcast_when_unassigned():
+    staff = [
+        {"id": "s1", "name": "Tom", "phone": "+15551111111"},
+        {"id": "s2", "name": "Alex", "phone": ""},
+    ]
+    targets = staff_members_for_pending_review_sms(staff, {})
+    assert len(targets) == 1
+    assert targets[0]["name"] == "Tom"
 
 
 def test_finalize_rejects_duplicate_staff_link():

@@ -163,6 +163,23 @@ def resolve_transfer_destinations(business_info: dict) -> List[dict[str, str]]:
     return legacy
 
 
+def staff_members_for_pending_review_sms(staff_list: List[dict], apt: dict) -> List[dict]:
+    """
+    Staff to notify when a booking needs shop approval.
+    If the appointment has staff_id, only that roster member (when they have a phone).
+    Otherwise all roster members with a phone (legacy broadcast).
+    """
+    assigned = str(apt.get("staff_id") or "").strip()
+    if assigned:
+        for s in staff_list:
+            if not isinstance(s, dict):
+                continue
+            if str(s.get("id") or "").strip() == assigned:
+                return [s] if (s.get("phone") or "").strip() else []
+        return []
+    return [s for s in staff_list if isinstance(s, dict) and (s.get("phone") or "").strip()]
+
+
 def get_transfer_phone_by_name(name: str, business_info: Optional[dict] = None) -> Optional[str]:
     """Match transfer destination by name (case-insensitive). First match wins."""
     info = business_info or {}
