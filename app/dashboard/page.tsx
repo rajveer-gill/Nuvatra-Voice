@@ -18,6 +18,7 @@ export const STORE_PHONE_SECTION_ID = 'store-phone-settings'
 type SetupStatusSnapshot = {
   roster_ready?: boolean
   forwarding_phone_ready?: boolean
+  voice_ready?: boolean
 }
 
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
@@ -235,8 +236,13 @@ export default function DashboardPage() {
     if (access !== 'granted') return
     const onRefresh = (e: Event) => {
       const detail = (e as CustomEvent<SetupStatusSnapshot>).detail
-      if (detail && typeof detail.roster_ready === 'boolean') {
-        setSetupStatus(detail)
+      if (
+        detail &&
+        (typeof detail.roster_ready === 'boolean' ||
+          typeof detail.forwarding_phone_ready === 'boolean' ||
+          typeof detail.voice_ready === 'boolean')
+      ) {
+        setSetupStatus((prev) => ({ ...prev, ...detail }))
       } else {
         fetchSetupStatus()
       }
@@ -247,6 +253,8 @@ export default function DashboardPage() {
 
   const showRosterWarning = access === 'granted' && setupStatus?.roster_ready === false
   const showStorePhoneWarning = access === 'granted' && setupStatus?.forwarding_phone_ready === false
+  const showVoiceSetupWarning =
+    access === 'granted' && setupStatus?.voice_ready === false && (showRosterWarning || showStorePhoneWarning)
 
   const panelTransition = reduceMotion ? { duration: 0 } : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const }
 
@@ -390,60 +398,56 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {showStorePhoneWarning && (
-            <div
-              role="alert"
-              className="sticky top-4 z-20 mb-6 rounded-2xl border-2 border-rose-400/75 bg-gradient-to-br from-rose-500/20 via-red-600/15 to-orange-600/20 p-5 shadow-lg shadow-rose-900/30 md:p-6"
-            >
-              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <div className="flex gap-4">
-                  <AlertTriangle className="h-10 w-10 shrink-0 text-rose-200" aria-hidden />
-                  <div>
-                    <h2 className="text-lg font-bold text-rose-50 md:text-xl">Store phone required</h2>
-                    <p className="mt-1 max-w-2xl text-sm leading-relaxed text-rose-100/95">
-                      Your AI receptionist has no store phone number to redirect callers to a real person. Add your
-                      <strong className="font-semibold text-white"> Store phone (real person)</strong> in Settings so transfer
-                      and fallback handoffs work.
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={goToStorePhone}
-                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-rose-300 px-5 py-3 text-sm font-bold text-rose-950 shadow-md motion-safe-transition hover:bg-rose-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-200"
-                >
-                  Add store phone
-                </button>
-              </div>
-            </div>
-          )}
-
-          {showRosterWarning && (
+          {showVoiceSetupWarning && (
             <div
               role="alert"
               className="sticky top-4 z-20 mb-6 rounded-2xl border-2 border-amber-400/80 bg-gradient-to-br from-amber-500/25 via-amber-600/15 to-orange-600/20 p-5 shadow-lg shadow-amber-900/30 md:p-6"
             >
-              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div className="flex gap-4">
                   <AlertTriangle className="h-10 w-10 shrink-0 text-amber-300" aria-hidden />
                   <div>
-                    <h2 className="text-lg font-bold text-amber-50 md:text-xl">Team roster required</h2>
+                    <h2 className="text-lg font-bold text-amber-50 md:text-xl">Setup required before calls work</h2>
                     <p className="mt-1 max-w-2xl text-sm leading-relaxed text-amber-100/95">
-                      Your AI receptionist cannot book appointments or answer calls normally until you add at least one team
-                      member with a <strong className="font-semibold text-white">name</strong> and{' '}
-                      <strong className="font-semibold text-white">phone number</strong>. Callers will hear a message and be
-                      transferred to your store until this is fixed.
+                      Your AI receptionist cannot take calls normally until both of these are configured. Callers will hear a
+                      message and be transferred to your store when a store phone is set.
                     </p>
+                    <ul className="mt-3 space-y-1 text-sm text-amber-50/95 list-disc pl-5">
+                      {!setupStatus?.roster_ready && (
+                        <li>
+                          Add at least one team member with a <strong className="font-semibold text-white">name</strong> on your
+                          roster
+                        </li>
+                      )}
+                      {!setupStatus?.forwarding_phone_ready && (
+                        <li>
+                          Add your <strong className="font-semibold text-white">Store phone (real person)</strong> in Settings
+                        </li>
+                      )}
+                    </ul>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={goToTeamRoster}
-                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 py-3 text-sm font-bold text-amber-950 shadow-md motion-safe-transition hover:bg-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200"
-                >
-                  <Users className="h-5 w-5" aria-hidden />
-                  Add team members
-                </button>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  {!setupStatus?.roster_ready && (
+                    <button
+                      type="button"
+                      onClick={goToTeamRoster}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 py-3 text-sm font-bold text-amber-950 shadow-md motion-safe-transition hover:bg-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200"
+                    >
+                      <Users className="h-5 w-5" aria-hidden />
+                      Add team members
+                    </button>
+                  )}
+                  {!setupStatus?.forwarding_phone_ready && (
+                    <button
+                      type="button"
+                      onClick={goToStorePhone}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-300 px-5 py-3 text-sm font-bold text-rose-950 shadow-md motion-safe-transition hover:bg-rose-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-200"
+                    >
+                      Add store phone
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}

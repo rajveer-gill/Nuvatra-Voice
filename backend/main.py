@@ -1652,30 +1652,55 @@ def get_staff_phone_by_name(name: str) -> Optional[str]:
     return get_transfer_phone_by_name(name, get_business_info())
 
 
-ROSTER_NOT_READY_CALL_MESSAGE = (
-    "Sorry, I won't be able to function until the owner adds team members "
-    "for you to book with to their roster online. Don't worry! I am transferring you to the store now."
-)
-
-
-def bookable_staff_members(info: Optional[dict] = None) -> List[dict]:
-    """Staff rows with a display name and dialable phone (required for appointment booking)."""
+def staff_on_roster(info: Optional[dict] = None) -> List[dict]:
+    """Staff rows with a display name (required for calendar booking / AI roster)."""
     data = info if info is not None else get_business_info()
     out: List[dict] = []
     for s in data.get("staff") or []:
         if not isinstance(s, dict):
             continue
         name = (s.get("name") or "").strip()
-        phone = (s.get("phone") or "").strip()
-        digits = "".join(c for c in phone if c.isdigit())
-        if name and len(digits) >= 10:
+        if name:
             out.append(s)
     return out
 
 
 def staff_roster_ready_for_booking(info: Optional[dict] = None) -> bool:
-    """True when at least one team member can be booked on the calendar."""
-    return len(bookable_staff_members(info)) >= 1
+    """True when at least one named team member is on the roster."""
+    return len(staff_on_roster(info)) >= 1
+
+
+def forwarding_phone_ready(info: Optional[dict] = None) -> bool:
+    """True when store forwarding phone is configured for live handoffs."""
+    data = info if info is not None else get_business_info()
+    return bool((data.get("forwarding_phone") or "").strip())
+
+
+def voice_receptionist_ready(info: Optional[dict] = None) -> bool:
+    """True when both team roster and store phone are configured for live calls."""
+    return staff_roster_ready_for_booking(info) and forwarding_phone_ready(info)
+
+
+def setup_not_ready_call_message(info: Optional[dict] = None) -> str:
+    """Spoken when calls are blocked until Settings setup is complete."""
+    data = info if info is not None else get_business_info()
+    roster_ok = staff_roster_ready_for_booking(data)
+    phone_ok = forwarding_phone_ready(data)
+    if not roster_ok and not phone_ok:
+        return (
+            "Sorry, I won't be able to function until the owner adds team members to their roster online "
+            "and adds a store phone number in settings."
+        )
+    if not roster_ok:
+        return (
+            "Sorry, I won't be able to function until the owner adds team members "
+            "for you to book with to their roster online."
+        )
+    if not phone_ok:
+        return (
+            "Sorry, I won't be able to function until the owner adds a store phone number in settings."
+        )
+    return ""
 
 
 def _normalize_dial_number(forwarding_phone: str) -> str:
@@ -1702,25 +1727,36 @@ def append_dial_forwarding_only(response: VoiceResponse, forwarding_phone: str) 
     response.hangup()
 
 
-def twiml_roster_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str = "") -> VoiceResponse:
-    """Play roster-not-ready message, then transfer to the store forwarding number when configured."""
+def twiml_setup_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str = "") -> VoiceResponse:
+    """Play setup-not-ready message, then transfer to the store when forwarding phone is configured."""
     response = VoiceResponse()
-    msg_encoded = quote(ROSTER_NOT_READY_CALL_MESSAGE)
-    response.play(f"{base_url}/api/phone/tts-audio?text={msg_encoded}&voice={get_tts_voice()}")
+    message = setup_not_ready_call_message(biz_info)
+    if message:
+        msg_encoded = quote(message)
+        response.play(f"{base_url}/api/phone/tts-audio?text={msg_encoded}&voice={get_tts_voice()}")
     forwarding_phone = (biz_info.get("forwarding_phone") or "").strip()
     if forwarding_phone:
+        if message:
+            transfer_line = " Don't worry! I am transferring you to the store now."
+            transfer_encoded = quote(transfer_line)
+            response.play(f"{base_url}/api/phone/tts-audio?text={transfer_encoded}&voice={get_tts_voice()}")
         append_dial_forwarding_only(response, forwarding_phone)
         if call_sid:
             call_log_set_outcome(call_sid, "forwarded")
     else:
         response.say(
-            "Please ask the business to add a store phone number and complete their team roster online. Goodbye.",
+            "Please ask the business to add team members to their roster and a store phone number online. Goodbye.",
             voice="alice",
         )
         response.hangup()
         if call_sid:
             call_log_set_outcome(call_sid, "error")
     return response
+
+
+def twiml_roster_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str = "") -> VoiceResponse:
+    """Backward-compatible alias for setup-not-ready handoff TwiML."""
+    return twiml_setup_not_ready_handoff(base_url, biz_info, call_sid=call_sid)
 
 def parse_transfer_to(ai_text: str) -> Optional[str]:
     """If AI responded with TRANSFER_TO: Name, return the name; else None."""
@@ -4174,21 +4210,27 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
     if not (services or departments):
         warnings.append("Add services or departments so the AI knows what your business offers (e.g. appointments, estimates, emergency service)")
     roster_ready = staff_roster_ready_for_booking(info)
-    forwarding_phone_ready = bool((info.get("forwarding_phone") or "").strip())
+    store_phone_ready = forwarding_phone_ready(info)
+    voice_ready = roster_ready and store_phone_ready
     if not roster_ready:
         warnings.append(
-            "Add at least one team member with a name and phone on the Team roster so callers can book appointments."
+            "Add at least one team member with a name on the Team roster so callers can book appointments."
         )
-    if not forwarding_phone_ready:
+    if not store_phone_ready:
         warnings.append(
             "Add your store phone number so callers can be redirected to a real person when needed."
+        )
+    if not voice_ready:
+        warnings.append(
+            "Your AI receptionist cannot take calls normally until both your team roster and store phone are configured."
         )
     return {
         "complete": len(missing) == 0,
         "missing": missing,
         "warnings": warnings,
         "roster_ready": roster_ready,
-        "forwarding_phone_ready": forwarding_phone_ready,
+        "forwarding_phone_ready": store_phone_ready,
+        "voice_ready": voice_ready,
     }
 
 @app.get("/api/setup-status")
@@ -5589,16 +5631,18 @@ async def handle_incoming_call(request: Request):
         active_calls[call_sid]["twilio_public_base_url"] = base_url
 
         biz_info = get_business_info()
-        if not staff_roster_ready_for_booking(biz_info):
+        if not voice_receptionist_ready(biz_info):
             voice_forward(
-                "roster_not_ready_forward",
+                "setup_not_ready_forward",
                 call_sid=call_sid or "",
                 client_id=client_id,
                 forward_kind="store_forwarding",
-                has_fallback_configured=bool((biz_info.get("forwarding_phone") or "").strip()),
+                roster_ready=staff_roster_ready_for_booking(biz_info),
+                store_phone_ready=forwarding_phone_ready(biz_info),
+                has_fallback_configured=forwarding_phone_ready(biz_info),
             )
-            roster_twiml = twiml_roster_not_ready_handoff(base_url, biz_info, call_sid=call_sid or "")
-            return Response(content=str(roster_twiml), media_type="application/xml")
+            setup_twiml = twiml_setup_not_ready_handoff(base_url, biz_info, call_sid=call_sid or "")
+            return Response(content=str(setup_twiml), media_type="application/xml")
 
         # Create TwiML response
         response = VoiceResponse()
