@@ -93,7 +93,7 @@ def test_prompt_no_services_skips_service_questions():
         booked_slots_prompt_text="",
     )
     assert "NOT configured a service menu" in p
-    assert "Do NOT ask callers to choose a service" in p
+    assert "Do NOT ask callers to pick a service" in p
     assert "- Services:" not in p.split("You can help with:")[1].split("staff")[0]
 
 
