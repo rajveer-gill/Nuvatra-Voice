@@ -390,8 +390,10 @@ export default function AdminPage() {
       )
       if (data.user_relinked) {
         setSuccess(formatRelinkSuccessMessage(data))
+        await fetchTenants()
       } else if (data.invite_sent) {
         setSuccess('Invitation email sent. Open that link from the inbox (same email you entered here).')
+        await fetchTenants()
       } else {
         setError(
           data.clerk_error ||

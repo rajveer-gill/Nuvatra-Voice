@@ -706,6 +706,22 @@ def db_tenant_get_members(tenant_id: str) -> List[str]:
     return [r[0] for r in rows]
 
 
+def db_tenant_all_member_clerk_ids() -> List[str]:
+    """All Clerk user IDs with a tenant membership (admin email lookup fallback)."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT clerk_user_id FROM tenant_members ORDER BY clerk_user_id")
+        rows = cur.fetchall()
+        cur.close()
+        return [str(r[0]) for r in rows if r and r[0]]
+    except Exception as e:
+        print(f"[DB] Failed to list tenant member clerk ids: {e}")
+        return []
+
+
 def db_tenant_get_invite_email(tenant_id: str) -> Optional[str]:
     """Pending invite email for this tenant (at most one per tenant)."""
     conn = _get_conn()

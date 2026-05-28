@@ -30,7 +30,35 @@ def test_clerk_link_email_links_first_user_when_duplicates(monkeypatch):
     assert result["linked_clerk_user_ids"] == [user_a]
     assert linked == [user_a]
     assert result["linked_clerk_user_id"] == user_a
-    assert result["clerk_error"]
+    assert result["clerk_error"] is None
+
+
+def test_clerk_link_email_relinks_when_invite_says_email_exists(monkeypatch):
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_fake")
+    tenant_id = "06aa8575-2968-46ae-8497-80948c38a845"
+    user_a = "user_existing_andrew"
+
+    monkeypatch.setattr(main, "db_tenant_invite_upsert", lambda *a, **k: True)
+    monkeypatch.setattr(main, "db_tenant_invite_delete", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_clerk_user_ids_for_email", lambda email, headers: [user_a])
+
+    def fake_relink(uid, tid, headers):
+        return []
+
+    monkeypatch.setattr(main, "_clerk_relink_user_to_tenant", fake_relink)
+
+    import httpx
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 422
+    mock_resp.text = '{"errors":[{"code":"form_identifier_exists"}]}'
+    monkeypatch.setattr(httpx, "post", MagicMock(return_value=mock_resp))
+
+    result = main._clerk_link_email_to_tenant("andrew@nuvatrahq.com", tenant_id)
+
+    assert result["user_relinked"] is True
+    assert result["invite_sent"] is False
+    assert result["linked_clerk_user_id"] == user_a
 
 
 def test_clerk_link_email_sends_invite_when_no_users(monkeypatch):
