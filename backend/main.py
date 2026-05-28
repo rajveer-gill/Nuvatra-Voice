@@ -1979,6 +1979,52 @@ def call_log_end(call_sid: str):
 # Booked slots (avoid double-book; inject into AI prompt)
 DEFAULT_SLOT_DURATION_MINUTES = 30
 
+
+def _duration_minutes_for_appointment(
+    apt: dict,
+    slots_by_appointment_id: dict[int, int],
+    services: Optional[List[dict]] = None,
+) -> int:
+    """Resolve block length for calendar display (booked_slots, then service menu, else default)."""
+    try:
+        aid = int(apt.get("id") or 0)
+    except (TypeError, ValueError):
+        aid = 0
+    if aid and aid in slots_by_appointment_id:
+        return max(5, min(int(slots_by_appointment_id[aid]), 480))
+    reason = (apt.get("reason") or "").strip().lower()
+    for svc in services or []:
+        if not isinstance(svc, dict):
+            continue
+        name = (svc.get("name") or "").strip().lower()
+        if not name:
+            continue
+        try:
+            dm = int(svc.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES)
+        except (TypeError, ValueError):
+            dm = DEFAULT_SLOT_DURATION_MINUTES
+        if reason == name or name in reason:
+            return max(5, min(dm, 480))
+    return DEFAULT_SLOT_DURATION_MINUTES
+
+
+def _booked_slot_duration_by_appointment_id() -> dict[int, int]:
+    out: dict[int, int] = {}
+    for s in _load_booked_slots():
+        try:
+            aid = int(s.get("appointment_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not aid:
+            continue
+        try:
+            dm = int(s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES)
+        except (TypeError, ValueError):
+            dm = DEFAULT_SLOT_DURATION_MINUTES
+        out[aid] = max(5, min(dm, 480))
+    return out
+
+
 def _load_booked_slots() -> List[dict]:
     """Load booked slots from client data dir. Each entry: {date, time, appointment_id, duration_minutes?}."""
     if USE_DB:
@@ -4650,7 +4696,13 @@ async def appointments_calendar(
         return {"events": []}
     cid = _bind_tenant_db_context(tenant)
     events = db_appointments_in_date_range(date_from, date_to, staff_id, client_id=cid)
-    return {"events": events}
+    slots_by_apt = _booked_slot_duration_by_appointment_id()
+    services = get_business_info().get("services") or []
+    enriched = []
+    for apt in events:
+        dm = _duration_minutes_for_appointment(apt, slots_by_apt, services)
+        enriched.append({**apt, "duration_minutes": dm})
+    return {"events": enriched}
 
 
 @app.patch("/api/appointments/{appointment_id}")

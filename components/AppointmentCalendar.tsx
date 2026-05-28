@@ -35,10 +35,18 @@ function EventContent({ arg }: { arg: EventContentArg }) {
   )
 }
 
+function addMinutesToIsoLocal(isoStart: string, minutes: number): string {
+  const d = new Date(isoStart)
+  if (Number.isNaN(d.getTime())) return isoStart
+  d.setMinutes(d.getMinutes() + minutes)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
   const reduceMotion = useReducedMotion()
   const [events, setEvents] = useState<
-    { id: string; title: string; start: string; backgroundColor?: string; borderColor?: string }[]
+    { id: string; title: string; start: string; end: string; backgroundColor?: string; borderColor?: string }[]
   >([])
   const [staffList, setStaffList] = useState<{ id: string; name: string }[]>([])
   const [staffFilter, setStaffFilter] = useState('')
@@ -70,6 +78,7 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
             date: string
             time?: string
             status: string
+            duration_minutes?: number
           }[]
           setEvents(
             list.map((a) => {
@@ -78,10 +87,13 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
               const color = eventColor(a.status)
               const reason = (a.reason || '').trim()
               const subtitle = reason && reason !== '—' ? reason : 'Booking'
+              const duration = Math.max(5, Math.min(Number(a.duration_minutes) || 30, 480))
+              const start = `${a.date}T${t}`
               return {
                 id: String(a.id),
                 title: `${a.name} — ${subtitle}`,
-                start: `${a.date}T${t}`,
+                start,
+                end: addMinutesToIsoLocal(start, duration),
                 backgroundColor: color,
                 borderColor: color,
               }
@@ -150,8 +162,9 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
               week: 'Week',
               day: 'Day',
             }}
-            slotMinTime="07:00:00"
-            slotMaxTime="21:00:00"
+            slotMinTime="00:00:00"
+            slotMaxTime="24:00:00"
+            scrollTime="07:00:00"
             slotDuration="00:30:00"
             allDaySlot={false}
             nowIndicator
