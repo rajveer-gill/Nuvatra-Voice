@@ -182,6 +182,36 @@ def init_db() -> bool:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        try:
+            cur.execute(
+                """
+                DELETE FROM tenant_invites a
+                USING tenant_invites b
+                WHERE a.tenant_id = b.tenant_id
+                  AND a.email <> b.email
+                  AND (
+                    a.created_at < b.created_at
+                    OR (
+                      a.created_at IS NOT DISTINCT FROM b.created_at
+                      AND a.email < b.email
+                    )
+                  )
+                """
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_invites_one_email_per_tenant "
+                "ON tenant_invites (tenant_id)"
+            )
+        except Exception:
+            pass
+        _dedupe_tenant_members_one_per_tenant(cur)
+        try:
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_members_one_per_tenant "
+                "ON tenant_members (tenant_id)"
+            )
+        except Exception:
+            pass
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tenants_twilio_phone ON tenants(twilio_phone_number)")
         for col, typ in [
             ("recording_sid", "TEXT"),
@@ -463,48 +493,111 @@ def db_tenant_get_by_id(tenant_id: str) -> Optional[dict]:
         return None
     return _row_to_tenant(row)
 
-def db_tenant_member_add(clerk_user_id: str, tenant_id: str) -> bool:
-    """Add a member to a tenant. Returns True on success."""
-    conn = _get_conn()
-    if not conn:
-        return False
+def _dedupe_tenant_members_one_per_tenant(cur) -> None:
+    """Keep the newest membership row per tenant before unique index on tenant_id."""
     try:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO tenant_members (clerk_user_id, tenant_id)
-            VALUES (%s, %s)
-            ON CONFLICT (clerk_user_id, tenant_id) DO NOTHING
-        """, (clerk_user_id, tenant_id))
-        cur.close()
-        conn.commit()
-        return True
+        cur.execute(
+            """
+            DELETE FROM tenant_members a
+            USING tenant_members b
+            WHERE a.tenant_id = b.tenant_id
+              AND a.clerk_user_id <> b.clerk_user_id
+              AND (
+                a.created_at < b.created_at
+                OR (
+                  a.created_at IS NOT DISTINCT FROM b.created_at
+                  AND a.clerk_user_id < b.clerk_user_id
+                )
+              )
+            """
+        )
     except Exception as e:
-        print(f"[DB] Failed to add tenant member: {e}")
-        return False
+        print(f"[DB] tenant_members dedupe skipped: {e}")
 
 
-def db_tenant_member_set_single(clerk_user_id: str, tenant_id: str) -> bool:
-    """Replace all tenant memberships for a user with one tenant (admin re-link / invite accept)."""
+def db_tenant_member_add(clerk_user_id: str, tenant_id: str) -> bool:
+    """Assign sole owner for tenant (one email / one Clerk user per tenant)."""
+    return db_tenant_member_assign_owner(clerk_user_id, tenant_id) is not None
+
+
+def db_tenant_member_assign_owner(clerk_user_id: str, tenant_id: str) -> Optional[List[str]]:
+    """
+    Make clerk_user_id the only member of tenant_id and remove their other tenant memberships.
+    Returns clerk_user_ids displaced from this tenant (previous owners), excluding the new owner.
+    """
     conn = _get_conn()
-    if not conn:
-        return False
+    if not conn or not clerk_user_id or not tenant_id:
+        return None
     try:
         cur = conn.cursor()
+        cur.execute(
+            "SELECT clerk_user_id FROM tenant_members WHERE tenant_id = %s::uuid",
+            (tenant_id,),
+        )
+        displaced = [str(r[0]) for r in cur.fetchall() if r and r[0] and str(r[0]) != clerk_user_id]
+        cur.execute("DELETE FROM tenant_members WHERE tenant_id = %s::uuid", (tenant_id,))
         cur.execute("DELETE FROM tenant_members WHERE clerk_user_id = %s", (clerk_user_id,))
         cur.execute(
             """
             INSERT INTO tenant_members (clerk_user_id, tenant_id)
-            VALUES (%s, %s)
-            ON CONFLICT (clerk_user_id, tenant_id) DO NOTHING
+            VALUES (%s, %s::uuid)
             """,
             (clerk_user_id, tenant_id),
         )
         cur.close()
         conn.commit()
-        return True
+        return displaced
     except Exception as e:
-        print(f"[DB] Failed to set single tenant member: {e}")
+        print(f"[DB] Failed to assign tenant owner: {e}")
+        return None
+
+
+def db_tenant_member_set_single(clerk_user_id: str, tenant_id: str) -> bool:
+    """Replace all tenant memberships for a user with one tenant (admin re-link / invite accept)."""
+    return db_tenant_member_assign_owner(clerk_user_id, tenant_id) is not None
+
+
+def db_tenant_member_remove(clerk_user_id: str, tenant_id: str) -> bool:
+    """Remove one tenant membership. Returns True if a row was deleted."""
+    conn = _get_conn()
+    if not conn:
         return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM tenant_members WHERE clerk_user_id = %s AND tenant_id = %s::uuid",
+            (clerk_user_id, tenant_id),
+        )
+        deleted = cur.rowcount > 0
+        cur.close()
+        conn.commit()
+        return deleted
+    except Exception as e:
+        print(f"[DB] Failed to remove tenant member: {e}")
+        return False
+
+
+def db_tenant_membership_tenant_ids(clerk_user_id: str) -> List[str]:
+    """All tenant UUIDs this Clerk user belongs to (may be multiple if legacy rows exist)."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT tenant_id::text FROM tenant_members
+            WHERE clerk_user_id = %s
+            ORDER BY created_at DESC NULLS LAST
+            """,
+            (clerk_user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [str(r[0]) for r in rows if r and r[0]]
+    except Exception as e:
+        print(f"[DB] Failed to list tenant memberships: {e}")
+        return []
 
 
 def _normalize_invite_email(email: str) -> str:
@@ -512,7 +605,7 @@ def _normalize_invite_email(email: str) -> str:
 
 
 def db_tenant_invite_upsert(email: str, tenant_id: str) -> bool:
-    """Record a pending invite so first login can link by email if Clerk metadata is missing."""
+    """Record pending invite; only one email may be queued per tenant."""
     conn = _get_conn()
     if not conn:
         return False
@@ -522,9 +615,13 @@ def db_tenant_invite_upsert(email: str, tenant_id: str) -> bool:
     try:
         cur = conn.cursor()
         cur.execute(
+            "DELETE FROM tenant_invites WHERE tenant_id = %s::uuid AND email <> %s",
+            (tenant_id, em),
+        )
+        cur.execute(
             """
             INSERT INTO tenant_invites (email, tenant_id)
-            VALUES (%s, %s)
+            VALUES (%s, %s::uuid)
             ON CONFLICT (email) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, created_at = NOW()
             """,
             (em, tenant_id),
@@ -576,26 +673,26 @@ def db_tenant_invite_consume(email: str) -> Optional[str]:
         return None
 
 
-def db_tenant_get_for_user(clerk_user_id: str) -> Optional[dict]:
-    """Get the tenant for a Clerk user (from tenant_members). Returns first tenant if multiple."""
-    conn = _get_conn()
-    if not conn:
+def db_tenant_get_for_user(
+    clerk_user_id: str,
+    preferred_tenant_id: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Get the tenant for a Clerk user (from tenant_members).
+    Users should have at most one membership; legacy duplicates are collapsed to preferred or newest.
+    """
+    membership_ids = db_tenant_membership_tenant_ids(clerk_user_id)
+    if not membership_ids:
         return None
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT t.id, t.client_id, t.name, t.twilio_phone_number, t.plan, t.created_at,
-               t.trial_ends_at, t.subscription_status, t.stripe_customer_id, t.stripe_subscription_id, t.billing_exempt_until, t.business_vertical
-        FROM tenants t
-        JOIN tenant_members m ON m.tenant_id = t.id
-        WHERE m.clerk_user_id = %s
-        ORDER BY m.created_at DESC NULLS LAST, t.created_at DESC
-        LIMIT 1
-    """, (clerk_user_id,))
-    row = cur.fetchone()
-    cur.close()
-    if not row:
-        return None
-    return _row_to_tenant(row)
+    pref = (preferred_tenant_id or "").strip()
+    chosen = pref if pref and pref in membership_ids else membership_ids[0]
+    if len(membership_ids) > 1:
+        print(
+            f"[Auth] multiple_tenant_memberships user_id={clerk_user_id} "
+            f"tenant_ids={membership_ids} collapsing_to={chosen}"
+        )
+        db_tenant_member_assign_owner(clerk_user_id, chosen)
+    return db_tenant_get_by_id(chosen)
 
 def db_tenant_get_members(tenant_id: str) -> List[str]:
     """Get all clerk_user_ids for a tenant."""
@@ -603,10 +700,29 @@ def db_tenant_get_members(tenant_id: str) -> List[str]:
     if not conn:
         return []
     cur = conn.cursor()
-    cur.execute("SELECT clerk_user_id FROM tenant_members WHERE tenant_id = %s", (tenant_id,))
+    cur.execute("SELECT clerk_user_id FROM tenant_members WHERE tenant_id = %s::uuid", (tenant_id,))
     rows = cur.fetchall()
     cur.close()
     return [r[0] for r in rows]
+
+
+def db_tenant_get_invite_email(tenant_id: str) -> Optional[str]:
+    """Pending invite email for this tenant (at most one per tenant)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT email FROM tenant_invites WHERE tenant_id = %s::uuid LIMIT 1",
+            (tenant_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return str(row[0]).strip() if row and row[0] else None
+    except Exception as e:
+        print(f"[DB] Failed to get tenant invite email: {e}")
+        return None
 
 def db_tenant_delete(tenant_id: str) -> bool:
     """Delete a tenant by UUID. Cascades to tenant_members. Returns True on success."""

@@ -538,8 +538,11 @@ try:
         db_tenant_create,
         db_archive_purge_and_delete_tenant,
         db_tenant_get_members,
-        db_tenant_member_add,
+        db_tenant_get_invite_email,
+        db_tenant_member_assign_owner,
+        db_tenant_member_remove,
         db_tenant_member_set_single,
+        db_tenant_membership_tenant_ids,
         db_tenant_invite_upsert,
         db_tenant_invite_delete,
         db_tenant_invite_consume,
@@ -1287,22 +1290,25 @@ def require_tenant(request: Request):
     user_id, tenant_id_from_meta = verify_clerk_token(token)
     _ensure_db_ready()
     tenant = None
+    preferred_tid = str(tenant_id_from_meta or "").strip() or None
+    link = None
     # DB membership is authoritative — JWT public_metadata can be stale after tenant delete/relink.
     if USE_DB and user_id:
-        tenant = db_tenant_get_for_user(user_id)
+        tenant = db_tenant_get_for_user(user_id, preferred_tenant_id=preferred_tid)
     if not tenant and tenant_id_from_meta and USE_DB:
         tenant = db_tenant_get_by_id(str(tenant_id_from_meta))
         if tenant and user_id:
-            db_tenant_member_add(user_id, tenant["id"])
+            db_tenant_member_set_single(user_id, tenant["id"])
     if not tenant and USE_DB:
         # JWT often omits public_metadata; resolve via Clerk API + pending invite email.
         link = _clerk_fetch_user_link(user_id)
         if link:
             api_tenant_id = link.get("tenant_id")
             if api_tenant_id:
+                preferred_tid = preferred_tid or str(api_tenant_id)
                 tenant = db_tenant_get_by_id(str(api_tenant_id))
                 if tenant:
-                    db_tenant_member_add(user_id, tenant["id"])
+                    db_tenant_member_set_single(user_id, tenant["id"])
                     print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via Clerk metadata")
             if not tenant:
                 for em in link.get("emails") or []:
@@ -1311,10 +1317,18 @@ def require_tenant(request: Request):
                         continue
                     tenant = db_tenant_get_by_id(invited_tid)
                     if tenant:
-                        db_tenant_member_add(user_id, tenant["id"])
+                        db_tenant_member_set_single(user_id, tenant["id"])
                         _clerk_patch_user_tenant_metadata(user_id, tenant["id"])
                         print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via invite email {em}")
                         break
+    elif USE_DB and user_id and not preferred_tid:
+        link = _clerk_fetch_user_link(user_id)
+        if link and link.get("tenant_id"):
+            preferred_tid = str(link.get("tenant_id"))
+            if tenant and str(tenant.get("id")) != preferred_tid:
+                alt = db_tenant_get_by_id(preferred_tid)
+                if alt and preferred_tid in db_tenant_membership_tenant_ids(user_id):
+                    tenant = alt
     if tenant and user_id:
         tid = str(tenant.get("id") or "").strip()
         meta_tid = str(tenant_id_from_meta or "").strip()
@@ -3411,13 +3425,36 @@ def _clerk_user_ids_for_email(email: str, headers: dict) -> List[str]:
         return []
 
 
-def _clerk_relink_user_to_tenant(clerk_user_id: str, tenant_id: str, headers: dict) -> None:
-    """Patch metadata, set sole tenant membership, revoke sessions for one Clerk user."""
+def _clerk_clear_tenant_access(clerk_user_id: str, headers: dict) -> None:
+    """Remove tenant from Clerk user and force re-auth (used when displacing a tenant owner)."""
+    import httpx
+
+    try:
+        httpx.patch(
+            f"https://api.clerk.com/v1/users/{clerk_user_id}",
+            headers=headers,
+            json={"public_metadata": {"tenant_id": None}},
+            timeout=10.0,
+        )
+    except Exception as e:
+        print(f"[Admin] Error clearing Clerk metadata for {clerk_user_id}: {e}")
+    _clerk_revoke_active_sessions(clerk_user_id, headers)
+
+
+def _clerk_relink_user_to_tenant(clerk_user_id: str, tenant_id: str, headers: dict) -> List[str]:
+    """
+    Make this user the sole owner of the tenant; clear access for anyone else on that tenant.
+    Returns displaced clerk_user_ids (previous owners).
+    """
+    displaced = db_tenant_member_assign_owner(clerk_user_id, tenant_id)
+    if displaced is None:
+        raise RuntimeError(f"Database membership update failed for {clerk_user_id} (tenant_id={tenant_id})")
     if not _clerk_patch_user_tenant_metadata(clerk_user_id, tenant_id):
         raise RuntimeError(f"Clerk metadata patch failed for {clerk_user_id} (tenant_id={tenant_id})")
-    if not db_tenant_member_set_single(clerk_user_id, tenant_id):
-        raise RuntimeError(f"Database membership update failed for {clerk_user_id} (tenant_id={tenant_id})")
+    for uid in displaced:
+        _clerk_clear_tenant_access(uid, headers)
     _clerk_revoke_active_sessions(clerk_user_id, headers)
+    return displaced
 
 
 def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
@@ -3463,16 +3500,34 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
     headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
     existing_user_ids = _clerk_user_ids_for_email(email, headers)
     clerk_users_matched_count = len(existing_user_ids)
-    if existing_user_ids:
+    if clerk_users_matched_count > 1:
+        print(
+            f"[Admin] Clerk returned {clerk_users_matched_count} users for {email!r}; "
+            "using the first account only (one dashboard user per tenant)"
+        )
+        clerk_error = (
+            clerk_error
+            or f"Multiple Clerk accounts share {email}; linked the first only. "
+            "Remove duplicate accounts in Clerk or sign in with the linked account."
+        )
+    link_user_ids = existing_user_ids[:1] if existing_user_ids else []
+    if link_user_ids:
         link_errors: List[str] = []
-        for uid in existing_user_ids:
+        displaced_all: List[str] = []
+        for uid in link_user_ids:
             try:
-                _clerk_relink_user_to_tenant(uid, tenant_id, headers)
+                displaced = _clerk_relink_user_to_tenant(uid, tenant_id, headers)
+                displaced_all.extend(displaced or [])
                 linked_clerk_user_ids.append(uid)
                 print(f"[Admin] Re-linked existing user {uid} to tenant {tenant_id} (email={email})")
             except Exception as e:
                 link_errors.append(f"{uid}: {e}")
                 print(f"[Admin] Error re-linking user {uid}: {e}")
+        if displaced_all:
+            print(
+                f"[Admin] Removed prior tenant owner(s) from tenant {tenant_id}: "
+                f"{', '.join(displaced_all[:5])}"
+            )
         if linked_clerk_user_ids:
             db_tenant_invite_delete(email)
             user_relinked = True
@@ -3481,13 +3536,8 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
             clerk_error = f"Re-link failed: {'; '.join(link_errors[:3])}"
         elif link_errors:
             clerk_error = (
-                f"Linked {len(linked_clerk_user_ids)} of {clerk_users_matched_count} Clerk account(s); "
+                f"Linked {len(linked_clerk_user_ids)} of {len(link_user_ids)} Clerk account(s); "
                 f"failures: {'; '.join(link_errors[:2])}"
-            )
-        if clerk_users_matched_count > 1:
-            print(
-                f"[Admin] Clerk returned {clerk_users_matched_count} users for {email!r}; "
-                f"linked {len(linked_clerk_user_ids)}"
             )
     else:
         try:
@@ -3650,12 +3700,42 @@ async def admin_resend_invite(
     return {"success": True, **link}
 
 
+def _admin_tenant_with_access_email(tenant: dict) -> dict:
+    """Attach dashboard owner / pending invite email for admin UI."""
+    tid = str(tenant.get("id") or "")
+    pending = db_tenant_get_invite_email(tid) if tid else None
+    owner_email: Optional[str] = None
+    members = db_tenant_get_members(tid) if tid else []
+    if members:
+        link = _clerk_fetch_user_link(members[0])
+        emails = (link or {}).get("emails") or []
+        if emails:
+            owner_email = str(emails[0]).strip()
+    allocated = owner_email or pending
+    if owner_email and pending and owner_email.lower() != pending.lower():
+        access_status = "active_pending_mismatch"
+    elif owner_email:
+        access_status = "active"
+    elif pending:
+        access_status = "pending_invite"
+    else:
+        access_status = "none"
+    return {
+        **tenant,
+        "owner_email": owner_email,
+        "pending_invite_email": pending,
+        "allocated_email": allocated,
+        "access_status": access_status,
+    }
+
+
 @app.get("/api/admin/tenants")
 async def admin_list_tenants(_: str = Depends(require_admin)):
     """List all tenants. Requires admin auth."""
     if not USE_DB:
         return {"tenants": []}
-    return {"tenants": db_tenant_list_all()}
+    tenants = db_tenant_list_all()
+    return {"tenants": [_admin_tenant_with_access_email(t) for t in tenants]}
 
 @app.patch("/api/admin/tenants/{tenant_id}/twilio-phone")
 async def admin_update_tenant_twilio_phone(

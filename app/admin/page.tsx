@@ -9,6 +9,8 @@ import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 
+type TenantAccessStatus = 'active' | 'pending_invite' | 'none' | 'active_pending_mismatch'
+
 interface Tenant {
   id: string
   client_id: string
@@ -20,6 +22,36 @@ interface Tenant {
   subscription_status?: string | null
   billing_exempt_until?: string | null
   business_vertical?: string | null
+  owner_email?: string | null
+  pending_invite_email?: string | null
+  allocated_email?: string | null
+  access_status?: TenantAccessStatus
+}
+
+function accessStatusLabel(status: TenantAccessStatus | undefined): string {
+  switch (status) {
+    case 'active':
+      return 'Active'
+    case 'pending_invite':
+      return 'Invite pending'
+    case 'active_pending_mismatch':
+      return 'Active · invite differs'
+    default:
+      return 'No email'
+  }
+}
+
+function accessStatusClass(status: TenantAccessStatus | undefined): string {
+  switch (status) {
+    case 'active':
+      return 'bg-emerald-500/15 text-emerald-300'
+    case 'pending_invite':
+      return 'bg-amber-500/15 text-amber-200'
+    case 'active_pending_mismatch':
+      return 'bg-orange-500/15 text-orange-200'
+    default:
+      return 'bg-zinc-500/15 text-zinc-400'
+  }
 }
 
 const inputClass =
@@ -166,8 +198,16 @@ export default function AdminPage() {
 
   const fetchTenants = useCallback(async () => {
     try {
-      const res = await api.get('/api/admin/tenants')
-      setTenants(res.data.tenants || [])
+      const res = await api.get<{ tenants: Tenant[] }>('/api/admin/tenants')
+      const list = res.data.tenants || []
+      setTenants(list)
+      setInviteEmailByTenant((prev) => {
+        const next = { ...prev }
+        for (const t of list) {
+          next[t.id] = t.allocated_email || t.owner_email || t.pending_invite_email || ''
+        }
+        return next
+      })
       setError(null)
     } catch (e: unknown) {
       const err = e as { response?: { status?: number; data?: { detail?: string } } }
@@ -502,7 +542,8 @@ export default function AdminPage() {
                   className={inputClass}
                 />
                 <p className="mt-1 text-xs text-zinc-500">
-                  Real inbox only (not @example.com). Must match the email used to sign in — including Google OAuth.
+                  One email per business — must match sign-in (including Google). Assigning a new email removes the
+                  previous owner&apos;s dashboard access.
                 </p>
               </div>
               <button
@@ -541,6 +582,27 @@ export default function AdminPage() {
                       <div>
                         <span className="font-medium text-zinc-100">{t.name}</span>
                         <span className="ml-2 text-sm text-zinc-500">({t.client_id})</span>
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                          <span className="text-zinc-500">Dashboard email:</span>
+                          {t.allocated_email ? (
+                            <span className="font-medium text-zinc-100">{t.allocated_email}</span>
+                          ) : (
+                            <span className="italic text-zinc-600">None assigned</span>
+                          )}
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs font-medium ${accessStatusClass(t.access_status)}`}
+                          >
+                            {accessStatusLabel(t.access_status)}
+                          </span>
+                        </div>
+                        {t.access_status === 'active_pending_mismatch' &&
+                          t.owner_email &&
+                          t.pending_invite_email && (
+                            <p className="mt-1 text-xs text-orange-200/90">
+                              Signed in as {t.owner_email}; pending invite for {t.pending_invite_email}. Resend
+                              invite to replace owner.
+                            </p>
+                          )}
                         <div className="mt-1 flex flex-wrap items-center gap-3">
                           <span className="text-sm text-zinc-400">{t.twilio_phone_number}</span>
                           <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-300">{t.plan}</span>
@@ -593,7 +655,7 @@ export default function AdminPage() {
                         <div className="mt-3 flex max-w-xl flex-wrap items-end gap-2">
                           <div className="min-w-[200px] flex-1">
                             <label className="mb-1 block text-xs font-medium text-zinc-500">
-                              Client email (resend invite / link account)
+                              Client email (one per tenant — replaces prior owner)
                             </label>
                             <input
                               type="email"
