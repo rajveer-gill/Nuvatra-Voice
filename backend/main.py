@@ -3703,14 +3703,18 @@ async def admin_resend_invite(
 def _admin_tenant_with_access_email(tenant: dict) -> dict:
     """Attach dashboard owner / pending invite email for admin UI."""
     tid = str(tenant.get("id") or "")
-    pending = db_tenant_get_invite_email(tid) if tid else None
+    pending: Optional[str] = None
     owner_email: Optional[str] = None
-    members = db_tenant_get_members(tid) if tid else []
-    if members:
-        link = _clerk_fetch_user_link(members[0])
-        emails = (link or {}).get("emails") or []
-        if emails:
-            owner_email = str(emails[0]).strip()
+    try:
+        pending = db_tenant_get_invite_email(tid) if tid else None
+        members = db_tenant_get_members(tid) if tid else []
+        if members:
+            link = _clerk_fetch_user_link(members[0])
+            emails = (link or {}).get("emails") or []
+            if emails:
+                owner_email = str(emails[0]).strip()
+    except Exception as e:
+        print(f"[Admin] tenant access email lookup failed client_id={tenant.get('client_id')}: {e}")
     allocated = owner_email or pending
     if owner_email and pending and owner_email.lower() != pending.lower():
         access_status = "active_pending_mismatch"
@@ -3733,9 +3737,28 @@ def _admin_tenant_with_access_email(tenant: dict) -> dict:
 async def admin_list_tenants(_: str = Depends(require_admin)):
     """List all tenants. Requires admin auth."""
     if not USE_DB:
-        return {"tenants": []}
-    tenants = db_tenant_list_all()
-    return {"tenants": [_admin_tenant_with_access_email(t) for t in tenants]}
+        return {"tenants": [], "db_enabled": False}
+    try:
+        tenants = db_tenant_list_all()
+    except Exception as e:
+        print(f"[Admin] db_tenant_list_all failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load tenants from database") from e
+    enriched: List[dict] = []
+    for t in tenants:
+        try:
+            enriched.append(_admin_tenant_with_access_email(t))
+        except Exception as e:
+            print(f"[Admin] enrich tenant {t.get('client_id')} failed: {e}")
+            enriched.append(
+                {
+                    **t,
+                    "owner_email": None,
+                    "pending_invite_email": None,
+                    "allocated_email": None,
+                    "access_status": "none",
+                }
+            )
+    return {"tenants": enriched, "db_enabled": True}
 
 @app.patch("/api/admin/tenants/{tenant_id}/twilio-phone")
 async def admin_update_tenant_twilio_phone(

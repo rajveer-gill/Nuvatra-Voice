@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -156,6 +156,7 @@ export default function AdminPage() {
   const router = useRouter()
   const { isLoaded, isSignedIn } = useAuth()
   const api = useApiClient()
+  const adminApi = useMemo(() => sameOriginApiConfig(), [])
   const reduceMotion = useReducedMotion()
   const [adminAllowed, setAdminAllowed] = useState<boolean | null>(null)
   const [tenants, setTenants] = useState<Tenant[]>([])
@@ -198,7 +199,10 @@ export default function AdminPage() {
 
   const fetchTenants = useCallback(async () => {
     try {
-      const res = await api.get<{ tenants: Tenant[] }>('/api/admin/tenants')
+      const res = await api.get<{ tenants: Tenant[]; db_enabled?: boolean }>(
+        '/api/admin/tenants',
+        adminApi
+      )
       const list = res.data.tenants || []
       setTenants(list)
       setInviteEmailByTenant((prev) => {
@@ -208,26 +212,41 @@ export default function AdminPage() {
         }
         return next
       })
-      setError(null)
+      if (res.data.db_enabled === false) {
+        setError('Backend database is not connected (DATABASE_URL). Tenants cannot be listed.')
+      } else if (list.length === 0) {
+        setError(null)
+      } else {
+        setError(null)
+      }
     } catch (e: unknown) {
-      const err = e as { response?: { status?: number; data?: { detail?: string } } }
+      const err = e as {
+        response?: { status?: number; data?: { detail?: string } }
+        message?: string
+      }
+      setTenants([])
       if (err.response?.status === 403) {
         setError('Admin access required. Add your Clerk user ID to ADMIN_CLERK_USER_IDS on the backend.')
       } else if (err.response?.status === 401) {
         setError('Please sign in.')
       } else {
-        setError(err.response?.data?.detail || 'Failed to load tenants')
+        const detail = err.response?.data?.detail
+        setError(
+          detail ||
+            err.message ||
+            'Failed to load tenants. Check the browser Network tab for /api/admin/tenants.'
+        )
       }
     } finally {
       setLoading(false)
     }
-  }, [api])
+  }, [api, adminApi])
 
   const verifyAdminSession = useCallback(async () => {
     setSessionError(null)
     setAdminAllowed(null)
     try {
-      const res = await api.get<{ is_admin: boolean }>('/api/admin/session', sameOriginApiConfig())
+      const res = await api.get<{ is_admin: boolean }>('/api/admin/session', adminApi)
       if (res.data.is_admin) {
         setAdminAllowed(true)
       } else {
@@ -238,7 +257,7 @@ export default function AdminPage() {
       setSessionError('Could not verify admin access. Check your connection and try again.')
       setAdminAllowed(false)
     }
-  }, [api, router])
+  }, [api, router, adminApi])
 
   useEffect(() => {
     if (!isLoaded || !isSignedIn) return
@@ -266,7 +285,11 @@ export default function AdminPage() {
     setSuccess(null)
     setError(null)
     try {
-      const { data } = await api.post<InviteLinkResult>('/api/admin/tenants', { ...form, plan: 'free' })
+      const { data } = await api.post<InviteLinkResult>(
+        '/api/admin/tenants',
+        { ...form, plan: 'free' },
+        adminApi
+      )
       if (data.user_relinked) {
         setSuccess(`Tenant "${form.name}" created. ${formatRelinkSuccessMessage(data)}`)
       } else if (data.invite_sent) {
@@ -304,13 +327,13 @@ export default function AdminPage() {
     setSuccess(null)
     try {
       if (action === 'extend_trial_1') {
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_trial_months: 1 })
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_trial_months: 1 }, adminApi)
         setSuccess('Trial extended by 1 month.')
       } else if (action === 'free_1') {
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 1 })
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 1 }, adminApi)
         setSuccess('1 month billing exemption set.')
       } else if (action === 'free_3') {
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 3 })
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 3 }, adminApi)
         setSuccess('3 months billing exemption set.')
       } else if (action === 'exempt_until') {
         const date = exemptUntilDate[tenantId]
@@ -319,7 +342,7 @@ export default function AdminPage() {
           setExempting(null)
           return
         }
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { exempt_until: date })
+        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { exempt_until: date }, adminApi)
         setSuccess(`Exempt until ${date} set.`)
         setExemptUntilDate((d) => ({ ...d, [tenantId]: '' }))
       }
@@ -339,7 +362,7 @@ export default function AdminPage() {
     setError(null)
     setSuccess(null)
     try {
-      await api.delete(`/api/admin/tenants/${tenant.id}`)
+      await api.delete(`/api/admin/tenants/${tenant.id}`, adminApi)
       setSuccess(`Tenant "${tenant.name}" removed.`)
       fetchTenants()
     } catch (e: unknown) {
@@ -362,7 +385,8 @@ export default function AdminPage() {
     try {
       const { data } = await api.post<InviteLinkResult & { pending_invite_stored?: boolean }>(
         `/api/admin/tenants/${tenantId}/resend-invite`,
-        { email }
+        { email },
+        adminApi
       )
       if (data.user_relinked) {
         setSuccess(formatRelinkSuccessMessage(data))
@@ -392,7 +416,11 @@ export default function AdminPage() {
     setError(null)
     setSuccess(null)
     try {
-      await api.patch(`/api/admin/tenants/${tenantId}/twilio-phone`, { twilio_phone_number: phone })
+      await api.patch(
+        `/api/admin/tenants/${tenantId}/twilio-phone`,
+        { twilio_phone_number: phone },
+        adminApi
+      )
       setSuccess('Twilio number saved. Inbound SMS/voice will match this number.')
       await fetchTenants()
     } catch (e: unknown) {
