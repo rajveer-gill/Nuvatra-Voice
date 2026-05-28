@@ -132,6 +132,8 @@ Logs go to **stderr** with format `LEVEL|nuvatra|message`. Tune verbosity withou
 | **`OBS_VERBOSE=1`** | Extra **DEBUG** lines: slot availability, booking parser context, inbound SMS thread context. Does not log full SMS bodies at INFO (lengths only where relevant). |
 | **`OBS_TRACE_WEBHOOKS=1`** | **INFO** line for each **`/api/phone/*`** and **`/api/sms/*`** request: method, path, HTTP status, latency ms, **`X-Request-ID`**. Use this to match Twilio webhook delivery to your service in Render logs. |
 | **`OBS_TRACE_SMS=1`** | **INFO** lines for each inbound SMS pipeline step on **`/api/sms/incoming`**: signature mode, tenant resolution, compliance keywords, staff commands, usage snapshot, session/history, OpenAI request/result (lengths and **`finish_reason`** only), outbound send result, DB persist, lead capture and **`after_inquiry`** automations. Pair with **`OBS_TRACE_WEBHOOKS`** to correlate **`request_id`**. Remove after debugging. |
+| **`ADMIN_ACCESS_DEBUG=1`** | **INFO** lines for admin invite/relink (`[ADMIN_ACCESS]`). Also returns `access_debug` on resend-invite responses. Pair with admin UI **Access debug** / **Look up email**. |
+| **`NEXT_PUBLIC_DEBUG_ADMIN=1`** | Vercel: log admin access-debug JSON in the browser console. |
 | **`SETTINGS_LOAD_DEBUG=1`** | **INFO** lines for Settings dashboard loads: **`GET /api/business-info`**, **`/api/subscription`**, **`/api/sms-automations`**, **`/api/setup-status`** — response **keys** and **types** for `services` / `specials` / `reservation_rules` / `staff` (no PII). Remove after debugging. |
 
 Front-end: **`NEXT_PUBLIC_DEBUG_SETTINGS=1`** logs which of those requests failed in the **browser console** (status / message only, no token).

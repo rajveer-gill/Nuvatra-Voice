@@ -49,8 +49,15 @@ export default function DashboardPage() {
     user_id?: string
     clerk_emails?: string[]
     db_tenant_client_id?: string | null
+    db_tenant_name?: string | null
+    db_tenant_id?: string | null
+    jwt_metadata_tenant_id?: string | null
+    clerk_api_tenant_id?: string | null
     has_tenant_membership?: boolean
     is_admin?: boolean
+    db_memberships?: Array<{ tenant_id: string; client_id: string; name: string }>
+    pending_invite_for_primary_email?: string | null
+    diagnosis?: { issues?: string[]; recommended_action?: string }
   } | null>(null)
   const [subscription, setSubscription] = useState<SubscriptionState | null>(null)
   const [setupStatus, setSetupStatus] = useState<SetupStatusSnapshot | null>(null)
@@ -188,27 +195,32 @@ export default function DashboardPage() {
     return () => { cancelled = true }
   }, [api, router, applySubscriptionError])
 
+  const fetchAccessDebug = useCallback(() => {
+    return api.get('/api/me/access', sameOriginApiConfig()).then((res) => {
+      setAccessDebug(res.data)
+      if (process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1') {
+        console.info('[dashboard-access-debug]', res.data)
+      }
+      return res.data
+    })
+  }, [api])
+
   useEffect(() => {
     if (access !== 'denied' || deniedKind !== 'no_membership') return
     let cancelled = false
-    api
-      .get<{
-        user_id?: string
-        clerk_emails?: string[]
-        db_tenant_client_id?: string | null
-        has_tenant_membership?: boolean
-        is_admin?: boolean
-      }>('/api/me/access', sameOriginApiConfig())
-      .then((res) => {
-        if (!cancelled) setAccessDebug(res.data)
-      })
-      .catch(() => {
-        if (!cancelled) setAccessDebug(null)
-      })
+    fetchAccessDebug().catch(() => {
+      if (!cancelled) setAccessDebug(null)
+    })
     return () => {
       cancelled = true
     }
-  }, [access, deniedKind, api])
+  }, [access, deniedKind, fetchAccessDebug])
+
+  useEffect(() => {
+    if (access !== 'granted' && access !== 'subscription_required') return
+    if (process.env.NEXT_PUBLIC_DEBUG_SETTINGS !== '1') return
+    void fetchAccessDebug()
+  }, [access, fetchAccessDebug])
 
   useEffect(() => {
     if (access !== 'granted' && access !== 'subscription_required') return
@@ -319,10 +331,28 @@ export default function DashboardPage() {
                     Tenant linked in database:{' '}
                     <span className={accessDebug.has_tenant_membership ? 'text-emerald-400' : 'text-amber-300'}>
                       {accessDebug.has_tenant_membership
-                        ? accessDebug.db_tenant_client_id || 'yes'
+                        ? `${accessDebug.db_tenant_client_id || 'yes'}${accessDebug.db_tenant_name ? ` (${accessDebug.db_tenant_name})` : ''}`
                         : 'none — admin must invite one of the emails above'}
                     </span>
                   </p>
+                  {accessDebug.db_memberships && accessDebug.db_memberships.length > 1 && (
+                    <p className="mt-2 text-amber-300">
+                      Multiple memberships:{' '}
+                      {accessDebug.db_memberships.map((m) => m.client_id).join(', ')}
+                    </p>
+                  )}
+                  {accessDebug.diagnosis?.issues && accessDebug.diagnosis.issues.length > 0 && (
+                    <p className="mt-2 text-orange-200">
+                      Issues: {accessDebug.diagnosis.issues.join(', ')}. Action:{' '}
+                      {accessDebug.diagnosis.recommended_action}
+                    </p>
+                  )}
+                  {(accessDebug.jwt_metadata_tenant_id || accessDebug.clerk_api_tenant_id) && (
+                    <p className="mt-2 font-mono text-[11px] text-zinc-500">
+                      JWT tenant: {accessDebug.jwt_metadata_tenant_id || '—'} · Clerk API:{' '}
+                      {accessDebug.clerk_api_tenant_id || '—'} · DB: {accessDebug.db_tenant_id || '—'}
+                    </p>
+                  )}
                   {accessDebug.is_admin && (
                     <p className="mt-2 text-cyan-300">
                       This account is a platform admin. Use <Link href="/admin" className="underline">/admin</Link> instead

@@ -722,6 +722,58 @@ def db_tenant_all_member_clerk_ids() -> List[str]:
         return []
 
 
+def db_tenant_invite_peek(email: str) -> Optional[str]:
+    """Pending invite tenant_id for an email (does not consume the row)."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    em = _normalize_invite_email(email)
+    if not em:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT tenant_id::text FROM tenant_invites WHERE email = %s LIMIT 1", (em,))
+        row = cur.fetchone()
+        cur.close()
+        return str(row[0]) if row and row[0] else None
+    except Exception as e:
+        print(f"[DB] Failed to peek tenant invite: {e}")
+        return None
+
+
+def db_tenant_memberships_for_user(clerk_user_id: str) -> List[dict]:
+    """All tenant memberships for a Clerk user (normally 0 or 1)."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT t.id::text, t.client_id, t.name, m.created_at
+            FROM tenant_members m
+            JOIN tenants t ON t.id = m.tenant_id
+            WHERE m.clerk_user_id = %s
+            ORDER BY m.created_at DESC NULLS LAST
+            """,
+            (clerk_user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "tenant_id": str(r[0]),
+                "client_id": r[1],
+                "name": r[2],
+                "member_since": r[3].isoformat() if r[3] and hasattr(r[3], "isoformat") else None,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"[DB] Failed to list memberships for user: {e}")
+        return []
+
+
 def db_tenant_get_invite_email(tenant_id: str) -> Optional[str]:
     """Pending invite email for this tenant (at most one per tenant)."""
     conn = _get_conn()

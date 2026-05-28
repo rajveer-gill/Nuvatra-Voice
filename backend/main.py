@@ -153,6 +153,18 @@ def _settings_load_debug_enabled() -> bool:
     return os.getenv("SETTINGS_LOAD_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
+def _admin_access_debug_enabled() -> bool:
+    """ADMIN_ACCESS_DEBUG=1 — INFO logs for invite/relink; extra fields on admin debug API responses."""
+    return os.getenv("ADMIN_ACCESS_DEBUG", "").strip().lower() in ("1", "true", "yes")
+
+
+def _admin_access_log(event: str, **fields) -> None:
+    if not _admin_access_debug_enabled():
+        return
+    parts = [f"{k}={v!r}" for k, v in fields.items() if v is not None]
+    print(f"[ADMIN_ACCESS] {event} " + " ".join(parts))
+
+
 def _greeting_debug_enabled() -> bool:
     """GREETING_DEBUG=1 or SETTINGS_LOAD_DEBUG=1 — logs greeting resolution on calls and Settings saves."""
     return _settings_load_debug_enabled() or os.getenv("GREETING_DEBUG", "").strip().lower() in (
@@ -540,6 +552,9 @@ try:
         db_tenant_get_members,
         db_tenant_all_member_clerk_ids,
         db_tenant_get_invite_email,
+        db_tenant_invite_peek,
+        db_tenant_memberships_for_user,
+        _normalize_invite_email,
         db_tenant_member_assign_owner,
         db_tenant_member_remove,
         db_tenant_member_set_single,
@@ -3661,7 +3676,7 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
         except Exception as e:
             clerk_error = str(e)[:240]
             print(f"[Admin] Clerk invite error: {e}")
-    return {
+    result = {
         "invite_sent": invite_sent,
         "user_relinked": user_relinked,
         "pending_invite_stored": True,
@@ -3670,6 +3685,19 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
         "linked_clerk_user_ids": linked_clerk_user_ids,
         "clerk_users_matched_count": clerk_users_matched_count,
     }
+    _admin_access_log(
+        "link_email_to_tenant",
+        tenant_id=tenant_id,
+        email=email,
+        invite_sent=invite_sent,
+        user_relinked=user_relinked,
+        linked_ids=linked_clerk_user_ids,
+        clerk_users_matched_count=clerk_users_matched_count,
+        clerk_error=(clerk_error or "")[:120] if clerk_error else None,
+    )
+    if _admin_access_debug_enabled():
+        result["access_debug"] = _admin_tenant_access_debug_snapshot(tenant_id)
+    return result
 
 
 def _extend_trial_through_exempt(tenant_id: str, exempt_until: datetime) -> None:
@@ -3715,6 +3743,150 @@ async def admin_session(request: Request):
     return {"is_admin": user_id in admin_ids}
 
 
+def _membership_diagnosis(
+    user_id: str,
+    jwt_tid: Optional[str],
+    link: Optional[dict],
+    tenant: Optional[dict],
+    memberships: List[dict],
+) -> dict:
+    """Explain likely dashboard routing for support (no secrets)."""
+    clerk_tid = (link or {}).get("tenant_id")
+    db_tid = str((tenant or {}).get("id") or "")
+    issues: List[str] = []
+    if len(memberships) > 1:
+        issues.append("multiple_db_memberships")
+    if not memberships:
+        issues.append("no_db_membership")
+    if jwt_tid and db_tid and str(jwt_tid) != db_tid:
+        issues.append("jwt_metadata_tenant_id_differs_from_db")
+    if clerk_tid and db_tid and str(clerk_tid) != db_tid:
+        issues.append("clerk_metadata_tenant_id_differs_from_db")
+    if memberships and tenant and len(memberships) == 1:
+        only = memberships[0]
+        if only.get("tenant_id") != db_tid:
+            issues.append("resolved_tenant_not_newest_membership")
+    recommended = "ok"
+    if "no_db_membership" in issues:
+        recommended = "admin_resend_invite_exact_sign_in_email"
+    elif issues:
+        recommended = "sign_out_all_devices_then_sign_in_again"
+    return {"issues": issues, "recommended_action": recommended}
+
+
+def _admin_tenant_access_debug_snapshot(tenant_id: str) -> dict:
+    """Admin-only: how dashboard access is wired for one tenant."""
+    tenant = db_tenant_get_by_id(tenant_id) if USE_DB else None
+    if not tenant:
+        return {"found": False, "tenant_id": tenant_id}
+    tid = str(tenant.get("id") or "")
+    pending_invite = db_tenant_get_invite_email(tid) if USE_DB else None
+    member_ids = db_tenant_get_members(tid) if USE_DB else []
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    headers = (
+        {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+        if clerk_secret
+        else None
+    )
+    members_debug: List[dict] = []
+    for uid in member_ids:
+        link = _clerk_fetch_user_link(uid) if headers else None
+        memberships = db_tenant_memberships_for_user(uid) if USE_DB else []
+        members_debug.append(
+            {
+                "clerk_user_id": uid,
+                "clerk_emails": (link or {}).get("emails") or [],
+                "clerk_metadata_tenant_id": (link or {}).get("tenant_id"),
+                "all_db_memberships": memberships,
+            }
+        )
+    clerk_api_ids: List[str] = []
+    lookup_source = None
+    if pending_invite and headers:
+        clerk_api_ids = _clerk_user_ids_from_api(pending_invite, headers)
+        lookup_source = "clerk_api" if clerk_api_ids else None
+    if pending_invite and headers and not clerk_api_ids:
+        clerk_api_ids = _clerk_user_ids_from_tenant_members(pending_invite, headers)
+        lookup_source = "tenant_members_scan" if clerk_api_ids else lookup_source
+    return {
+        "found": True,
+        "tenant_id": tid,
+        "client_id": tenant.get("client_id"),
+        "name": tenant.get("name"),
+        "twilio_phone_number": tenant.get("twilio_phone_number"),
+        "pending_invite_email": pending_invite,
+        "member_clerk_user_ids": member_ids,
+        "members": members_debug,
+        "clerk_lookup_for_pending_email": {
+            "email": pending_invite,
+            "user_ids": clerk_api_ids,
+            "source": lookup_source,
+        },
+        "one_email_per_tenant": True,
+    }
+
+
+def _admin_resolve_email_debug(email: str) -> dict:
+    """Admin-only: where an email appears across invites, Clerk, and memberships."""
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return {"error": "valid_email_required"}
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    headers = (
+        {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+        if clerk_secret
+        else None
+    )
+    invite_tid = db_tenant_invite_peek(email) if USE_DB else None
+    invite_tenant = db_tenant_get_by_id(invite_tid) if invite_tid and USE_DB else None
+    api_ids = _clerk_user_ids_from_api(email, headers) if headers else []
+    member_ids = _clerk_user_ids_from_tenant_members(email, headers) if headers else []
+    all_ids = list(dict.fromkeys(api_ids + member_ids))
+    users: List[dict] = []
+    for uid in all_ids:
+        link = _clerk_fetch_user_link(uid) if headers else None
+        users.append(
+            {
+                "clerk_user_id": uid,
+                "clerk_emails": (link or {}).get("emails") or [],
+                "clerk_metadata_tenant_id": (link or {}).get("tenant_id"),
+                "db_memberships": db_tenant_memberships_for_user(uid) if USE_DB else [],
+            }
+        )
+    tenants_by_client: List[dict] = []
+    if USE_DB:
+        for t in db_tenant_list_all():
+            tid = str(t.get("id") or "")
+            if db_tenant_get_invite_email(tid) == _normalize_invite_email(email):
+                tenants_by_client.append(
+                    {"tenant_id": tid, "client_id": t.get("client_id"), "role": "pending_invite_on_tenant"}
+                )
+            for uid in db_tenant_get_members(tid):
+                link = _clerk_fetch_user_link(uid) if headers else None
+                for em in (link or {}).get("emails") or []:
+                    if (em or "").strip().lower() == email.strip().lower():
+                        tenants_by_client.append(
+                            {
+                                "tenant_id": tid,
+                                "client_id": t.get("client_id"),
+                                "role": "active_member",
+                                "clerk_user_id": uid,
+                            }
+                        )
+    return {
+        "email": email,
+        "pending_invite_tenant": (
+            {"tenant_id": invite_tid, "client_id": (invite_tenant or {}).get("client_id")}
+            if invite_tid
+            else None
+        ),
+        "clerk_user_ids_api": api_ids,
+        "clerk_user_ids_member_scan": member_ids,
+        "clerk_users": users,
+        "tenant_roles_for_email": tenants_by_client,
+    }
+
+
 @app.get("/api/me/access")
 async def me_access(request: Request):
     """
@@ -3731,7 +3903,11 @@ async def me_access(request: Request):
     _ensure_db_ready()
     tenant = db_tenant_get_for_user(user_id) if USE_DB else None
     link = _clerk_fetch_user_link(user_id) if USE_DB else None
+    memberships = db_tenant_memberships_for_user(user_id) if USE_DB else []
     admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+    primary_email = ((link or {}).get("emails") or [None])[0]
+    pending_invite_tid = db_tenant_invite_peek(primary_email) if USE_DB and primary_email else None
+    diagnosis = _membership_diagnosis(user_id, jwt_tid, link, tenant, memberships)
     return {
         "signed_in": True,
         "user_id": user_id,
@@ -3741,7 +3917,11 @@ async def me_access(request: Request):
         "clerk_emails": (link or {}).get("emails") or [],
         "db_tenant_client_id": (tenant or {}).get("client_id"),
         "db_tenant_id": (tenant or {}).get("id"),
+        "db_tenant_name": (tenant or {}).get("name"),
         "has_tenant_membership": tenant is not None,
+        "db_memberships": memberships,
+        "pending_invite_for_primary_email": pending_invite_tid,
+        "diagnosis": diagnosis,
     }
 
 @app.get("/api/debug/cors")
@@ -3861,6 +4041,23 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
                 }
             )
     return {"tenants": enriched, "db_enabled": True}
+
+
+@app.get("/api/admin/tenants/{tenant_id}/access-debug")
+async def admin_tenant_access_debug(tenant_id: str, _: str = Depends(require_admin)):
+    """Admin: full access wiring snapshot for one tenant (invite, DB member, Clerk metadata)."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    return _admin_tenant_access_debug_snapshot(tenant_id)
+
+
+@app.get("/api/admin/debug/resolve-email")
+async def admin_resolve_email_debug(email: str, _: str = Depends(require_admin)):
+    """Admin: find an email across pending invites, Clerk users, and tenant memberships."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    return _admin_resolve_email_debug(email)
+
 
 @app.patch("/api/admin/tenants/{tenant_id}/twilio-phone")
 async def admin_update_tenant_twilio_phone(

@@ -59,6 +59,14 @@ const inputClass =
 const selectClass =
   'rounded-lg border border-white/15 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/25'
 
+/** Logs invite/relink debug JSON in browser console when set on Vercel. */
+const DEBUG_ADMIN = process.env.NEXT_PUBLIC_DEBUG_ADMIN === '1'
+
+function debugLogAdmin(label: string, payload: unknown) {
+  if (!DEBUG_ADMIN) return
+  console.info(`[admin-debug] ${label}`, payload)
+}
+
 /** US A2P / Twilio numbers on this admin flow are NANP (+1). */
 const US_E164_PREFIX = '+1'
 
@@ -180,6 +188,12 @@ export default function AdminPage() {
   const [twilioSaving, setTwilioSaving] = useState<string | null>(null)
   const [inviteEmailByTenant, setInviteEmailByTenant] = useState<Record<string, string>>({})
   const [resendingInvite, setResendingInvite] = useState<string | null>(null)
+  const [accessDebugOpen, setAccessDebugOpen] = useState<Record<string, boolean>>({})
+  const [accessDebugData, setAccessDebugData] = useState<Record<string, unknown>>({})
+  const [accessDebugLoading, setAccessDebugLoading] = useState<string | null>(null)
+  const [emailLookup, setEmailLookup] = useState('')
+  const [emailLookupResult, setEmailLookupResult] = useState<unknown>(null)
+  const [emailLookupLoading, setEmailLookupLoading] = useState(false)
 
   const listContainer = {
     hidden: {},
@@ -373,6 +387,46 @@ export default function AdminPage() {
     }
   }
 
+  const loadTenantAccessDebug = async (tenantId: string) => {
+    setAccessDebugLoading(tenantId)
+    setError(null)
+    try {
+      const { data } = await api.get(`/api/admin/tenants/${tenantId}/access-debug`, adminApi)
+      setAccessDebugData((d) => ({ ...d, [tenantId]: data }))
+      setAccessDebugOpen((o) => ({ ...o, [tenantId]: true }))
+      debugLogAdmin(`tenant ${tenantId}`, data)
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setError(err.response?.data?.detail || 'Failed to load access debug')
+    } finally {
+      setAccessDebugLoading(null)
+    }
+  }
+
+  const resolveEmailLookup = async () => {
+    const email = emailLookup.trim()
+    if (!email.includes('@')) {
+      setError('Enter a valid email to look up.')
+      return
+    }
+    setEmailLookupLoading(true)
+    setError(null)
+    try {
+      const { data } = await api.get('/api/admin/debug/resolve-email', {
+        ...adminApi,
+        params: { email },
+      })
+      setEmailLookupResult(data)
+      debugLogAdmin('resolve-email', data)
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setError(err.response?.data?.detail || 'Email lookup failed')
+      setEmailLookupResult(null)
+    } finally {
+      setEmailLookupLoading(false)
+    }
+  }
+
   const handleResendInvite = async (tenantId: string) => {
     const email = (inviteEmailByTenant[tenantId] || '').trim()
     if (!email || !email.includes('@')) {
@@ -383,14 +437,18 @@ export default function AdminPage() {
     setError(null)
     setSuccess(null)
     try {
-      const { data } = await api.post<InviteLinkResult & { pending_invite_stored?: boolean }>(
-        `/api/admin/tenants/${tenantId}/resend-invite`,
-        { email },
-        adminApi
-      )
+      const { data } = await api.post<
+        InviteLinkResult & { pending_invite_stored?: boolean; access_debug?: unknown }
+      >(`/api/admin/tenants/${tenantId}/resend-invite`, { email }, adminApi)
+      debugLogAdmin('resend-invite', data)
+      if (data.access_debug) {
+        setAccessDebugData((d) => ({ ...d, [tenantId]: data.access_debug }))
+        setAccessDebugOpen((o) => ({ ...o, [tenantId]: true }))
+      }
       if (data.user_relinked) {
         setSuccess(formatRelinkSuccessMessage(data))
         await fetchTenants()
+        void loadTenantAccessDebug(tenantId)
       } else if (data.invite_sent) {
         setSuccess('Invitation email sent. Open that link from the inbox (same email you entered here).')
         await fetchTenants()
@@ -588,6 +646,46 @@ export default function AdminPage() {
 
           <section className="rounded-2xl border border-white/10 bg-zinc-900/70 p-6 shadow-xl backdrop-blur-md md:p-8">
             <h2 className="mb-4 font-display text-lg font-semibold text-white">Existing tenants</h2>
+            <div className="mb-6 rounded-xl border border-white/10 bg-zinc-950/60 p-4">
+              <p className="text-xs font-medium text-zinc-400">Access debug — look up an email</p>
+              <p className="mt-1 text-xs text-zinc-500">
+                Shows which tenant(s) and Clerk user(s) match an address. Set{' '}
+                <code className="text-zinc-400">ADMIN_ACCESS_DEBUG=1</code> on Render for extra server logs.
+                {DEBUG_ADMIN ? (
+                  <span className="text-cyan-400"> Browser console logging is on.</span>
+                ) : (
+                  <span>
+                    {' '}
+                    Set <code className="text-zinc-400">NEXT_PUBLIC_DEBUG_ADMIN=1</code> on Vercel for console
+                    output.
+                  </span>
+                )}
+              </p>
+              <div className="mt-3 flex flex-wrap items-end gap-2">
+                <div className="min-w-[200px] flex-1">
+                  <input
+                    type="email"
+                    value={emailLookup}
+                    onChange={(e) => setEmailLookup(e.target.value)}
+                    placeholder="coworker@company.com"
+                    className={inputClass}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void resolveEmailLookup()}
+                  disabled={emailLookupLoading}
+                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-zinc-200 hover:bg-white/10 disabled:opacity-50"
+                >
+                  {emailLookupLoading ? 'Looking up…' : 'Look up email'}
+                </button>
+              </div>
+              {emailLookupResult != null && (
+                <pre className="mt-3 max-h-48 overflow-auto rounded-lg border border-white/10 bg-black/40 p-3 text-left text-xs text-zinc-300">
+                  {JSON.stringify(emailLookupResult, null, 2)}
+                </pre>
+              )}
+            </div>
             {loading ? (
               <div className="flex justify-center py-12">
                 <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-400/30 border-t-cyan-400" />
@@ -705,7 +803,34 @@ export default function AdminPage() {
                           >
                             {resendingInvite === t.id ? 'Sending...' : 'Resend invite'}
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => void loadTenantAccessDebug(t.id)}
+                            disabled={accessDebugLoading === t.id}
+                            className="rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-zinc-300 hover:bg-white/10 disabled:opacity-50"
+                          >
+                            {accessDebugLoading === t.id ? 'Loading…' : 'Access debug'}
+                          </button>
                         </div>
+                        {accessDebugOpen[t.id] && accessDebugData[t.id] != null && (
+                          <div className="mt-3 max-w-2xl rounded-xl border border-amber-500/25 bg-amber-500/5 p-3">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <p className="text-xs font-medium text-amber-200/90">Access debug (JSON)</p>
+                              <button
+                                type="button"
+                                className="text-xs text-zinc-400 hover:text-zinc-200"
+                                onClick={() =>
+                                  setAccessDebugOpen((o) => ({ ...o, [t.id]: false }))
+                                }
+                              >
+                                Hide
+                              </button>
+                            </div>
+                            <pre className="max-h-56 overflow-auto text-left text-xs text-zinc-300">
+                              {JSON.stringify(accessDebugData[t.id], null, 2)}
+                            </pre>
+                          </div>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
 
