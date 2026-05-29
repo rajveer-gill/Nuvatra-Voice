@@ -272,3 +272,90 @@ export function summarizeSchedule(schedule: WeeklySchedule, maxLen = 96): string
   if (s.length <= maxLen) return s
   return `${s.slice(0, maxLen - 1)}…`
 }
+
+function timeToMinutes(hhmm: string): number {
+  const n = normalizeTime24(hhmm)
+  if (!n) return -1
+  const [h, m] = n.split(':').map((x) => parseInt(x, 10))
+  return h * 60 + m
+}
+
+function minutesToSlotTime(totalMinutes: number): string {
+  const h = Math.floor(totalMinutes / 60)
+  const m = totalMinutes % 60
+  return `${pad2(h)}:${pad2(m)}:00`
+}
+
+export interface CalendarSlotBounds {
+  slotMinTime: string
+  slotMaxTime: string
+  scrollTime: string
+}
+
+export function isScheduleOpen247(schedule: WeeklySchedule): boolean {
+  return (
+    schedule.length === 7 &&
+    schedule.every((d) => !d.closed && d.open === '00:00' && d.close === '23:59')
+  )
+}
+
+/** Map JS Date.getDay() (0=Sun) to schedule index (0=Mon). */
+export function jsDayToScheduleIndex(jsDay: number): DayIndex {
+  return (jsDay === 0 ? 6 : jsDay - 1) as DayIndex
+}
+
+const FULL_DAY_BOUNDS: CalendarSlotBounds = {
+  slotMinTime: '00:00:00',
+  slotMaxTime: '24:00:00',
+  scrollTime: '07:00:00',
+}
+
+function boundsFromOpenClose(open: string, close: string): CalendarSlotBounds | null {
+  const o = timeToMinutes(open)
+  const c = timeToMinutes(close)
+  if (o < 0 || c <= o) return null
+  return {
+    slotMinTime: minutesToSlotTime(o),
+    slotMaxTime: minutesToSlotTime(c),
+    scrollTime: minutesToSlotTime(o),
+  }
+}
+
+/** Union of open hours across all open days (week view). */
+export function calendarSlotBoundsForWeek(schedule: WeeklySchedule): CalendarSlotBounds {
+  if (isScheduleOpen247(schedule)) return FULL_DAY_BOUNDS
+
+  let minOpen = 24 * 60
+  let maxClose = 0
+  let anyOpen = false
+
+  for (const d of schedule) {
+    if (d.closed) continue
+    anyOpen = true
+    const o = timeToMinutes(d.open)
+    const c = timeToMinutes(d.close)
+    if (o >= 0) minOpen = Math.min(minOpen, o)
+    if (c >= 0) maxClose = Math.max(maxClose, c)
+  }
+
+  if (!anyOpen || minOpen >= maxClose) {
+    return boundsFromOpenClose(DEFAULT_OPEN, DEFAULT_CLOSE) ?? FULL_DAY_BOUNDS
+  }
+
+  return {
+    slotMinTime: minutesToSlotTime(minOpen),
+    slotMaxTime: minutesToSlotTime(maxClose),
+    scrollTime: minutesToSlotTime(minOpen),
+  }
+}
+
+/** Hours for a single day (day view). Closed days fall back to the week union. */
+export function calendarSlotBoundsForDay(
+  schedule: WeeklySchedule,
+  dayIndex: DayIndex
+): CalendarSlotBounds {
+  const d = schedule[dayIndex]
+  if (!d || d.closed) return calendarSlotBoundsForWeek(schedule)
+  if (d.open === '00:00' && d.close === '23:59') return FULL_DAY_BOUNDS
+  return boundsFromOpenClose(d.open, d.close) ?? calendarSlotBoundsForWeek(schedule)
+}

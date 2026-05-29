@@ -11,6 +11,15 @@ import interactionPlugin from '@fullcalendar/interaction'
 import type { EventClickArg, EventContentArg } from '@fullcalendar/core'
 import { AppointmentDetailModal } from '@/components/appointments/AppointmentDetailModal'
 import type { Appointment } from '@/components/appointments/types'
+import {
+  calendarSlotBoundsForDay,
+  calendarSlotBoundsForWeek,
+  defaultWeeklySchedule,
+  jsDayToScheduleIndex,
+  parseHoursToWeekly,
+  type CalendarSlotBounds,
+  type WeeklySchedule,
+} from '@/lib/businessHours'
 import './appointments/calendar-theme.css'
 
 const LEGEND = [
@@ -83,6 +92,19 @@ export default function AppointmentCalendar({
   const [loading, setLoading] = useState(true)
   const [selectedApt, setSelectedApt] = useState<Appointment | null>(null)
   const visibleRangeRef = useRef({ from: '', to: '' })
+  const hoursScheduleRef = useRef<WeeklySchedule>(defaultWeeklySchedule())
+  const [slotBounds, setSlotBounds] = useState<CalendarSlotBounds>(() =>
+    calendarSlotBoundsForWeek(defaultWeeklySchedule())
+  )
+
+  const applySlotBoundsForView = useCallback((viewType: string, rangeStart: Date) => {
+    const schedule = hoursScheduleRef.current
+    if (viewType === 'timeGridDay') {
+      setSlotBounds(calendarSlotBoundsForDay(schedule, jsDayToScheduleIndex(rangeStart.getDay())))
+    } else if (viewType === 'timeGridWeek') {
+      setSlotBounds(calendarSlotBoundsForWeek(schedule))
+    }
+  }, [])
 
   useEffect(() => {
     api.get('/api/business-info').then((r) => {
@@ -92,6 +114,9 @@ export default function AppointmentCalendar({
           .filter((s) => s.id && s.name)
           .map((s) => ({ id: s.id as string, name: s.name as string }))
       )
+      const { schedule } = parseHoursToWeekly((r.data?.hours as string) || '')
+      hoursScheduleRef.current = schedule
+      setSlotBounds(calendarSlotBoundsForWeek(schedule))
     })
   }, [api])
 
@@ -241,9 +266,9 @@ export default function AppointmentCalendar({
               week: 'Week',
               day: 'Day',
             }}
-            slotMinTime="00:00:00"
-            slotMaxTime="24:00:00"
-            scrollTime="07:00:00"
+            slotMinTime={slotBounds.slotMinTime}
+            slotMaxTime={slotBounds.slotMaxTime}
+            scrollTime={slotBounds.scrollTime}
             slotDuration="00:30:00"
             allDaySlot={false}
             nowIndicator
@@ -271,6 +296,7 @@ export default function AppointmentCalendar({
               endDay.setMilliseconds(endDay.getMilliseconds() - 1)
               const to = endDay.toISOString().slice(0, 10)
               visibleRangeRef.current = { from, to }
+              applySlotBoundsForView(arg.view.type, arg.start)
               load(from, to)
             }}
           />
