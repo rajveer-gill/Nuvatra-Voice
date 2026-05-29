@@ -2189,6 +2189,13 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
     time_display = _hhmm_to_ampm(apt.get("time") or "") or (apt.get("time") or "")
     service = (apt.get("reason") or "").strip() or "—"
     status = (apt.get("status") or "").strip()
+    customer = (apt.get("name") or "").strip()
+    stylist = _staff_display_name_for_appointment(apt)
+    if customer:
+        customer_line = f"Customer: {customer}"
+    else:
+        customer_line = "Customer: Not on file yet — reply with your name if we should update it."
+    stylist_line = f"Stylist: {stylist}\n" if stylist else ""
     if status == "pending_customer":
         intro = (
             "Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:"
@@ -2202,7 +2209,8 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
         footer = "Reply if anything still needs to change.\n\n"
     return (
         f"Hey! {intro}\n"
-        f"Name: {apt.get('name', '')}\n"
+        f"{customer_line}\n"
+        f"{stylist_line}"
         f"Phone: {phone_display}\n"
         f"Date: {apt.get('date', '')}\n"
         f"Time: {time_display}\n"
@@ -2569,6 +2577,66 @@ def resolve_staff_id_from_booking_fragment(fragment: Optional[str]) -> Optional[
     return None
 
 
+def _staff_name_set(info: Optional[dict] = None) -> set[str]:
+    biz = info or get_business_info()
+    return {
+        (s.get("name") or "").strip().lower()
+        for s in (biz.get("staff") or [])
+        if (s.get("name") or "").strip()
+    }
+
+
+def _caller_memory_name_usable(mem_name: str, staff_names: set[str]) -> bool:
+    n = (mem_name or "").strip()
+    if len(n) < 2:
+        return False
+    low = n.lower()
+    if low in staff_names or low in ("there", "caller", "customer", "guest"):
+        return False
+    return True
+
+
+def _apply_booking_customer_name(
+    booking: dict,
+    *,
+    caller_memory: Optional[dict] = None,
+    info: Optional[dict] = None,
+) -> None:
+    """Ensure BOOKING field 1 is the caller's name, not a stylist from the roster."""
+    biz = info or get_business_info()
+    staff_names = _staff_name_set(biz)
+    name = (booking.get("name") or "").strip()
+    staff_frag = (booking.get("staff") or "").strip()
+    mem_name = ((caller_memory or {}).get("name") or "").strip()
+    mem_ok = _caller_memory_name_usable(mem_name, staff_names)
+
+    if name and staff_names and name.lower() in staff_names:
+        booking["name"] = mem_name if mem_ok else ""
+        return
+
+    if (
+        name
+        and staff_frag
+        and name.lower() == staff_frag.lower()
+        and staff_frag.lower() in staff_names
+    ):
+        booking["name"] = mem_name if mem_ok else ""
+        return
+
+    if not name and mem_ok:
+        booking["name"] = mem_name
+
+
+def _staff_display_name_for_appointment(apt: dict, info: Optional[dict] = None) -> str:
+    sid = (apt.get("staff_id") or "").strip()
+    if not sid:
+        return ""
+    for s in (info or get_business_info()).get("staff") or []:
+        if (s.get("id") or "").strip() == sid:
+            return (s.get("name") or "").strip()
+    return ""
+
+
 def _normalize_service_choice_for_booking(reason_raw: Optional[str], info: Optional[dict] = None) -> tuple[Optional[str], bool]:
     """Return (canonical_service_name_or_none, service_required)."""
     biz = info or get_business_info()
@@ -2630,6 +2698,7 @@ def _create_appointment_from_booking(
     booking: dict,
     client_id_override: Optional[str] = None,
     reserve_slot_immediately: bool = True,
+    caller_memory: Optional[dict] = None,
 ) -> Optional[dict]:
     """Create appointment from parsed BOOKING; check slot; return appointment_data or None (slot taken).
     Pass client_id_override from voice flow so appointment is stored under correct tenant (async task may not have context).
@@ -2638,6 +2707,7 @@ def _create_appointment_from_booking(
     date = (booking.get("date") or "").strip()
     time_raw = (booking.get("time") or "").strip()
     time = _normalize_time_to_hhmm(time_raw) or time_raw  # e.g. "10" -> "10:00"
+    _apply_booking_customer_name(booking, caller_memory=caller_memory)
     name = (booking.get("name") or "").strip()
     if not name or not date or not time:
         return None
@@ -2838,7 +2908,10 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         if canonical_service:
                             booking["reason"] = canonical_service
                         apt = _create_appointment_from_booking(
-                            booking, client_id_override=cid, reserve_slot_immediately=False
+                            booking,
+                            client_id_override=cid,
+                            reserve_slot_immediately=False,
+                            caller_memory=call_data.get("caller_memory"),
                         )
                     if apt:
                         call_data["appointment_created"] = True
@@ -2932,7 +3005,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                             try:
                                 update_caller_memory(
                                     fn_mem,
-                                    name=(booking.get("name") or "").strip() or None,
+                                    name=(apt.get("name") or "").strip() or None,
                                     last_reason="appointment details texted (pending SMS confirmation)",
                                     increment_count=False,
                                     data_patch=dp if dp else None,
@@ -6470,10 +6543,13 @@ async def handle_incoming_sms(request: Request):
                 + "\n".join(lines)
             )
         elif apt:
+            stylist = _staff_display_name_for_appointment(apt)
+            stylist_txt = f", stylist: {stylist}" if stylist else ""
             apt_info = (
                 f"The customer has one active appointment: {apt.get('date','')} at "
                 f"{_hhmm_to_ampm(apt.get('time','') or '')}, status {apt.get('status','')}, "
-                f"service: {apt.get('reason','')}, name on file: {apt.get('name','')}."
+                f"service: {apt.get('reason','')}, customer name on file: {apt.get('name','')}"
+                f"{stylist_txt}."
             )
         else:
             apt_info = "The customer has no active appointments in the system."

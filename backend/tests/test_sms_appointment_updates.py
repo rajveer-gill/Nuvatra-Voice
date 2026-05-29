@@ -129,6 +129,7 @@ def test_format_appointment_details_confirmation_sms():
         }
     )
     assert "Raj" in msg
+    assert "Customer: Raj" in msg
     assert "2:00 PM" in msg
     assert "YES or CONFIRM" in msg
     assert "Email:" not in msg

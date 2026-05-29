@@ -24,6 +24,7 @@ def test_prompt_contains_booking_token_format(minimal_business):
     )
     assert "BOOKING:" in p
     assert "name|phone|email|date|time|reason" in p
+    assert "NEVER a stylist" in p or "Never put a stylist name in field 1" in p
     assert "Do NOT ask for email" in p
 
 

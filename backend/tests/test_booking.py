@@ -1,6 +1,12 @@
 """Unit tests for parse_booking and booking requirement guards."""
 import pytest
-from main import _strip_booking_directive_for_voice, _validate_booking_requirements, parse_booking
+from main import (
+    _apply_booking_customer_name,
+    _format_appointment_details_confirmation_sms,
+    _strip_booking_directive_for_voice,
+    _validate_booking_requirements,
+    parse_booking,
+)
 
 
 def test_parse_booking_valid():
@@ -122,3 +128,44 @@ def test_validate_booking_normalizes_service_name(monkeypatch):
     assert msg is None
     assert staff_id == "s1"
     assert service == "Haircut"
+
+
+def test_apply_booking_customer_name_replaces_stylist_with_memory(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {"staff": [{"id": "s1", "name": "Tom"}]},
+    )
+    booking = {"name": "Tom", "staff": "Tom"}
+    _apply_booking_customer_name(booking, caller_memory={"name": "Sarah"})
+    assert booking["name"] == "Sarah"
+
+
+def test_apply_booking_customer_name_clears_stylist_without_memory(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {"staff": [{"id": "s1", "name": "Tom"}]},
+    )
+    booking = {"name": "Tom", "staff": "Tom"}
+    _apply_booking_customer_name(booking, caller_memory=None)
+    assert booking["name"] == ""
+
+
+def test_format_confirmation_sms_shows_customer_and_stylist(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {"staff": [{"id": "s1", "name": "Tom"}]},
+    )
+    msg = _format_appointment_details_confirmation_sms(
+        {
+            "name": "Sarah",
+            "phone": "+15551234567",
+            "date": "2026-05-29",
+            "time": "14:00",
+            "reason": "Short Cut",
+            "status": "pending_customer",
+            "staff_id": "s1",
+        }
+    )
+    assert "Customer: Sarah" in msg
+    assert "Stylist: Tom" in msg
+    assert "Name:" not in msg
