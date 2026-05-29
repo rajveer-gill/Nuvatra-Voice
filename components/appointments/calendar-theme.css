@@ -90,6 +90,11 @@
   opacity: 0.45;
 }
 
+.appointment-calendar .fc-timegrid-event,
+.appointment-calendar .fc-daygrid-event {
+  cursor: pointer;
+}
+
 .appointment-calendar .fc-timegrid-event {
   border-radius: 0.5rem;
   border: none;

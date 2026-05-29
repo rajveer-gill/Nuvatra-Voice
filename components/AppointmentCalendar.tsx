@@ -1,14 +1,16 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AxiosInstance } from 'axios'
-import { motion, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { CalendarDays, Filter, Loader2 } from 'lucide-react'
 import FullCalendar from '@fullcalendar/react'
 import dayGridPlugin from '@fullcalendar/daygrid'
 import timeGridPlugin from '@fullcalendar/timegrid'
 import interactionPlugin from '@fullcalendar/interaction'
-import type { EventContentArg } from '@fullcalendar/core'
+import type { EventClickArg, EventContentArg } from '@fullcalendar/core'
+import { AppointmentDetailModal } from '@/components/appointments/AppointmentDetailModal'
+import type { Appointment } from '@/components/appointments/types'
 import './appointments/calendar-theme.css'
 
 const LEGEND = [
@@ -43,14 +45,44 @@ function addMinutesToIsoLocal(isoStart: string, minutes: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
-export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
+type CalendarEvent = {
+  id: string
+  title: string
+  start: string
+  end: string
+  backgroundColor?: string
+  borderColor?: string
+  extendedProps: { appointment: Appointment }
+}
+
+export default function AppointmentCalendar({
+  api,
+  staffNameById = {},
+  updatingId = null,
+  acceptRejectMsg = null,
+  onAccept,
+  onDecline,
+  onCancel,
+  onActionComplete,
+  refreshSignal = 0,
+}: {
+  api: AxiosInstance
+  staffNameById?: Record<string, string>
+  updatingId?: number | null
+  acceptRejectMsg?: { id: number; msg: string; ok?: boolean } | null
+  onAccept: (id: number) => Promise<void>
+  onDecline: (id: number) => void
+  onCancel: (id: number) => void
+  onActionComplete?: () => void
+  refreshSignal?: number
+}) {
   const reduceMotion = useReducedMotion()
-  const [events, setEvents] = useState<
-    { id: string; title: string; start: string; end: string; backgroundColor?: string; borderColor?: string }[]
-  >([])
+  const [events, setEvents] = useState<CalendarEvent[]>([])
   const [staffList, setStaffList] = useState<{ id: string; name: string }[]>([])
   const [staffFilter, setStaffFilter] = useState('')
   const [loading, setLoading] = useState(true)
+  const [selectedApt, setSelectedApt] = useState<Appointment | null>(null)
+  const visibleRangeRef = useRef({ from: '', to: '' })
 
   useEffect(() => {
     api.get('/api/business-info').then((r) => {
@@ -71,15 +103,7 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
       api
         .get('/api/appointments/calendar', { params })
         .then((r) => {
-          const list = (r.data?.events || []) as {
-            id: number
-            name: string
-            reason?: string
-            date: string
-            time?: string
-            status: string
-            duration_minutes?: number
-          }[]
+          const list = (r.data?.events || []) as (Appointment & { duration_minutes?: number })[]
           setEvents(
             list.map((a) => {
               const raw = (a.time || '09:00').trim()
@@ -89,6 +113,20 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
               const subtitle = reason && reason !== '—' ? reason : 'Booking'
               const duration = Math.max(5, Math.min(Number(a.duration_minutes) || 30, 480))
               const start = `${a.date}T${t}`
+              const appointment: Appointment = {
+                id: a.id,
+                name: a.name,
+                email: a.email || '',
+                phone: a.phone || '',
+                date: a.date,
+                time: a.time || t,
+                reason: a.reason || '',
+                status: a.status,
+                created_at: a.created_at || '',
+                source: a.source,
+                staff_id: a.staff_id,
+                owner_decline_reason: a.owner_decline_reason,
+              }
               return {
                 id: String(a.id),
                 title: `${a.name} — ${subtitle}`,
@@ -96,6 +134,7 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
                 end: addMinutesToIsoLocal(start, duration),
                 backgroundColor: color,
                 borderColor: color,
+                extendedProps: { appointment },
               }
             })
           )
@@ -104,6 +143,46 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
         .finally(() => setLoading(false))
     },
     [api, staffFilter]
+  )
+
+  const reloadVisibleRange = useCallback(() => {
+    const { from, to } = visibleRangeRef.current
+    if (from && to) load(from, to)
+  }, [load])
+
+  const handleEventClick = useCallback((arg: EventClickArg) => {
+    const apt = arg.event.extendedProps?.appointment as Appointment | undefined
+    if (apt?.id) setSelectedApt(apt)
+  }, [])
+
+  useEffect(() => {
+    if (refreshSignal > 0) reloadVisibleRange()
+  }, [refreshSignal, reloadVisibleRange])
+
+  const handleAccept = useCallback(
+    async (id: number) => {
+      await onAccept(id)
+      setSelectedApt(null)
+      reloadVisibleRange()
+      onActionComplete?.()
+    },
+    [onAccept, onActionComplete, reloadVisibleRange]
+  )
+
+  const handleDecline = useCallback(
+    (id: number) => {
+      setSelectedApt(null)
+      onDecline(id)
+    },
+    [onDecline]
+  )
+
+  const handleCancel = useCallback(
+    (id: number) => {
+      setSelectedApt(null)
+      onCancel(id)
+    },
+    [onCancel]
   )
 
   return (
@@ -173,6 +252,7 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
             stickyHeaderDates
             dayMaxEvents={4}
             events={events}
+            eventClick={handleEventClick}
             eventContent={(arg) => <EventContent arg={arg} />}
             eventClassNames={() => ['appointment-cal-event']}
             slotLabelFormat={{
@@ -190,6 +270,7 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
               const endDay = new Date(arg.end)
               endDay.setMilliseconds(endDay.getMilliseconds() - 1)
               const to = endDay.toISOString().slice(0, 10)
+              visibleRangeRef.current = { from, to }
               load(from, to)
             }}
           />
@@ -210,6 +291,23 @@ export default function AppointmentCalendar({ api }: { api: AxiosInstance }) {
           </span>
         ))}
       </div>
+
+      <AnimatePresence>
+        {selectedApt ? (
+          <AppointmentDetailModal
+            key={selectedApt.id}
+            apt={selectedApt}
+            staffLabel={(selectedApt.staff_id && staffNameById[selectedApt.staff_id]) || ''}
+            reduceMotion={!!reduceMotion}
+            updatingId={updatingId}
+            acceptRejectMsg={acceptRejectMsg}
+            onClose={() => setSelectedApt(null)}
+            onAccept={handleAccept}
+            onDecline={handleDecline}
+            onCancel={handleCancel}
+          />
+        ) : null}
+      </AnimatePresence>
     </motion.div>
   )
 }

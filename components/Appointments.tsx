@@ -58,6 +58,7 @@ export default function Appointments() {
     env_client_id_appointment_count?: number | null
   } | null>(null)
   const [twilioPhone, setTwilioPhone] = useState<string | null>(null)
+  const [calendarRefresh, setCalendarRefresh] = useState(0)
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -80,6 +81,7 @@ export default function Appointments() {
       console.error('Failed to fetch appointments', e)
     } finally {
       setLoading(false)
+      setCalendarRefresh((n) => n + 1)
     }
   }, [api])
 
@@ -362,7 +364,25 @@ export default function Appointments() {
         )}
 
         {view === 'calendar' ? (
-          <AppointmentCalendar api={api} />
+          <AppointmentCalendar
+            api={api}
+            staffNameById={staffNameById}
+            updatingId={updatingId}
+            acceptRejectMsg={acceptRejectMsg}
+            onAccept={handleAccept}
+            onDecline={(id) => {
+              setOwnerActionModal({ id, kind: 'reject' })
+              setOwnerActionReason('')
+              setDeclinePreview(null)
+            }}
+            onCancel={(id) => {
+              setOwnerActionModal({ id, kind: 'cancel' })
+              setOwnerActionReason('')
+              setDeclinePreview(null)
+            }}
+            refreshSignal={calendarRefresh}
+            onActionComplete={() => void fetchAppointments()}
+          />
         ) : (
           <>
             <div className="mb-4 flex flex-wrap gap-3 rounded-2xl border border-white/10 bg-zinc-950/40 p-4">
