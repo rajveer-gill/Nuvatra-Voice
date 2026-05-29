@@ -23,7 +23,8 @@
   --fc-highlight-color: rgba(99, 102, 241, 0.15);
   --fc-non-business-color: rgba(0, 0, 0, 0.15);
 
-  --fc-small-font-size: 0.8rem;
+  --fc-small-font-size: 0.875rem;
+  --cal-slot-min-height: 3.5rem;
 }
 
 .appointment-calendar .fc {
@@ -31,11 +32,25 @@
   color: #e4e4e7;
 }
 
+.appointment-calendar .fc-toolbar {
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem !important;
+}
+
+.appointment-calendar .fc-toolbar-chunk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .appointment-calendar .fc-toolbar-title {
-  font-size: 1.125rem;
+  font-size: 1.35rem;
   font-weight: 700;
   color: #fafafa;
   letter-spacing: -0.02em;
+  padding: 0.25rem 0;
 }
 
 .appointment-calendar .fc-col-header-cell-cushion,
@@ -46,12 +61,30 @@
   font-weight: 500;
 }
 
+.appointment-calendar .fc-col-header-cell-cushion {
+  padding: 0.85rem 0.35rem;
+  font-size: 0.875rem;
+}
+
 .appointment-calendar .fc-col-header-cell {
   background: rgba(24, 24, 27, 0.85);
 }
 
 .appointment-calendar .fc-timegrid-slot-label {
   vertical-align: top;
+}
+
+.appointment-calendar .fc-timegrid-slot-label-cushion {
+  padding: 0 0.85rem;
+  font-size: 0.8125rem;
+}
+
+.appointment-calendar .fc-timegrid-slot {
+  height: var(--cal-slot-min-height);
+}
+
+.appointment-calendar .fc-timegrid-axis {
+  width: 4.25rem;
 }
 
 .appointment-calendar .fc-scrollgrid {
@@ -68,8 +101,8 @@
 .appointment-calendar .fc-button {
   border-radius: 0.625rem;
   font-weight: 600;
-  font-size: 0.8125rem;
-  padding: 0.35rem 0.75rem;
+  font-size: 0.875rem;
+  padding: 0.5rem 0.9rem;
   text-transform: capitalize;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
   transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
@@ -96,12 +129,13 @@
 }
 
 .appointment-calendar .fc-timegrid-event {
-  border-radius: 0.5rem;
+  border-radius: 0.625rem;
   border: none;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-  padding: 2px 6px;
-  font-size: 0.75rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  padding: 4px 8px;
+  font-size: 0.8125rem;
   font-weight: 600;
+  min-height: 2.25rem;
 }
 
 .appointment-calendar .fc-daygrid-event {

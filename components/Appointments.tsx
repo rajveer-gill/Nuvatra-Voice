@@ -199,7 +199,7 @@ export default function Appointments() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-5xl space-y-4 p-2">
+      <div className="mx-auto w-full max-w-6xl space-y-4 p-2">
         {[0, 1, 2].map((i) => (
           <motion.div
             key={i}
@@ -214,7 +214,11 @@ export default function Appointments() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 text-zinc-100">
+    <div
+      className={`mx-auto w-full space-y-6 text-zinc-100 ${
+        view === 'calendar' ? 'max-w-6xl' : 'max-w-5xl'
+      }`}
+    >
       <motion.div
         initial={reduceMotion ? false : { opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
@@ -295,7 +299,11 @@ export default function Appointments() {
           variants={staggerContainer}
           initial="hidden"
           animate="visible"
-          className="relative mb-6 grid grid-cols-3 gap-3"
+          className={`relative mb-6 ${
+            view === 'calendar'
+              ? 'grid grid-cols-1 gap-3 sm:grid-cols-3'
+              : 'grid grid-cols-3 gap-3'
+          }`}
         >
           {[
             { label: 'Total', value: stats.total, icon: Inbox, color: 'from-zinc-600 to-zinc-700' },
@@ -323,11 +331,21 @@ export default function Appointments() {
                   transition: { delay: idx * 0.08 },
                 }),
               }}
-              className={`rounded-2xl border border-white/10 bg-gradient-to-br ${s.color} p-4 shadow-lg`}
+              className={`rounded-2xl border border-white/10 bg-gradient-to-br ${s.color} shadow-lg ${
+                view === 'calendar'
+                  ? 'flex items-center gap-4 px-5 py-3.5'
+                  : 'p-4'
+              }`}
             >
-              <s.icon className="mb-2 h-5 w-5 text-white/90" />
-              <p className="text-2xl font-bold text-white">{s.value}</p>
-              <p className="text-xs font-medium text-white/80">{s.label}</p>
+              <s.icon
+                className={`shrink-0 text-white/90 ${view === 'calendar' ? 'h-8 w-8' : 'mb-2 h-5 w-5'}`}
+              />
+              <div className={view === 'calendar' ? 'min-w-0' : undefined}>
+                <p className={`font-bold text-white ${view === 'calendar' ? 'text-2xl leading-none' : 'text-2xl'}`}>
+                  {s.value}
+                </p>
+                <p className="text-xs font-medium text-white/80 sm:text-sm">{s.label}</p>
+              </div>
             </motion.div>
           ))}
         </motion.div>

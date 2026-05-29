@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AxiosInstance } from 'axios'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { CalendarDays, Filter, Loader2 } from 'lucide-react'
@@ -12,6 +12,7 @@ import type { EventClickArg, EventContentArg } from '@fullcalendar/core'
 import { AppointmentDetailModal } from '@/components/appointments/AppointmentDetailModal'
 import type { Appointment } from '@/components/appointments/types'
 import {
+  calendarHeightFromSlotBounds,
   calendarSlotBoundsForDay,
   calendarSlotBoundsForWeek,
   defaultWeeklySchedule,
@@ -39,9 +40,9 @@ function EventContent({ arg }: { arg: EventContentArg }) {
   const time = arg.timeText
   const title = arg.event.title
   return (
-    <div className="flex h-full flex-col justify-center overflow-hidden px-0.5 py-0.5 leading-tight">
-      {time ? <span className="text-[10px] font-bold opacity-90">{time}</span> : null}
-      <span className="truncate text-[11px] font-semibold">{title}</span>
+    <div className="flex h-full min-h-[2.25rem] flex-col justify-center overflow-hidden px-1.5 py-1 leading-snug">
+      {time ? <span className="text-[11px] font-bold opacity-90">{time}</span> : null}
+      <span className="truncate text-xs font-semibold">{title}</span>
     </div>
   )
 }
@@ -96,6 +97,7 @@ export default function AppointmentCalendar({
   const [slotBounds, setSlotBounds] = useState<CalendarSlotBounds>(() =>
     calendarSlotBoundsForWeek(defaultWeeklySchedule())
   )
+  const calendarHeight = useMemo(() => calendarHeightFromSlotBounds(slotBounds), [slotBounds])
 
   const applySlotBoundsForView = useCallback((viewType: string, rangeStart: Date) => {
     const schedule = hoursScheduleRef.current
@@ -215,12 +217,12 @@ export default function AppointmentCalendar({
       initial={reduceMotion ? false : { opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-      className="appointment-calendar space-y-4"
+      className="appointment-calendar space-y-5"
     >
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div className="flex items-center gap-2 text-zinc-300">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-2.5 text-zinc-300">
           <CalendarDays className="h-5 w-5 text-cyan-400" />
-          <span className="text-sm font-semibold text-white">Schedule view</span>
+          <span className="text-base font-semibold text-white">Schedule</span>
           {loading && <Loader2 className="h-4 w-4 animate-spin text-cyan-400" aria-label="Loading" />}
         </div>
         {staffList.length > 1 ? (
@@ -246,12 +248,12 @@ export default function AppointmentCalendar({
         ) : null}
       </div>
 
-      <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80 p-3 shadow-inner shadow-black/20 sm:p-4">
+      <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80 p-4 shadow-inner shadow-black/20 sm:p-5">
         <div
           className="pointer-events-none absolute inset-0 bg-gradient-to-br from-cyan-500/5 via-transparent to-indigo-600/5"
           aria-hidden
         />
-        <div className="relative [&_.fc]:min-h-[32rem]">
+        <div className="relative appointment-calendar-grid">
           <FullCalendar
             plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
             initialView="timeGridWeek"
@@ -272,9 +274,9 @@ export default function AppointmentCalendar({
             slotDuration="00:30:00"
             allDaySlot={false}
             nowIndicator
-            height="auto"
-            expandRows
+            height={calendarHeight}
             stickyHeaderDates
+            dayHeaderFormat={{ weekday: 'short', month: 'numeric', day: 'numeric' }}
             dayMaxEvents={4}
             events={events}
             eventClick={handleEventClick}

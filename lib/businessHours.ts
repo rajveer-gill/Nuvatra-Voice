@@ -359,3 +359,22 @@ export function calendarSlotBoundsForDay(
   if (d.open === '00:00' && d.close === '23:59') return FULL_DAY_BOUNDS
   return boundsFromOpenClose(d.open, d.close) ?? calendarSlotBoundsForWeek(schedule)
 }
+
+const SLOT_TIME_RE = /^(\d{1,2}):(\d{2})/
+
+function slotTimeToMinutes(slotTime: string): number {
+  const m = slotTime.match(SLOT_TIME_RE)
+  if (!m) return 0
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10)
+}
+
+/** Pixel height for FullCalendar time-grid (30-min slots, toolbar + headers). */
+export function calendarHeightFromSlotBounds(bounds: CalendarSlotBounds): number {
+  const min = slotTimeToMinutes(bounds.slotMinTime)
+  let max = slotTimeToMinutes(bounds.slotMaxTime)
+  if (max <= min) max = min + 8 * 60
+  const halfHourSlots = Math.max(2, Math.ceil((max - min) / 30))
+  const slotPx = 56
+  const chromePx = 148
+  return Math.min(960, Math.max(440, halfHourSlots * slotPx + chromePx))
+}
