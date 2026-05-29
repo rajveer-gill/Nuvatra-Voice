@@ -232,7 +232,7 @@ _openai_pre_warm_disabled = False
 
 
 async def pre_warm_openai():
-    """Pre-warm OpenAI client. Greeting/got-it audio are generated per-client on first call (uses selected voice)."""
+    """Pre-warm OpenAI client. Greeting/got-it clips are pre-generated on settings save and incoming calls."""
     global _openai_pre_warm_disabled
     if _openai_pre_warm_disabled:
         return
@@ -410,9 +410,7 @@ if os.getenv("DEBUG_CORS", "").strip() == "1":
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
 
-# Per-client cache for greeting (key (client_id, recording_on) -> bytes) and got-it (client_id -> bytes).
-greeting_audio_cache: dict = {}
-got_it_audio_cache: dict = {}
+GOT_IT_PHRASE = "Got it, one moment."
 
 # Lazy OpenAI client — created on first use so import doesn't block port binding
 _openai_client = None
@@ -1038,17 +1036,96 @@ def get_tts_speed() -> float:
         return 1.0
 
 def invalidate_voice_cache(client_id: Optional[str] = None) -> None:
-    """Clear per-client greeting/got-it audio cache when voice, speed, greeting, or name changes."""
-    global greeting_audio_cache, got_it_audio_cache
+    """Clear greeting/got-it audio cache when voice, speed, greeting, name, or receptionist changes."""
+    from voice.tts_cache import invalidate_client
+
     if client_id:
-        prefix = (client_id,)
-        for key in list(greeting_audio_cache.keys()):
-            if isinstance(key, tuple) and key and key[0] == client_id:
-                greeting_audio_cache.pop(key, None)
-        got_it_audio_cache.pop(client_id, None)
+        invalidate_client(PROJECT_ROOT, client_id)
     else:
-        greeting_audio_cache.clear()
-        got_it_audio_cache.clear()
+        for d in (PROJECT_ROOT / "clients").glob("*/voice_cache"):
+            if d.is_dir():
+                for p in d.glob("*.mp3"):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+        from voice.tts_cache import clear_all_memory
+
+        clear_all_memory()
+
+
+def _got_it_cache_key(client_id: str) -> tuple:
+    info = get_business_info()
+    try:
+        speed_key = round(float(info.get("speed", 1.0)), 2)
+    except (TypeError, ValueError):
+        speed_key = 1.0
+    return (
+        client_id,
+        GOT_IT_PHRASE,
+        (get_tts_voice() or "fable").strip(),
+        speed_key,
+    )
+
+
+def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
+    _ensure_openai_client()
+    resp = client.audio.speech.create(
+        model="tts-1-hd",
+        voice=voice,
+        input=add_sentence_pauses(text),
+        speed=max(0.25, min(4.0, float(speed))),
+    )
+    return resp.content
+
+
+def warm_client_voice_cache(client_id: str) -> None:
+    """Pre-generate greeting + got-it clips for a tenant (call after settings save or on cache miss)."""
+    from voice.tts_cache import get_cached, put_cached
+
+    cid = (client_id or "").strip()
+    if not cid or cid == "default":
+        return
+    set_request_client_id(cid)
+    try:
+        greeting_key = _greeting_audio_cache_key(cid)
+        if not get_cached(PROJECT_ROOT, "greeting", greeting_key):
+            info = get_business_info()
+            tenant = _tenant_for_call_recording()
+            payload = build_phone_greeting_payload(info, tenant)
+            voice = (payload.get("voice") or get_tts_voice() or "fable").strip()
+            speed = get_tts_speed()
+            data = _synthesize_tts_clip(payload["spoken_text"], voice=voice, speed=speed)
+            put_cached(PROJECT_ROOT, "greeting", greeting_key, data)
+            voice_info(
+                "greeting_audio_prewarmed",
+                client_id_prefix=cid[:12],
+                voice=voice,
+                bytes=len(data),
+            )
+        got_it_key = _got_it_cache_key(cid)
+        if not get_cached(PROJECT_ROOT, "got_it", got_it_key):
+            voice = got_it_key[2]
+            speed = got_it_key[3]
+            data = _synthesize_tts_clip(GOT_IT_PHRASE, voice=voice, speed=speed)
+            put_cached(PROJECT_ROOT, "got_it", got_it_key, data)
+            voice_info(
+                "got_it_audio_prewarmed",
+                client_id_prefix=cid[:12],
+                voice=voice,
+                bytes=len(data),
+            )
+    except Exception as e:
+        voice_warning(
+            "voice_cache_prewarm_failed",
+            client_id_prefix=cid[:12],
+            error_type=type(e).__name__,
+        )
+        logger.warning("warm_client_voice_cache failed client_id=%s: %s", cid, e, exc_info=True)
+
+
+async def _warm_client_voice_cache_async(client_id: str) -> None:
+    await asyncio.to_thread(warm_client_voice_cache, client_id)
 
 def _format_greeting_template(raw: str, info: dict) -> str:
     """Substitute {business_name} and {receptionist_name} in custom greeting text."""
@@ -5573,8 +5650,10 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
             if trow and trow.get("plan"):
                 plan = trow.get("plan") or plan
         data = _default_client_config_data(cid, plan)
+    voice_affecting = False
     if update.name is not None:
         data["business_name"] = update.name
+        voice_affecting = True
     if update.hours is not None:
         data["hours"] = update.hours
     if update.phone is not None:
@@ -5606,16 +5685,16 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         data["menu_link"] = update.menu_link
     if update.greeting is not None:
         data["greeting"] = update.greeting
-        invalidate_voice_cache(cid)
+        voice_affecting = True
     if update.voice is not None:
         data["voice"] = update.voice
-        invalidate_voice_cache(cid)
+        voice_affecting = True
     if update.speed is not None:
         data["speed"] = update.speed
-        invalidate_voice_cache(cid)
+        voice_affecting = True
     if update.receptionist_name is not None:
         data["receptionist_name"] = update.receptionist_name
-        invalidate_voice_cache(cid)
+        voice_affecting = True
     if update.business_type is not None:
         if not (USE_DB and tid and tid.get("business_vertical")):
             data["business_type"] = update.business_type
@@ -5658,6 +5737,9 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
                 raise HTTPException(status_code=403, detail=msg) from e
             raise HTTPException(status_code=400, detail=msg) from e
     save_raw_client_config(cid, data)
+    if voice_affecting:
+        invalidate_voice_cache(cid)
+        asyncio.create_task(_warm_client_voice_cache_async(cid))
     if _greeting_debug_enabled():
         voice_info(
             "greeting_settings_saved",
@@ -5997,13 +6079,14 @@ def _greeting_audio_cache_key(client_id: str) -> tuple:
 
 @app.get("/api/phone/greeting-audio")
 async def get_greeting_audio(request: Request):
-    """Serve greeting audio using the voice selected in Settings. Per-client cache."""
-    global greeting_audio_cache
+    """Serve greeting audio using the voice selected in Settings. Cached on disk + in memory."""
+    from voice.tts_cache import get_cached, put_cached
+
     client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
     call_sid = request.query_params.get("call_sid") or ""
     cache_key = _greeting_audio_cache_key(client_id)
-    cached = greeting_audio_cache.get(cache_key)
+    cached = get_cached(PROJECT_ROOT, "greeting", cache_key)
     info = get_business_info()
     tenant = _tenant_for_call_recording()
     preview_payload = build_phone_greeting_payload(info, tenant)
@@ -6014,22 +6097,15 @@ async def get_greeting_audio(request: Request):
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "inline; filename=greeting.mp3",
-                "Cache-Control": "public, max-age=3600",
-                "Content-Length": str(len(cached))
-            }
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(cached)),
+            },
         )
     try:
         voice = get_tts_voice()
-        greeting_text = add_sentence_pauses(preview_payload["spoken_text"])
         _log_greeting_debug("greeting_audio_generating", preview_payload, call_sid=call_sid, cache_hit=False)
-        greeting_audio = client.audio.speech.create(
-            model="tts-1-hd",
-            voice=voice,
-            input=greeting_text,
-            speed=get_tts_speed()
-        )
-        data = greeting_audio.content
-        greeting_audio_cache[cache_key] = data
+        data = _synthesize_tts_clip(preview_payload["spoken_text"], voice=voice, speed=get_tts_speed())
+        put_cached(PROJECT_ROOT, "greeting", cache_key, data)
         voice_info(
             "greeting_audio_generated",
             client_id_prefix=(client_id or "")[:12],
@@ -6042,23 +6118,17 @@ async def get_greeting_audio(request: Request):
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "inline; filename=greeting.mp3",
-                "Cache-Control": "public, max-age=3600",
-                "Content-Length": str(len(data))
-            }
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(data)),
+            },
         )
     except Exception as e:
         print(f"❌ Failed to generate greeting audio: {e}")
         import traceback
         traceback.print_exc()
         try:
-            fallback_audio = client.audio.speech.create(
-                model="tts-1-hd",
-                voice="fable",
-                input=add_sentence_pauses(TTS_FALLBACK_TEXT),
-                speed=1.0,
-            )
-            data = fallback_audio.content
-            greeting_audio_cache[cache_key] = data
+            data = _synthesize_tts_clip(TTS_FALLBACK_TEXT, voice="fable", speed=1.0)
+            put_cached(PROJECT_ROOT, "greeting", cache_key, data)
             return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
         except Exception as e2:
             print(f"❌ Fallback greeting audio failed: {e2}")
@@ -6066,55 +6136,50 @@ async def get_greeting_audio(request: Request):
 
 @app.get("/api/phone/got-it-audio")
 async def get_got_it_audio(request: Request):
-    """Serve 'Got it, one moment' audio using the voice selected in Settings. Per-client cache."""
-    global got_it_audio_cache
+    """Serve 'Got it, one moment' using the receptionist voice. Cached on disk + in memory."""
+    from voice.tts_cache import get_cached, put_cached
+
     client_id = _get_client_id_from_call(request)
     set_request_client_id(client_id)
-    cached = got_it_audio_cache.get(client_id)
+    cache_key = _got_it_cache_key(client_id)
+    cached = get_cached(PROJECT_ROOT, "got_it", cache_key)
     if cached:
         return Response(
             content=cached,
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "inline; filename=got-it.mp3",
-                "Cache-Control": "public, max-age=3600",
-                "Content-Length": str(len(cached))
-            }
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(cached)),
+            },
         )
     try:
-        voice = get_tts_voice()
-        got_it_text = "Got it, one moment."
-        got_it_audio = client.audio.speech.create(
-            model="tts-1-hd",
+        voice = cache_key[2]
+        speed = cache_key[3]
+        data = _synthesize_tts_clip(GOT_IT_PHRASE, voice=voice, speed=speed)
+        put_cached(PROJECT_ROOT, "got_it", cache_key, data)
+        voice_info(
+            "got_it_audio_generated",
+            client_id_prefix=(client_id or "")[:12],
             voice=voice,
-            input=add_sentence_pauses(got_it_text),
-            speed=get_tts_speed()
+            bytes=len(data),
         )
-        data = got_it_audio.content
-        got_it_audio_cache[client_id] = data
-        print(f"🎵 'Got it' audio generated for {client_id} (voice={voice})")
         return Response(
             content=data,
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "inline; filename=got-it.mp3",
-                "Cache-Control": "public, max-age=3600",
-                "Content-Length": str(len(data))
-            }
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(data)),
+            },
         )
     except Exception as e:
         print(f"❌ Failed to generate 'got it' audio: {e}")
         import traceback
         traceback.print_exc()
         try:
-            fallback_audio = client.audio.speech.create(
-                model="tts-1-hd",
-                voice="fable",
-                input=add_sentence_pauses(TTS_FALLBACK_TEXT),
-                speed=1.0,
-            )
-            data = fallback_audio.content
-            got_it_audio_cache[client_id] = data
+            data = _synthesize_tts_clip(TTS_FALLBACK_TEXT, voice="fable", speed=1.0)
+            put_cached(PROJECT_ROOT, "got_it", cache_key, data)
             return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
         except Exception as e2:
             print(f"❌ Fallback 'got it' audio failed: {e2}")
@@ -6885,6 +6950,8 @@ async def handle_incoming_call(request: Request):
             "started_at": datetime.now().isoformat(),
             "caller_memory": caller_memory,
         }
+        if client_id and client_id != "default":
+            asyncio.create_task(_warm_client_voice_cache_async(client_id))
         
         base_url = _twilio_base_url(request)
         if not base_url:
