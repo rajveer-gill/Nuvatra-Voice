@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Literal, Optional
 from urllib.parse import quote
@@ -110,30 +111,38 @@ async def apply_caller_utterance(
         is_first_input = previous_lang is None
 
         if m.uses_non_latin_script(current_detected_lang) and (is_first_input or confidence_float < 0.5):
-            voice_info(
-                "utterance_non_latin_record_path",
-                call_sid=call_sid,
-                lang=current_detected_lang,
-                is_first_input=is_first_input,
-                confidence=confidence_float,
-            )
-            call_data["detected_language"] = current_detected_lang
-            record_twiml = m.VoiceResponse()
-            prompt_text = (
-                f"I detected you're speaking in {current_detected_lang}. "
-                "For better accuracy, please speak again and press pound when done."
-            )
-            prompt_encoded = quote(prompt_text)
-            tts_url = f"{base_url}/api/phone/tts-audio?text={prompt_encoded}&voice={m.get_tts_voice()}"
-            record_twiml.play(tts_url)
-            record_twiml.record(
-                action=f"{base_url}/api/phone/process-recording",
-                method="POST",
-                max_length=15,
-                finish_on_key="#",
-                recording_status_callback=f"{base_url}/api/phone/recording-status",
-            )
-            return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(record_twiml))
+            if m._text_looks_latin(speech_result):
+                current_detected_lang = "English"
+                call_data["detected_language"] = "English"
+            else:
+                voice_info(
+                    "utterance_non_latin_record_path",
+                    call_sid=call_sid,
+                    lang=current_detected_lang,
+                    is_first_input=is_first_input,
+                    confidence=confidence_float,
+                )
+                call_data["detected_language"] = current_detected_lang
+                record_twiml = m.VoiceResponse()
+                prompt_text = (
+                    f"I detected you're speaking in {current_detected_lang}. "
+                    "For better accuracy, please speak again and press pound when done."
+                )
+                prompt_encoded = quote(prompt_text)
+                tts_url = f"{base_url}/api/phone/tts-audio?text={prompt_encoded}&voice={m.get_tts_voice()}"
+                record_twiml.play(tts_url)
+                record_twiml.record(
+                    action=f"{base_url}/api/phone/process-recording",
+                    method="POST",
+                    max_length=15,
+                    finish_on_key="#",
+                    recording_status_callback=f"{base_url}/api/phone/recording-status",
+                )
+                return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(record_twiml))
+
+        if m._text_looks_latin(speech_result):
+            current_detected_lang = "English"
+            call_data["detected_language"] = "English"
 
         if m.uses_non_latin_script(current_detected_lang):
             voice_debug(
@@ -158,6 +167,7 @@ async def apply_caller_utterance(
 
         user_message = {"role": "user", "content": speech_result}
         call_data["conversation_history"].append(user_message)
+        call_data["last_utterance_at"] = time.time()
 
         if m.should_forward_to_human(
             speech_result,

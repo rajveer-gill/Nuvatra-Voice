@@ -3306,6 +3306,27 @@ Respond with just the language name, nothing else."""
     # Default to English if detection fails
     return "English"
 
+
+def _text_looks_latin(text: str) -> bool:
+    """True when transcript is mostly basic Latin letters (English booking phrases, names, etc.)."""
+    letters = [c for c in (text or "") if c.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for c in letters if ord(c) < 128)
+    return latin / len(letters) >= 0.85
+
+
+def _conversation_prefers_english_stt(call_data: dict) -> bool:
+    """Use Deepgram/Gather English path when recent caller speech is Latin script."""
+    lang = (call_data.get("detected_language") or "English").strip()
+    if lang == "English" or not uses_non_latin_script(lang):
+        return True
+    for msg in reversed(call_data.get("conversation_history") or []):
+        if msg.get("role") == "user":
+            return _text_looks_latin(str(msg.get("content") or ""))
+    return False
+
+
 def get_system_prompt(
     detected_language: str = "English",
     caller_memory: Optional[dict] = None,
@@ -7303,6 +7324,31 @@ async def handle_no_speech(request: Request):
         detected_lang = call_data.get("detected_language", "English")
         forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
 
+        # Race: caller spoke (Deepgram REST update) while TwiML still had a queued no-speech redirect.
+        if call_sid and call_sid in response_status:
+            st = (response_status.get(call_sid) or {}).get("status") or "pending"
+            voice_respond_branch(
+                "no_speech_skipped_active_turn",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                status=st,
+            )
+            response = VoiceResponse()
+            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            return Response(content=str(response), media_type="application/xml")
+
+        last_utterance = float(call_data.get("last_utterance_at") or 0)
+        if last_utterance and (time.time() - last_utterance) < 45:
+            voice_respond_branch(
+                "no_speech_skipped_recent_utterance",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                status="recent_speech",
+            )
+            response = VoiceResponse()
+            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            return Response(content=str(response), media_type="application/xml")
+
         if forwarding_phone:
             voice_forward(
                 "no_speech_timeout",
@@ -7397,21 +7443,20 @@ async def respond_with_audio(request: Request):
                     # After playing, set up next input gathering
                     detected_lang = call_data.get("detected_language", "English")
                     twilio_lang_code = get_twilio_language_code(detected_lang)
-                    
-                    # For non-Latin scripts, use Record + Whisper (unchanged; not Twilio Gather STT)
-                    if uses_non_latin_script(detected_lang):
-                        record = response.record(
+                    still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
+
+                    if uses_non_latin_script(detected_lang) and not _conversation_prefers_english_stt(call_data):
+                        response.record(
                             action=f"{base_url}/api/phone/process-recording",
-                            method='POST',
-                            max_length=10,
-                            finish_on_key='#',
-                            recording_status_callback=f"{base_url}/api/phone/recording-status"
+                            method="POST",
+                            max_length=15,
+                            finish_on_key="#",
+                            recording_status_callback=f"{base_url}/api/phone/recording-status",
                         )
-                        response.say("Please speak now, then press pound when done.", language='en-US')
+                        response.say("Please speak now, then press pound when done.", language="en-US")
                     else:
                         from voice.twiml_stt import append_post_ai_listen_with_still_there
 
-                        still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
                         append_post_ai_listen_with_still_there(
                             response,
                             call_sid=call_sid,
@@ -7421,31 +7466,6 @@ async def respond_with_audio(request: Request):
                             use_deepgram=_voice_stt_use_deepgram(),
                             call_state=active_calls.get(call_sid, {}),
                         )
-
-                    if uses_non_latin_script(detected_lang):
-                        still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
-                        response.play(still_there_url)
-                        if _voice_stt_use_deepgram():
-                            from voice.twiml_stt import append_connect_stream, next_media_stream_generation
-
-                            call_state = active_calls.get(call_sid, {})
-                            gen = next_media_stream_generation(call_state)
-                            append_connect_stream(
-                                response,
-                                call_sid=call_sid,
-                                base_url=base_url,
-                                stream_generation=gen,
-                            )
-                        else:
-                            response.gather(
-                                input="speech",
-                                action=f"{base_url}/api/phone/process-speech",
-                                method="POST",
-                                speech_timeout="auto",
-                                language=twilio_lang_code,
-                                hints="appointment, schedule, message, hours, contact, help",
-                            )
-                    # No-input fallback (forward OR goodbye) is chained after listen windows in twiml_stt.
                 except Exception as e:
                     voice_warning(
                         "respond_ready_listen_setup_failed",
@@ -7719,92 +7739,34 @@ async def process_recording(request: Request):
         
         speech_result = transcript.text
         print(f"✅ Whisper transcription: {speech_result}")
-        
-        # Now process the transcription the same way as regular speech
-        # Reuse the process_speech logic
-        current_detected_lang = detect_language(speech_result)
-        previous_lang = call_data.get("detected_language")
-        
-        if previous_lang != current_detected_lang:
-            if previous_lang:
-                print(f"🌍 Language switched: {previous_lang} -> {current_detected_lang}")
-            else:
-                print(f"🌍 Detected language: {current_detected_lang}")
-            call_data["detected_language"] = current_detected_lang
-        
-        detected_lang = current_detected_lang
-        
-        # Add user message to conversation
-        user_message = {
-            "role": "user",
-            "content": speech_result
-        }
-        call_data["conversation_history"].append(user_message)
-        
-        # Get AI response (always include booked slots; skip cache so prompt and availability check match)
-        messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True, skip_slots_cache=True)}
-        ]
-        messages.extend(call_data["conversation_history"])
-        
-        ai_response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            temperature=0.8,
-            max_tokens=80,
-            stream=False
-        )
-        
-        ai_text = ai_response.choices[0].message.content
-        
-        # Add AI response to conversation
-        ai_message = {
-            "role": "assistant",
-            "content": ai_text
-        }
-        call_data["conversation_history"].append(ai_message)
-        
-        # Create TwiML response
-        response = VoiceResponse()
 
         base_url = _twilio_base_url(request)
+        rec_key = (form_data.get("RecordingSid") or recording_url or "").strip()
+        if rec_key and call_data.get("_last_processed_recording") == rec_key:
+            voice_info("process_recording_duplicate_skipped", call_sid=call_sid or "")
+            response = VoiceResponse()
+            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            return Response(content=str(response), media_type="application/xml")
+        if rec_key:
+            call_data["_last_processed_recording"] = rec_key
 
-        # Generate audio URL for AI response
-        ai_text_encoded = quote(ai_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={get_tts_voice()}"
-        response.play(tts_audio_url)
-        
-        # Set up next input based on language
-        twilio_lang_code = get_twilio_language_code(detected_lang)
-        
-        if uses_non_latin_script(detected_lang):
-            record = response.record(
-                action=f"{base_url}/api/phone/process-recording",
-                method='POST',
-                max_length=10,
-                finish_on_key='#'
-            )
-            response.say("Please speak now, then press pound when done.", language='en-US')
-        elif _voice_stt_use_deepgram() and call_sid in active_calls:
-            from voice.twiml_stt import (
-                append_connect_stream,
-                append_got_it_and_respond_redirect,
-                next_media_stream_generation,
-            )
+        if _text_looks_latin(speech_result):
+            call_data["detected_language"] = "English"
 
-            gen = next_media_stream_generation(active_calls[call_sid])
-            append_connect_stream(
-                response,
-                call_sid=call_sid,
-                base_url=base_url,
-                stream_generation=gen,
-            )
-            append_got_it_and_respond_redirect(response, call_sid, base_url)
-        else:
-            from voice.twiml_stt import append_gather_listen
+        from voice.utterance import apply_caller_utterance
 
-            append_gather_listen(response, base_url, language=twilio_lang_code)
-        
+        outcome = await apply_caller_utterance(
+            call_sid or "",
+            speech_result or "",
+            0.9,
+            base_url,
+        )
+        if outcome.mode == "replace_call_twiml" and outcome.replacement_twiml:
+            return Response(content=outcome.replacement_twiml, media_type="application/xml")
+
+        response = VoiceResponse()
+        response.play(f"{base_url}/api/phone/got-it-audio?call_sid={call_sid}")
+        response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
         return Response(content=str(response), media_type="application/xml")
     
     except Exception as e:
