@@ -2605,6 +2605,146 @@ def _suggests_booking(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ("book", "appointment", "reservation", "reserve", "schedule", "available", "slot", "time for"))
 
+
+_STYLIST_NO_PREF_PHRASES = (
+    "anyone",
+    "any stylist",
+    "any one",
+    "no preference",
+    "no pref",
+    "don't care",
+    "doesn't matter",
+    "whoever",
+    "first available",
+    "any available",
+    "no particular",
+    "you choose",
+    "surprise me",
+)
+
+
+def _conversation_user_text(conversation_history: Optional[list]) -> str:
+    if not conversation_history:
+        return ""
+    parts = [
+        (m.get("content") or "").strip()
+        for m in conversation_history
+        if (m.get("role") or "").strip() == "user"
+    ]
+    return " ".join(p for p in parts if p)
+
+
+def _caller_indicated_stylist_choice(user_text: str, info: Optional[dict] = None) -> bool:
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    if any(p in t for p in _STYLIST_NO_PREF_PHRASES):
+        return True
+    for s in (info or get_business_info()).get("staff") or []:
+        name = (s.get("name") or "").strip()
+        if not name:
+            continue
+        nl = name.lower()
+        if len(name) == 1 and nl == "a":
+            # Avoid "book a haircut" — only stylist-context uses of the name A.
+            if re.search(r"\b(with|stylist|see|prefer|choose)\s+a\b|\ba\s+(please|for|at)\b", t):
+                return True
+            continue
+        if re.search(rf"\b{re.escape(nl)}\b", t):
+            return True
+    return False
+
+
+def _caller_indicated_service_choice(user_text: str, info: Optional[dict] = None) -> bool:
+    biz = info or get_business_info()
+    services = _normalize_service_entries(biz.get("services") or [])
+    if not services:
+        return True
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    for s in services:
+        nm = (s.get("name") or "").strip()
+        if not nm:
+            continue
+        nml = nm.lower()
+        if nml in t or re.search(rf"\b{re.escape(nml)}\b", t):
+            return True
+    return False
+
+
+def _staff_choice_required(info: Optional[dict] = None) -> bool:
+    biz = info or get_business_info()
+    names = [(s.get("name") or "").strip() for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
+    return len(names) >= 2
+
+
+def _conversation_suggests_booking(conversation_history: Optional[list]) -> bool:
+    for m in conversation_history or []:
+        if (m.get("role") or "").strip() == "user" and _suggests_booking(m.get("content") or ""):
+            return True
+    return False
+
+
+def _count_booking_user_turns(conversation_history: Optional[list]) -> int:
+    return sum(
+        1
+        for m in (conversation_history or [])
+        if (m.get("role") or "").strip() == "user" and (m.get("content") or "").strip()
+    )
+
+
+def _voice_booking_nudge_message(conversation_history: list, info: Optional[dict] = None) -> Optional[str]:
+    """Inject after several booking turns if GPT has not emitted BOOKING: yet."""
+    biz = info or get_business_info()
+    if not _conversation_suggests_booking(conversation_history):
+        return None
+    turns = _count_booking_user_turns(conversation_history)
+    if turns < 3:
+        return None
+    user_text = _conversation_user_text(conversation_history)
+    missing: List[str] = []
+    services = _normalize_service_entries(biz.get("services") or [])
+    if services and not _caller_indicated_service_choice(user_text, biz):
+        missing.append("service (ask which from the menu)")
+    if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
+        missing.append("stylist preference (or 'anyone is fine')")
+    if missing:
+        need = " and ".join(missing)
+        return (
+            f"BOOKING REMINDER: This caller wants an appointment after {turns} turns. "
+            f"You still need: {need}. Ask ONE short question for the next missing item. "
+            "When name, date, time, service (if configured), and stylist (if multiple on roster) are confirmed, "
+            "you MUST output BOOKING: on this turn. Never tell the caller they are booked until BOOKING is output."
+        )
+    return (
+        f"BOOKING REMINDER: After {turns} turns you have enough details. "
+        "Output BOOKING: name|phone|email|date|time|reason|staff on this turn. "
+        "Never say the appointment is confirmed until BOOKING is output."
+    )
+
+
+def _ai_implies_committed_booking(ai_text: str) -> bool:
+    t = (ai_text or "").lower()
+    if not t:
+        return False
+    return any(
+        p in t
+        for p in (
+            "you're all set",
+            "you are all set",
+            "you're booked",
+            "you are booked",
+            "i've booked",
+            "i have booked",
+            "appointment is confirmed",
+            "you're confirmed",
+            "you are confirmed",
+            "booking is confirmed",
+            "all set for",
+        )
+    )
+
 def parse_booking(ai_text: str) -> Optional[dict]:
     """If AI responded with BOOKING: name|phone|email|date|time|reason|staff_optional, return dict; else None.
 
@@ -2734,12 +2874,18 @@ def _normalize_service_choice_for_booking(reason_raw: Optional[str], info: Optio
     return None, True
 
 
-def _validate_booking_requirements(booking: dict, info: Optional[dict] = None) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
+def _validate_booking_requirements(
+    booking: dict,
+    info: Optional[dict] = None,
+    *,
+    conversation_history: Optional[list] = None,
+) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
     """
     Validate required stylist/service when configured.
     Returns: (ok, fail_message, staff_id, canonical_service_name)
     """
     biz = info or get_business_info()
+    user_text = _conversation_user_text(conversation_history)
     staff_rows = [s for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
     staff_id = resolve_staff_id_from_booking_fragment(booking.get("staff"))
     if staff_rows and not staff_id:
@@ -2749,12 +2895,27 @@ def _validate_booking_requirements(booking: dict, info: Optional[dict] = None) -
             + (f" Available stylists: {choices}." if choices else "")
         )
         return False, msg, None, None
+    if staff_id and _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
+        choices = ", ".join((s.get("name") or "").strip() for s in staff_rows[:5] if (s.get("name") or "").strip())
+        msg = (
+            "Which stylist would you like?"
+            + (f" We have {choices}." if choices else "")
+            + " Or say anyone if you have no preference."
+        )
+        return False, msg, None, None
     service_name, service_required = _normalize_service_choice_for_booking(booking.get("reason"), biz)
     if service_required and not service_name:
         service_choices = ", ".join((s.get("name") or "").strip() for s in _normalize_service_entries(biz.get("services") or [])[:5] if (s.get("name") or "").strip())
         msg = (
             "Before I can book this, please choose a service."
             + (f" Available services: {service_choices}." if service_choices else "")
+        )
+        return False, msg, staff_id, None
+    if service_required and service_name and not _caller_indicated_service_choice(user_text, biz):
+        service_choices = ", ".join((s.get("name") or "").strip() for s in _normalize_service_entries(biz.get("services") or [])[:5] if (s.get("name") or "").strip())
+        msg = (
+            "Which service would you like?"
+            + (f" We offer {service_choices}." if service_choices else "")
         )
         return False, msg, staff_id, None
     return True, None, staff_id, service_name
@@ -2939,6 +3100,15 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True, skip_slots_cache=True)}
         ]
         messages.extend(call_data["conversation_history"])
+        nudge = _voice_booking_nudge_message(call_data["conversation_history"])
+        if nudge:
+            messages.append({"role": "system", "content": nudge})
+            voice_info(
+                "voice_booking_nudge_injected",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                user_turns=_count_booking_user_turns(call_data["conversation_history"]),
+            )
         
         ai_response = client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -2977,7 +3147,10 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     if from_num:
                         booking["phone"] = (booking.get("phone") or "").strip() or from_num
                     cid = (call_data.get("client_id") or "").strip() or None
-                    ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(booking)
+                    ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(
+                        booking,
+                        conversation_history=call_data.get("conversation_history"),
+                    )
                     if not ok_booking:
                         ai_text = fail_msg or "I need your stylist and service before I can book that."
                         apt = None
@@ -3117,6 +3290,32 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 except Exception as e:
                     logger.exception("voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e)
                     ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
+        elif _conversation_suggests_booking(call_data.get("conversation_history")):
+            user_turns = _count_booking_user_turns(call_data.get("conversation_history"))
+            if user_turns >= 2:
+                system_info(
+                    "voice_booking_intent_no_marker",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                    user_turns=user_turns,
+                    reply_len=len(ai_text or ""),
+                )
+            call_data["booking_intent"] = True
+
+        if (
+            not booking
+            and not call_data.get("appointment_created")
+            and _ai_implies_committed_booking(ai_text or "")
+        ):
+            system_info(
+                "voice_booking_false_verbal_confirm",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+            )
+            ai_text = (
+                "I'm still putting your visit together—I haven't locked in the time yet. "
+                "Let me confirm the details with you first."
+            )
         
         # Never send BOOKING: machine line to TTS or conversation history
         ai_text = _strip_booking_directive_for_voice(ai_text or "")
@@ -5445,6 +5644,13 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
             "Your AI receptionist cannot take calls until setup is complete in Settings "
             "(team roster and store phone when both are needed)."
         )
+    staff_count = len([s for s in (info.get("staff") or []) if (s.get("name") or "").strip()])
+    service_count = len(_normalize_service_entries(info.get("services") or []))
+    if roster_ready and staff_count >= 2 and service_count == 0:
+        warnings.append(
+            "Add services in Settings so callers can choose a service type during booking. "
+            "Without a service menu, the AI will not ask which service they want."
+        )
     return {
         "complete": len(missing) == 0,
         "missing": missing,
@@ -6971,6 +7177,17 @@ async def handle_incoming_call(request: Request):
         active_calls[call_sid]["twilio_public_base_url"] = base_url
 
         biz_info = get_business_info()
+        if staff_roster_ready_for_booking(biz_info):
+            svc_n = len(_normalize_service_entries(biz_info.get("services") or []))
+            staff_n = len([s for s in (biz_info.get("staff") or []) if (s.get("name") or "").strip()])
+            if staff_n >= 2 and svc_n == 0:
+                voice_info(
+                    "booking_config_incomplete",
+                    call_sid=call_sid or "",
+                    client_id=client_id,
+                    reason="no_services_multi_staff",
+                    staff_count=staff_n,
+                )
         if not voice_receptionist_ready(biz_info):
             voice_forward(
                 "setup_not_ready_forward",
@@ -7309,6 +7526,9 @@ async def handle_call_status(request: Request):
                 outcome = call_data.get("outcome")
                 if not outcome and appointment_created:
                     outcome = "answered_by_ai"
+                    call_data["outcome"] = outcome
+                elif not outcome and call_data.get("booking_intent") and not appointment_created:
+                    outcome = "no_booking"
                     call_data["outcome"] = outcome
                 if outcome:
                     call_log_set_outcome(call_sid, outcome)

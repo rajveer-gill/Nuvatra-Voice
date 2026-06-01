@@ -1,10 +1,14 @@
 """Unit tests for parse_booking and booking requirement guards."""
 import pytest
 from main import (
+    _ai_implies_committed_booking,
     _apply_booking_customer_name,
+    _caller_indicated_service_choice,
+    _caller_indicated_stylist_choice,
     _format_appointment_details_confirmation_sms,
     _strip_booking_directive_for_voice,
     _validate_booking_requirements,
+    _voice_booking_nudge_message,
     parse_booking,
 )
 
@@ -122,12 +126,82 @@ def test_validate_booking_normalizes_service_name(monkeypatch):
         },
     )
     ok, msg, staff_id, service = _validate_booking_requirements(
-        {"staff": "Mia", "reason": "haircut please"}
+        {"staff": "Mia", "reason": "haircut please"},
+        conversation_history=[{"role": "user", "content": "I'd like a haircut tomorrow at 2"}],
     )
     assert ok
     assert msg is None
     assert staff_id == "s1"
     assert service == "Haircut"
+
+
+def test_validate_booking_rejects_auto_stylist_without_caller_choice(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
+            "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "B", "reason": "Haircut", "name": "Sam", "date": "2026-06-02", "time": "14:00"},
+        conversation_history=[{"role": "user", "content": "book a haircut tomorrow at 2 my name is Sam"}],
+    )
+    assert not ok
+    assert "stylist" in (msg or "").lower()
+    assert staff_id is None
+
+
+def test_validate_booking_accepts_stylist_when_caller_named_one(monkeypatch):
+    biz = {
+        "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
+        "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
+    }
+    monkeypatch.setattr("main.get_business_info", lambda: biz)
+    history = [
+        {"role": "user", "content": "Book a haircut with B tomorrow at 2pm, I'm Sam"},
+    ]
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "B", "reason": "Haircut", "name": "Sam", "date": "2026-06-02", "time": "14:00"},
+        conversation_history=history,
+    )
+    assert ok
+    assert staff_id == "s2"
+    assert service == "Haircut"
+
+
+def test_validate_booking_accepts_any_stylist_phrase(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
+            "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    ok, _, staff_id, _ = _validate_booking_requirements(
+        {"staff": "A", "reason": "Haircut", "name": "Sam", "date": "2026-06-02", "time": "14:00"},
+        conversation_history=[{"role": "user", "content": "haircut tomorrow 2pm anyone is fine"}],
+    )
+    assert ok
+    assert staff_id == "s1"
+
+
+def test_voice_booking_nudge_after_three_turns():
+    history = [
+        {"role": "user", "content": "I want to book an appointment"},
+        {"role": "assistant", "content": "Sure!"},
+        {"role": "user", "content": "Tomorrow afternoon"},
+        {"role": "assistant", "content": "Great!"},
+        {"role": "user", "content": "Around 2pm"},
+    ]
+    nudge = _voice_booking_nudge_message(history)
+    assert nudge is not None
+    assert "BOOKING REMINDER" in nudge
+
+
+def test_ai_implies_committed_booking_detects_false_confirm():
+    assert _ai_implies_committed_booking("You're all set for Tuesday at 2!")
+    assert not _ai_implies_committed_booking("Which stylist would you like?")
 
 
 def test_apply_booking_customer_name_replaces_stylist_with_memory(monkeypatch):
