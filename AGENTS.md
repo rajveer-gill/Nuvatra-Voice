@@ -31,7 +31,7 @@ See `README.md` for standard commands (`npm run dev`, `npm run dev:frontend`, `n
 | Backend | Render (`nuvatra-voice.onrender.com`) | Render dashboard > Environment tab |
 | Database | Render PostgreSQL (Virginia region) | Auto-linked via `DATABASE_URL` on Render |
 
-Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_JWKS_URL`, `ADMIN_CLERK_USER_IDS`, `FRONTEND_URL`, **`PUBLIC_BASE_URL`** (canonical HTTPS origin of this API, e.g. `https://nuvatra-voice.onrender.com` — no trailing slash). Twilio `<Play>` / webhook URLs use this when set; the app can still derive from `Host` / `X-Forwarded-*` if unset, but **setting it is recommended** for stable integrations and ops clarity.
+Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_JWKS_URL`, **`CLERK_ISSUER`**, **`CLERK_AUDIENCE`**, `ADMIN_CLERK_USER_IDS`, `FRONTEND_URL`, **`PUBLIC_BASE_URL`** (canonical HTTPS origin of this API, e.g. `https://nuvatra-voice.onrender.com` — no trailing slash). Twilio `<Play>` / webhook URLs use this when set; the app can still derive from `Host` / `X-Forwarded-*` if unset, but **setting it is recommended** for stable integrations and ops clarity. See **`docs/CLERK-JWT-SETUP.md`** for JWT template + audience setup.
 
 **Twilio SMS (two-way replies):** On each number that sends texts to customers, set **Messaging** → **A message comes in** to **`POST https://<PUBLIC_BASE_URL>/api/sms/incoming`** (same host as voice). If only **Voice** webhooks are configured, outbound booking texts work but **inbound replies are never received**—the AI cannot text back.
 
@@ -39,7 +39,7 @@ Key env vars for production backend (Render): `OPENAI_API_KEY`, `DATABASE_URL`, 
 
 **Do not set `CLIENT_ID` on multi-tenant production** unless you run a true single-tenant instance. If `CLIENT_ID` is set to a dev value like `test`, any code path that runs before `require_tenant` sets the request context (or background jobs) will look for `clients/test/config.json` on disk and merge the wrong tenant. Leave `CLIENT_ID` **unset** on Render when using Clerk + PostgreSQL for all tenants.
 
-Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`. Set **`ADMIN_CLERK_USER_IDS`** on Vercel too (same comma-separated Clerk user IDs as the backend) so server layouts route platform admins to `/admin` and everyone else to `/dashboard`; when omitted, the client still checks `/api/admin/session`.
+Key env vars for production frontend (Vercel): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `NEXT_PUBLIC_API_URL`, **`NEXT_PUBLIC_CLERK_JWT_TEMPLATE`** (e.g. `nuvatra-backend` — must match Clerk JWT template name). Set **`ADMIN_CLERK_USER_IDS`** on Vercel too (same comma-separated Clerk user IDs as the backend) so server layouts route platform admins to `/admin` and everyone else to `/dashboard`; when omitted, the client still checks `/api/admin/session`.
 
 Also set **`NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in`** and **`NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up`** so Clerk uses the embedded routes (`app/sign-in`, `app/sign-up`) instead of only the hosted Account Portal. In **Clerk Dashboard → Paths**, align application paths with those URLs.
 

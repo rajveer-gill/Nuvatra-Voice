@@ -3,6 +3,7 @@
 import axios, { AxiosInstance } from 'axios'
 import { useAuth } from '@clerk/nextjs'
 import { useMemo } from 'react'
+import { clerkGetTokenOptions } from '@/lib/clerk-token'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -36,7 +37,7 @@ export function useApiClient(): AxiosInstance {
     const instance = axios.create({ baseURL: API_URL, timeout: API_TIMEOUT_MS })
     instance.interceptors.request.use(async (config) => {
       try {
-        const token = await getToken()
+        const token = await getToken(clerkGetTokenOptions())
         if (token) {
           config.headers.Authorization = `Bearer ${token}`
         }
@@ -58,7 +59,7 @@ export function useApiClient(): AxiosInstance {
         }
         cfg._retry = true
         try {
-          const token = await getToken({ skipCache: true })
+          const token = await getToken(clerkGetTokenOptions({ skipCache: true }))
           if (token) {
             cfg.headers = cfg.headers ?? {}
             cfg.headers.Authorization = `Bearer ${token}`

@@ -16,7 +16,9 @@ Set these on your backend (e.g. Render):
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string (for tenants, tenant_members, etc.) |
-| `CLERK_JWKS_URL` | Yes (multi-tenant) | Clerk JWKS URL for JWT verification. In Clerk Dashboard: **Configure** → **API Keys** → Backend API URL. JWKS is `https://<your-clerk-domain>/.well-known/jwks.json` |
+| `CLERK_JWKS_URL` | Yes (multi-tenant) | Clerk JWKS URL for JWT verification. JWKS is `https://<your-clerk-domain>/.well-known/jwks.json` |
+| `CLERK_ISSUER` | Yes (multi-tenant) | Clerk issuer, e.g. `https://clerk.call-surge.com` (must match token `iss`) |
+| `CLERK_AUDIENCE` | Yes (multi-tenant) | Audience string from JWT template `aud` claim, e.g. `https://nuvatra-voice.onrender.com`. See `docs/CLERK-JWT-SETUP.md` |
 | `CLERK_SECRET_KEY` | Yes (admin) | Clerk secret key for creating invitations |
 | `ADMIN_CLERK_USER_IDS` | Yes (admin) | Comma-separated Clerk user IDs (e.g. `user_2abc123,user_2xyz789`) who can access `/admin` |
 | `FRONTEND_URL` | Optional | Frontend URL for Clerk invite redirect and CORS (e.g. `https://nuvatra-voice.vercel.app`). Backend allows the Vercel domain and `nuvatrahq.com`. |

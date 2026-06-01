@@ -185,6 +185,8 @@ Use this as a single reference for every env var used by the app.
 | `DATABASE_URL` | Yes (production) | PostgreSQL connection string. When set, tenants, appointments, call_log, audit_events, etc. persist. |
 | `OPENAI_API_KEY` | Yes | OpenAI API key for chat and TTS. |
 | `CLERK_JWKS_URL` | Yes (multi-tenant) | Clerk JWKS URL (e.g. `https://<clerk-domain>/.well-known/jwks.json`) for JWT verification. |
+| `CLERK_ISSUER` | Yes (multi-tenant) | Clerk issuer URL (e.g. `https://clerk.call-surge.com`). |
+| `CLERK_AUDIENCE` | Yes (multi-tenant) | Must match JWT template `aud` claim. See `docs/CLERK-JWT-SETUP.md`. |
 | `CLERK_SECRET_KEY` | Yes (admin) | Clerk secret key for creating invitations. |
 | `ADMIN_CLERK_USER_IDS` | Yes (admin) | Comma-separated Clerk user IDs who can access `/admin`. |
 | `FRONTEND_URL` | Recommended | Frontend URL for CORS and Stripe redirects (e.g. `https://nuvatra-voice.vercel.app`). |
@@ -229,6 +231,7 @@ To enable day-before appointment reminders (Growth/Pro plans):
 | `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL` | Optional | Redirect after sign-in (e.g. `/dashboard`). |
 | `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL` | Optional | Redirect after sign-up (e.g. `/dashboard`). |
 | `NEXT_PUBLIC_API_URL` | Yes | Backend API base URL. |
+| `NEXT_PUBLIC_CLERK_JWT_TEMPLATE` | Yes (multi-tenant) | Clerk JWT template name (e.g. `nuvatra-backend`). See `docs/CLERK-JWT-SETUP.md`. |
 
 ## Audit log and retention
 

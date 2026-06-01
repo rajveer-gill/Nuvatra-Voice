@@ -1,0 +1,64 @@
+Configure Call-Surge (Nuvatra Voice) production Clerk JWT auth — Option A. Work across Clerk Dashboard, Render backend, and Vercel frontend. Do NOT print or paste secret values (API keys, tokens, sk_*, DATABASE_URL, etc.). Report only variable names, HTTP status codes, and pass/fail.
+
+=== TARGET VALUES (use exactly) ===
+JWT template name: nuvatra-backend
+CLERK_ISSUER: https://clerk.call-surge.com
+CLERK_JWKS_URL: https://clerk.call-surge.com/.well-known/jwks.json
+CLERK_AUDIENCE: https://nuvatra-voice.onrender.com
+NEXT_PUBLIC_CLERK_JWT_TEMPLATE: nuvatra-backend
+Backend URL: https://nuvatra-voice.onrender.com
+Frontend URL: https://www.call-surge.com
+
+JWT template claims JSON (exact):
+{
+  "aud": "https://nuvatra-voice.onrender.com",
+  "public_metadata": "{{user.public_metadata}}"
+}
+
+=== STEP 1 — Clerk Dashboard (production instance) ===
+1. Go to https://dashboard.clerk.com and select the Call-Surge PRODUCTION application (custom domain clerk.call-surge.com).
+2. Navigate to Configure → JWT templates.
+3. If a template named "nuvatra-backend" already exists, open it and verify claims match the JSON above. If missing or wrong, edit or recreate.
+4. If it does not exist: New template → Name: nuvatra-backend → paste claims JSON → Save.
+5. Confirm on the template page: Issuer shows https://clerk.call-surge.com
+6. Report: template exists (yes/no), issuer matches (yes/no)
+
+=== STEP 2 — Render (backend: nuvatra-voice or Call-Surge backend web service) ===
+1. Open the backend web service Environment tab.
+2. Set or update:
+   - CLERK_ISSUER = https://clerk.call-surge.com (leave if already correct)
+   - CLERK_AUDIENCE = https://nuvatra-voice.onrender.com (NEW — required)
+   - CLERK_JWKS_URL = https://clerk.call-surge.com/.well-known/jwks.json (leave if already correct)
+3. Do NOT add or enable ALLOW_INSECURE_WEBHOOKS.
+4. Do NOT change TWILIO_AUTH_TOKEN, DATABASE_URL, OPENAI_API_KEY, or other unrelated vars.
+5. Save and trigger redeploy if env changed.
+6. When deploy is live, GET https://nuvatra-voice.onrender.com/api/health — expect {"status":"ok",...}
+
+=== STEP 3 — Vercel (frontend: Call-Surge / nuvatra-voice) ===
+1. Open Project → Settings → Environment Variables (Production).
+2. Add or update:
+   - NEXT_PUBLIC_CLERK_JWT_TEMPLATE = nuvatra-backend
+   Apply to: Production (and Preview if Production uses same Clerk instance).
+3. Do NOT change NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY, or NEXT_PUBLIC_API_URL unless wrong.
+4. Trigger a Production redeploy (Deployments → Redeploy latest, or push-triggered deploy).
+   IMPORTANT: The app code must include getToken({ template }) support (lib/clerk-token.ts). If latest production deploy predates that commit, note that a git push + redeploy is still required.
+
+=== STEP 4 — Verification (no secrets) ===
+1. curl -s https://nuvatra-voice.onrender.com/api/health
+2. curl -sI https://clerk.call-surge.com/.well-known/jwks.json → expect HTTP 200
+3. Open https://www.call-surge.com/sign-in — page loads without Clerk JS errors (report console errors if any)
+4. If you can observe while the user is signed in: dashboard at https://www.call-surge.com/dashboard should load Settings/Appointments without API 401 or 500 "Clerk token validation not fully configured". If you cannot test signed-in state, say so and skip.
+
+=== FINAL REPORT (markdown table) ===
+| Check | Pass/Fail | Notes |
+| Clerk template nuvatra-backend | | |
+| Template aud + public_metadata | | |
+| Render CLERK_AUDIENCE set | | |
+| Render CLERK_ISSUER set | | |
+| Render redeploy live | | |
+| /api/health | | |
+| Vercel NEXT_PUBLIC_CLERK_JWT_TEMPLATE set | | |
+| Vercel production redeploy | | |
+| Dashboard auth (if testable) | | |
+
+List any blockers and the single next action for the user.
