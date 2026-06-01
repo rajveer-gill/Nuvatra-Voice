@@ -95,7 +95,7 @@ def test_validate_booking_requires_stylist_when_staff_configured(monkeypatch):
         {"staff": "", "reason": "Haircut"}
     )
     assert not ok
-    assert "choose a stylist" in (msg or "").lower()
+    assert "which stylist" in (msg or "").lower()
     assert staff_id is None
     assert service is None
 
@@ -112,7 +112,7 @@ def test_validate_booking_requires_known_service_when_services_configured(monkey
         {"staff": "Mia", "reason": ""}
     )
     assert not ok
-    assert "choose a service" in (msg or "").lower()
+    assert "which service" in (msg or "").lower()
     assert staff_id == "s1"
     assert service is None
 
@@ -197,6 +197,28 @@ def test_voice_booking_nudge_after_three_turns():
     nudge = _voice_booking_nudge_message(history)
     assert nudge is not None
     assert "BOOKING REMINDER" in nudge
+
+
+def test_voice_booking_nudge_prioritizes_stylist_before_service(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
+            "services": [{"id": "svc1", "name": "Short Cut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    history = [
+        {"role": "user", "content": "I want to book tomorrow"},
+        {"role": "assistant", "content": "Sure"},
+        {"role": "user", "content": "2pm works"},
+        {"role": "assistant", "content": "Got it"},
+        {"role": "user", "content": "My name is Raj"},
+    ]
+    nudge = _voice_booking_nudge_message(history)
+    assert nudge is not None
+    assert "stylist preference" in nudge
+    assert "service (ask which from the menu)" in nudge
+    assert nudge.index("stylist preference") < nudge.index("service (ask which from the menu)")
 
 
 def test_ai_implies_committed_booking_detects_false_confirm():

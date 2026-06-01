@@ -2704,11 +2704,11 @@ def _voice_booking_nudge_message(conversation_history: list, info: Optional[dict
         return None
     user_text = _conversation_user_text(conversation_history)
     missing: List[str] = []
+    if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
+        missing.append("stylist preference (or 'anyone is fine')")
     services = _normalize_service_entries(biz.get("services") or [])
     if services and not _caller_indicated_service_choice(user_text, biz):
         missing.append("service (ask which from the menu)")
-    if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
-        missing.append("stylist preference (or 'anyone is fine')")
     if missing:
         need = " and ".join(missing)
         return (
@@ -2888,17 +2888,24 @@ def _validate_booking_requirements(
     user_text = _conversation_user_text(conversation_history)
     staff_rows = [s for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
     staff_id = resolve_staff_id_from_booking_fragment(booking.get("staff"))
+    staff_name = ""
+    if staff_id:
+        for s in staff_rows:
+            if (s.get("id") or "").strip() == staff_id:
+                staff_name = (s.get("name") or "").strip()
+                break
     if staff_rows and not staff_id:
         choices = ", ".join((s.get("name") or "").strip() for s in staff_rows[:5] if (s.get("name") or "").strip())
         msg = (
-            "Before I can book this, please choose a stylist."
-            + (f" Available stylists: {choices}." if choices else "")
+            "Absolutely — which stylist would you like to see?"
+            + (f" We currently have {choices}." if choices else "")
+            + " You can also say anyone if you have no preference."
         )
         return False, msg, None, None
     if staff_id and _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
         choices = ", ".join((s.get("name") or "").strip() for s in staff_rows[:5] if (s.get("name") or "").strip())
         msg = (
-            "Which stylist would you like?"
+            "Before I lock this in, which stylist would you like?"
             + (f" We have {choices}." if choices else "")
             + " Or say anyone if you have no preference."
         )
@@ -2907,15 +2914,15 @@ def _validate_booking_requirements(
     if service_required and not service_name:
         service_choices = ", ".join((s.get("name") or "").strip() for s in _normalize_service_entries(biz.get("services") or [])[:5] if (s.get("name") or "").strip())
         msg = (
-            "Before I can book this, please choose a service."
-            + (f" Available services: {service_choices}." if service_choices else "")
+            (f"Great, and which service would you like with {staff_name}? " if staff_name else "Great, which service would you like? ")
+            + (f"We currently offer {service_choices}." if service_choices else "")
         )
         return False, msg, staff_id, None
     if service_required and service_name and not _caller_indicated_service_choice(user_text, biz):
         service_choices = ", ".join((s.get("name") or "").strip() for s in _normalize_service_entries(biz.get("services") or [])[:5] if (s.get("name") or "").strip())
         msg = (
-            "Which service would you like?"
-            + (f" We offer {service_choices}." if service_choices else "")
+            (f"Just to confirm, which service did you want with {staff_name}? " if staff_name else "Just to confirm, which service would you like? ")
+            + (f"We currently offer {service_choices}." if service_choices else "")
         )
         return False, msg, staff_id, None
     return True, None, staff_id, service_name

@@ -224,6 +224,7 @@ def build_system_prompt(
         if has_configured_services:
             service_booking_rules = (
                 "- SERVICES: This business has a configured service menu. Only offer or confirm services from that list—never invent services. "
+                "When multiple stylists are on the roster, ask stylist preference first, then ask which service they want. "
                 "Before BOOKING you MUST ask which service they want unless they already clearly named one from the menu. "
                 "Put the exact service name in the reason field. "
                 "If they pick a stylist who only provides certain services (see staff/service list), only offer those services for that person.\n"
@@ -257,15 +258,15 @@ def build_system_prompt(
         )
     if industry_desc:
         header = (
-            f"Super peppy, warm AI receptionist for {name}, a {industry_desc}!{identity_line} "
-            'Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". '
-            "Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
+            f"Friendly, professional AI receptionist for {name}, a {industry_desc}.{identity_line} "
+            "Use natural conversational language and sound like a regular helpful person. "
+            "Keep responses brief (1-2 short sentences) and clear."
         )
     else:
         header = (
-            f"Super peppy, warm AI receptionist for {name}!{identity_line} "
-            'Be EXTRA POSITIVE and ENTHUSIASTIC! Use peppy phrases like "absolutely!", "wonderful!", "awesome!". '
-            "Keep responses to 1 sentence max. Be warm, brief, and make callers feel amazing!"
+            f"Friendly, professional AI receptionist for {name}.{identity_line} "
+            "Use natural conversational language and sound like a regular helpful person. "
+            "Keep responses brief (1-2 short sentences) and clear."
         )
 
     base_prompt = f"""{header}
