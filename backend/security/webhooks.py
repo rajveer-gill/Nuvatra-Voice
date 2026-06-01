@@ -25,6 +25,7 @@ def validate_twilio_webhook(
     *,
     auth_token: Optional[str],
     twilio_available: bool,
+    strict_required: bool = False,
 ) -> bool:
     """
     Validate X-Twilio-Signature. Returns True if valid, or if validation is skipped
@@ -32,8 +33,12 @@ def validate_twilio_webhook(
     """
     token = (auth_token or "").strip()
     if not token:
+        if strict_required:
+            return False
         return True
     if not twilio_available or not RequestValidator:
+        if strict_required:
+            return False
         return True
     sig = request.headers.get("X-Twilio-Signature", "")
     if not sig:

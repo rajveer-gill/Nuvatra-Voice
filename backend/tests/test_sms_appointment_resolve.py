@@ -25,7 +25,7 @@ def test_post_booking_links_sms_session(monkeypatch):
     monkeypatch.setattr(
         main,
         "_create_appointment_from_booking",
-        lambda booking, client_id_override=None, reserve_slot_immediately=True: {
+        lambda booking, client_id_override=None, reserve_slot_immediately=True, **kwargs: {
             "id": 42,
             "name": "Pat",
             "date": "2026-05-28",

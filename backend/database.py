@@ -5,12 +5,14 @@ Tables: appointments, messages, call_log, caller_memory, booked_slots, tenants, 
 import os
 import json
 import contextvars
+import logging
 from datetime import datetime, date
 from typing import Any, Optional, List, Tuple
 from pathlib import Path
 
 # Request-scoped client_id (set by auth middleware or webhook)
 _request_client_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("request_client_id", default=None)
+_log = logging.getLogger("nuvatra")
 
 def set_request_client_id(client_id: Optional[str]) -> None:
     """Set the current request's client_id for all DB operations in this context."""
@@ -1248,7 +1250,12 @@ def db_appointments_insert(data: dict) -> dict:
         raise RuntimeError("Database not available")
     cur = conn.cursor()
     cid = (data.get("client_id") or "").strip() or _client_id()
-    print(f"[DB] db_appointments_insert client_id={cid} name={data.get('name')!r} date={data.get('date')} time={data.get('time')}")
+    _log.info(
+        "[DB] db_appointments_insert client_id=%s date=%s time=%s",
+        cid,
+        data.get("date"),
+        data.get("time"),
+    )
     cur.execute("""
         INSERT INTO appointments (client_id, name, email, phone, date, time, reason, status, source, staff_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -1269,7 +1276,7 @@ def db_appointments_insert(data: dict) -> dict:
     conn.commit()
     cur.close()
     apt_id = row[0]
-    print(f"[DB] db_appointments_insert OK id={apt_id} client_id={cid}")
+    _log.info("[DB] db_appointments_insert_ok id=%s client_id=%s", apt_id, cid)
     return {"id": apt_id, "created_at": row[1].isoformat() if row[1] else "", **data}
 
 def db_appointments_update(

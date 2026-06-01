@@ -10,12 +10,14 @@ from typing import Literal, Optional
 
 _log = logging.getLogger("nuvatra")
 
-ClipKind = Literal["greeting", "got_it"]
+ClipKind = Literal["greeting", "got_it", "one_moment"]
 
 _MEMORY: dict[ClipKind, dict[tuple, bytes]] = {
     "greeting": {},
     "got_it": {},
+    "one_moment": {},
 }
+_MAX_MEMORY_ENTRIES_PER_KIND = 200
 
 
 def _hash_key(cache_key: tuple) -> str:
@@ -54,6 +56,11 @@ def get_cached(project_root: Path, kind: ClipKind, cache_key: tuple) -> Optional
 def put_cached(project_root: Path, kind: ClipKind, cache_key: tuple, data: bytes) -> None:
     if not data:
         return
+    if len(_MEMORY[kind]) >= _MAX_MEMORY_ENTRIES_PER_KIND:
+        # FIFO-style eviction based on insertion order.
+        oldest_key = next(iter(_MEMORY[kind].keys()), None)
+        if oldest_key is not None:
+            _MEMORY[kind].pop(oldest_key, None)
     _MEMORY[kind][cache_key] = data
     path = _disk_path(project_root, kind, cache_key)
     try:
@@ -66,7 +73,7 @@ def invalidate_client(project_root: Path, client_id: str) -> None:
     cid = (client_id or "").strip()
     if not cid:
         return
-    for kind in ("greeting", "got_it"):
+    for kind in ("greeting", "got_it", "one_moment"):
         for key in list(_MEMORY[kind].keys()):
             if isinstance(key, tuple) and key and key[0] == cid:
                 _MEMORY[kind].pop(key, None)
@@ -82,3 +89,4 @@ def invalidate_client(project_root: Path, client_id: str) -> None:
 def clear_all_memory() -> None:
     _MEMORY["greeting"].clear()
     _MEMORY["got_it"].clear()
+    _MEMORY["one_moment"].clear()

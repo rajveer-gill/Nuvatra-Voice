@@ -196,7 +196,10 @@ async def apply_caller_utterance(
             "audio_url": None,
             "ai_text": None,
         }
-        asyncio.create_task(m.generate_response_async(call_sid, call_data, detected_lang, base_url))
+        m.create_tracked_task(
+            m.generate_response_async(call_sid, call_data, detected_lang, base_url),
+            name=f"generate_response:{call_sid}",
+        )
         voice_call_phase(
             "gpt_scheduled",
             call_sid=call_sid,

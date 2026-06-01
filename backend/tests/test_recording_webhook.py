@@ -20,6 +20,7 @@ def test_recording_complete_persists_and_returns_200(client, monkeypatch):
     monkeypatch.setenv("CALL_SUMMARY_ENABLED", "false")
     monkeypatch.setattr("main.USE_DB", True)
     monkeypatch.setattr("main.active_calls", {})
+    monkeypatch.setattr("main._call_recording_enabled_for_tenant", lambda tenant: True)
 
     updates = []
 

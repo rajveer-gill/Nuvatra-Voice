@@ -276,9 +276,9 @@ async def keep_client_warm():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Init DB first (in thread so it doesn't block the event loop), then pre-warm OpenAI
-    db_task = asyncio.create_task(asyncio.to_thread(_init_db_background))
-    warm_task = asyncio.create_task(pre_warm_openai())
-    keep_warm_task = asyncio.create_task(keep_client_warm())
+    db_task = create_tracked_task(asyncio.to_thread(_init_db_background), name="init_db_background")
+    warm_task = create_tracked_task(pre_warm_openai(), name="pre_warm_openai")
+    keep_warm_task = create_tracked_task(keep_client_warm(), name="keep_client_warm")
     yield
     for t in (db_task, warm_task, keep_warm_task):
         t.cancel()
@@ -354,6 +354,7 @@ async def observability_webhook_timing(request: Request, call_next):
 _webhook_rate_limit: dict = {}  # ip -> list of timestamps
 _webhook_rate_limit_lock = asyncio.Lock()
 WEBHOOK_RATE_LIMIT_PER_MIN = 120
+WEBHOOK_RATE_LIMIT_MAX_IPS = 5000
 
 async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
     """Return 429 response if IP over limit for /api/phone/incoming or /api/sms/incoming; else None."""
@@ -363,6 +364,18 @@ async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
     ip = request.client.host if request.client else "unknown"
     now = datetime.now(timezone.utc).timestamp()
     async with _webhook_rate_limit_lock:
+        # Opportunistically prune stale IP buckets.
+        for bucket_ip in list(_webhook_rate_limit.keys()):
+            bucket = _webhook_rate_limit[bucket_ip]
+            bucket[:] = [t for t in bucket if now - t < 60]
+            if not bucket:
+                _webhook_rate_limit.pop(bucket_ip, None)
+        if len(_webhook_rate_limit) > WEBHOOK_RATE_LIMIT_MAX_IPS:
+            oldest_ip = min(
+                _webhook_rate_limit.items(),
+                key=lambda kv: kv[1][0] if kv[1] else now,
+            )[0]
+            _webhook_rate_limit.pop(oldest_ip, None)
         if ip not in _webhook_rate_limit:
             _webhook_rate_limit[ip] = []
         times = _webhook_rate_limit[ip]
@@ -411,6 +424,7 @@ print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
 
 GOT_IT_PHRASE = "Got it, one moment."
+ONE_MOMENT_PHRASE = "One moment."
 
 # Lazy OpenAI client — created on first use so import doesn't block port binding
 _openai_client = None
@@ -510,9 +524,8 @@ def _call_summary_enabled_for_tenant(tenant: Optional[dict] = None) -> bool:
 # Auth: Clerk JWT verification for multi-tenant
 try:
     from auth import get_bearer_token, verify_clerk_token
-except ImportError:
-    get_bearer_token = lambda r: None
-    verify_clerk_token = lambda t: ("", None)
+except ImportError as e:
+    raise RuntimeError("Failed to import auth module") from e
 
 # Database: PostgreSQL when DATABASE_URL is set (production)
 # Import functions eagerly (no network); init_db() is deferred to background
@@ -1068,6 +1081,20 @@ def _got_it_cache_key(client_id: str) -> tuple:
     )
 
 
+def _one_moment_cache_key(client_id: str) -> tuple:
+    info = get_business_info()
+    try:
+        speed_key = round(float(info.get("speed", 1.0)), 2)
+    except (TypeError, ValueError):
+        speed_key = 1.0
+    return (
+        client_id,
+        ONE_MOMENT_PHRASE,
+        (get_tts_voice() or "fable").strip(),
+        speed_key,
+    )
+
+
 def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
     _ensure_openai_client()
     resp = client.audio.speech.create(
@@ -1080,7 +1107,7 @@ def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
 
 
 def warm_client_voice_cache(client_id: str) -> None:
-    """Pre-generate greeting + got-it clips for a tenant (call after settings save or on cache miss)."""
+    """Pre-generate greeting, got-it, and one-moment clips for a tenant."""
     from voice.tts_cache import get_cached, put_cached
 
     cid = (client_id or "").strip()
@@ -1111,6 +1138,18 @@ def warm_client_voice_cache(client_id: str) -> None:
             put_cached(PROJECT_ROOT, "got_it", got_it_key, data)
             voice_info(
                 "got_it_audio_prewarmed",
+                client_id_prefix=cid[:12],
+                voice=voice,
+                bytes=len(data),
+            )
+        one_moment_key = _one_moment_cache_key(cid)
+        if not get_cached(PROJECT_ROOT, "one_moment", one_moment_key):
+            voice = one_moment_key[2]
+            speed = one_moment_key[3]
+            data = _synthesize_tts_clip(ONE_MOMENT_PHRASE, voice=voice, speed=speed)
+            put_cached(PROJECT_ROOT, "one_moment", one_moment_key, data)
+            voice_info(
+                "one_moment_audio_prewarmed",
                 client_id_prefix=cid[:12],
                 voice=voice,
                 bytes=len(data),
@@ -1666,11 +1705,18 @@ def _tenant_sms_from_number() -> Optional[str]:
 
 def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
     """Validate X-Twilio-Signature so only Twilio can trigger webhooks."""
+    allow_insecure = (os.getenv("ALLOW_INSECURE_WEBHOOKS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    strict_required = bool(USE_DB) and not allow_insecure
     return validate_twilio_signature(
         request,
         form_data,
         auth_token=os.getenv("TWILIO_AUTH_TOKEN"),
         twilio_available=TWILIO_AVAILABLE,
+        strict_required=strict_required,
     )
 
 def get_client_data_dir() -> Optional[Path]:
@@ -5952,7 +5998,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     save_raw_client_config(cid, data)
     if voice_affecting:
         invalidate_voice_cache(cid)
-        asyncio.create_task(_warm_client_voice_cache_async(cid))
+        create_tracked_task(_warm_client_voice_cache_async(cid), name=f"warm_voice_cache:{cid}")
     if _greeting_debug_enabled():
         voice_info(
             "greeting_settings_saved",
@@ -6188,11 +6234,46 @@ async def text_to_speech(request: TTSRequest, _: None = Depends(require_active_s
 
 # Phone call storage (in production, use a database)
 active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid, client_id, ...}}
+_background_tasks: set[asyncio.Task] = set()
+
+
+def create_tracked_task(coro: Any, *, name: str) -> asyncio.Task:
+    """Create background task with standardized failure logging and lifecycle cleanup."""
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        try:
+            _ = t.result()
+        except asyncio.CancelledError:
+            logger.info("background_task_cancelled name=%s", name)
+        except Exception:
+            logger.exception("background_task_failed name=%s", name)
+
+    task.add_done_callback(_done)
+    return task
+
+
+def cleanup_call_runtime_state(call_sid: str) -> None:
+    """Clear in-memory per-call runtime state deterministically."""
+    if not call_sid:
+        return
+    active_calls.pop(call_sid, None)
+    response_status.pop(call_sid, None)
+    try:
+        from voice.utterance import _utterance_locks
+
+        _utterance_locks.pop(call_sid, None)
+    except Exception:
+        pass
 
 def _restore_call_context(call_sid: str) -> bool:
     """Restore request client_id from active_calls for downstream phone handlers. Returns True if found."""
     if call_sid and call_sid in active_calls:
-        cid = active_calls[call_sid].get("client_id") or CLIENT_ID or "default"
+        cid = (active_calls[call_sid].get("client_id") or "").strip()
+        if not cid:
+            return False
         set_request_client_id(cid)
         return True
     return False
@@ -6205,12 +6286,12 @@ response_status = {}  # {call_sid: {"status": "pending"|"ready"|"error", "audio_
 
 
 
-def _get_client_id_from_call(request: Request) -> str:
-    """Resolve client_id from call_sid query param (active_calls). Fallback to env CLIENT_ID or default."""
+def _get_client_id_from_call(request: Request) -> Optional[str]:
+    """Resolve client_id from call_sid query param (active_calls)."""
     call_sid = request.query_params.get("call_sid")
     if call_sid and call_sid in active_calls:
-        return active_calls[call_sid].get("client_id") or CLIENT_ID or "default"
-    return CLIENT_ID or "default"
+        return (active_calls[call_sid].get("client_id") or "").strip() or None
+    return None
 
 
 def _summarize_call_recording_sync(call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]) -> None:
@@ -6296,6 +6377,8 @@ async def get_greeting_audio(request: Request):
     from voice.tts_cache import get_cached, put_cached
 
     client_id = _get_client_id_from_call(request)
+    if not client_id:
+        raise HTTPException(status_code=404, detail="Call session not found")
     set_request_client_id(client_id)
     call_sid = request.query_params.get("call_sid") or ""
     cache_key = _greeting_audio_cache_key(client_id)
@@ -6353,6 +6436,8 @@ async def get_got_it_audio(request: Request):
     from voice.tts_cache import get_cached, put_cached
 
     client_id = _get_client_id_from_call(request)
+    if not client_id:
+        raise HTTPException(status_code=404, detail="Call session not found")
     set_request_client_id(client_id)
     cache_key = _got_it_cache_key(client_id)
     cached = get_cached(PROJECT_ROOT, "got_it", cache_key)
@@ -6397,6 +6482,58 @@ async def get_got_it_audio(request: Request):
         except Exception as e2:
             print(f"❌ Fallback 'got it' audio failed: {e2}")
             raise HTTPException(status_code=500, detail=f"Failed to generate 'got it' audio: {e}")
+
+
+@app.get("/api/phone/one-moment-audio")
+async def get_one_moment_audio(request: Request):
+    """Serve 'One moment.' from cache for pending-response filler polling."""
+    from voice.tts_cache import get_cached, put_cached
+
+    client_id = _get_client_id_from_call(request)
+    if not client_id:
+        raise HTTPException(status_code=404, detail="Call session not found")
+    set_request_client_id(client_id)
+    cache_key = _one_moment_cache_key(client_id)
+    cached = get_cached(PROJECT_ROOT, "one_moment", cache_key)
+    if cached:
+        return Response(
+            content=cached,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=one-moment.mp3",
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(cached)),
+            },
+        )
+    try:
+        voice = cache_key[2]
+        speed = cache_key[3]
+        data = _synthesize_tts_clip(ONE_MOMENT_PHRASE, voice=voice, speed=speed)
+        put_cached(PROJECT_ROOT, "one_moment", cache_key, data)
+        voice_info(
+            "one_moment_audio_generated",
+            client_id_prefix=(client_id or "")[:12],
+            voice=voice,
+            bytes=len(data),
+        )
+        return Response(
+            content=data,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=one-moment.mp3",
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(data)),
+            },
+        )
+    except Exception as e:
+        logger.exception("one_moment_audio_generate_failed: %s", e)
+        try:
+            data = _synthesize_tts_clip(TTS_FALLBACK_TEXT, voice="fable", speed=1.0)
+            put_cached(PROJECT_ROOT, "one_moment", cache_key, data)
+            return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
+        except Exception as e2:
+            logger.exception("one_moment_audio_fallback_failed: %s", e2)
+            raise HTTPException(status_code=500, detail=f"Failed to generate 'one moment' audio: {e}")
 
 
 @app.post("/api/sms/incoming")
@@ -6454,13 +6591,6 @@ async def handle_incoming_sms(request: Request):
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
         tenant = db_tenant_get_by_phone(to_number)
         if not tenant:
-            # Match voice inbound: allow CLIENT_ID / default tenant when Twilio "To" is not in tenants.twilio_phone_number yet.
-            cid_fb = (CLIENT_ID or "").strip()
-            if cid_fb:
-                tenant = db_tenant_get_by_client_id(cid_fb)
-            if not tenant:
-                tenant = db_tenant_get_by_client_id("default")
-        if not tenant:
             sms_info("inbound_skipped", reason="unknown_to_number", to_number=to_number, message_sid=msg_sid or None)
             sms_trace(
                 "inbound_tenant_not_found",
@@ -6470,13 +6600,6 @@ async def handle_incoming_sms(request: Request):
                 hint="ensure_twilio_to_matches_tenant_twilio_phone_number",
             )
             return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
-        if tenant.get("twilio_phone_number", "").strip() != (to_number or "").strip():
-            sms_info(
-                "inbound_tenant_resolved_by_client_id_fallback",
-                client_id=tenant.get("client_id"),
-                to_number=to_number,
-                message_sid=msg_sid or None,
-            )
         set_request_client_id(tenant["client_id"])
         sms_info(
             "inbound_received",
@@ -7080,14 +7203,8 @@ async def handle_incoming_call(request: Request):
             to_number=to_number,
         )
 
-        # Multi-tenant: resolve tenant (same order as SMS inbound — phone, then CLIENT_ID row, then default)
+        # Multi-tenant: resolve tenant strictly by Twilio destination number.
         tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
-        if not tenant and USE_DB:
-            cid_fb = (CLIENT_ID or "").strip()
-            if cid_fb:
-                tenant = db_tenant_get_by_client_id(cid_fb)
-            if not tenant:
-                tenant = db_tenant_get_by_client_id("default")
         tenant_for_access = tenant
         if tenant:
             set_request_client_id(tenant["client_id"])
@@ -7097,13 +7214,6 @@ async def handle_incoming_call(request: Request):
                     client_id=tenant["client_id"],
                     tenant_name=tenant.get("name") or "",
                     to_number=to_number,
-                )
-            else:
-                voice_info(
-                    "tenant_resolved_by_client_id_fallback",
-                    client_id=tenant["client_id"],
-                    to_number=to_number,
-                    hint="set_twilio_phone_number_on_tenant_to_match_Twilio_To",
                 )
         else:
             voice_info("tenant_not_resolved", to_number=to_number)
@@ -7130,7 +7240,11 @@ async def handle_incoming_call(request: Request):
         
         # Pro: call log start + customer memory for repeat callers
         call_log_start(call_sid, from_number, to_number)
-        client_id = (tenant or {}).get("client_id") or (CLIENT_ID or "default")
+        client_id = (tenant or {}).get("client_id") or ""
+        if not client_id:
+            if USE_DB:
+                raise HTTPException(status_code=403, detail="Unknown destination number")
+            client_id = CLIENT_ID or "default"
         caller_memory = refresh_caller_memory_for_prompt(from_number, client_id)
         
         # Create a new session for this call (store client_id for downstream handlers)
@@ -7163,8 +7277,11 @@ async def handle_incoming_call(request: Request):
             "started_at": datetime.now().isoformat(),
             "caller_memory": caller_memory,
         }
-        if client_id and client_id != "default":
-            asyncio.create_task(_warm_client_voice_cache_async(client_id))
+        if client_id:
+            create_tracked_task(
+                _warm_client_voice_cache_async(client_id),
+                name=f"warm_voice_cache:{client_id}",
+            )
         
         base_url = _twilio_base_url(request)
         if not base_url:
@@ -7351,7 +7468,8 @@ async def handle_recording_complete(request: Request):
         if not client_id and USE_DB:
             client_id = db_call_log_get_client_id_by_call_sid(call_sid)
         if not client_id:
-            client_id = CLIENT_ID or "default"
+            voice_warning("recording_complete_unresolved_call_sid", call_sid=call_sid or "")
+            return Response(content="", status_code=200, media_type="text/plain")
         set_request_client_id(client_id)
 
         tenant_rec = db_tenant_get_by_client_id(client_id) if USE_DB and client_id else None
@@ -7390,7 +7508,10 @@ async def handle_recording_complete(request: Request):
 
         st = (recording_status or "").lower()
         if st == "completed" and recording_url and _call_summary_enabled_for_tenant(tenant_rec):
-            asyncio.create_task(_schedule_recording_summary(call_sid, client_id, recording_url, duration_sec))
+            create_tracked_task(
+                _schedule_recording_summary(call_sid, client_id, recording_url, duration_sec),
+                name=f"recording_summary:{call_sid}",
+            )
         return Response(content="", status_code=200, media_type="text/plain")
     except Exception as e:
         logger.exception("recording-complete webhook error: %s", e)
@@ -7406,6 +7527,8 @@ async def process_speech(request: Request):
     """
     try:
         form_data = await request.form()
+        if not _validate_twilio_webhook(request, dict(form_data)):
+            return Response(content="Forbidden", status_code=403, media_type="text/plain")
         call_sid = form_data.get("CallSid")
         speech_result = form_data.get("SpeechResult", "")
         confidence = form_data.get("Confidence", "0")
@@ -7491,6 +7614,8 @@ async def handle_call_status(request: Request):
     """
     try:
         form_data = await request.form()
+        if not _validate_twilio_webhook(request, dict(form_data)):
+            return Response(content="Forbidden", status_code=403, media_type="text/plain")
         call_sid = form_data.get("CallSid")
         call_status = form_data.get("CallStatus")
         
@@ -7521,8 +7646,8 @@ async def handle_call_status(request: Request):
                 client_id_before = call_data_cp.get("client_id")
                 from_number_before = call_data_cp.get("from_number")
                 appointment_created = call_data_cp.get("appointment_created") or False
-            if not client_id_before:
-                client_id_before = get_db_client_id()
+            if not client_id_before and USE_DB and call_sid in call_log_entries:
+                client_id_before = call_log_entries[call_sid].get("client_id")
             if not from_number_before and call_sid in call_log_entries:
                 from_number_before = call_log_entries[call_sid].get("from_number")
             duration_sec = 0
@@ -7543,7 +7668,7 @@ async def handle_call_status(request: Request):
                 if from_number:
                     update_caller_memory(from_number)
                 call_log_end(call_sid)
-                del active_calls[call_sid]
+                cleanup_call_runtime_state(call_sid or "")
                 voice_call_phase(
                     "call_session_cleaned",
                     call_sid=call_sid or "",
@@ -7555,6 +7680,7 @@ async def handle_call_status(request: Request):
                 # Call was logged but not in active_calls (e.g. quick hangup)
                 call_log_set_outcome(call_sid, "missed" if call_status == "completed" else call_status)
                 call_log_end(call_sid)
+                cleanup_call_runtime_state(call_sid or "")
             # Lead capture: when call ended without booking and plan allows
             if USE_DB and client_id_before and client_id_before != "default" and from_number_before and get_plan_limits:
                 try:
@@ -7611,6 +7737,8 @@ async def handle_no_speech(request: Request):
         raise HTTPException(status_code=503, detail="Twilio not installed")
     try:
         form_data = await request.form()
+        if not _validate_twilio_webhook(request, dict(form_data)):
+            return Response(content="Forbidden", status_code=403, media_type="text/plain")
         call_sid = (form_data.get("CallSid") or "").strip()
         _restore_call_context(call_sid or "")
         base_url = _twilio_base_url(request)
@@ -7693,6 +7821,8 @@ async def respond_with_audio(request: Request):
     
     try:
         form_data = await request.form()
+        if not _validate_twilio_webhook(request, dict(form_data)):
+            return Response(content="Forbidden", status_code=403, media_type="text/plain")
         call_sid = form_data.get("CallSid")
         _restore_call_context(call_sid or "")
         # base_url needed for forward_call_to_business in all branches
@@ -7708,9 +7838,7 @@ async def respond_with_audio(request: Request):
                 has_active_call=bool(call_sid and call_sid in active_calls),
             )
             response = VoiceResponse()
-            filler_text = "One moment."
-            filler_encoded = quote(filler_text)
-            filler_audio_url = f"{base_url}/api/phone/tts-audio?text={filler_encoded}&voice={get_tts_voice()}"
+            filler_audio_url = f"{base_url}/api/phone/one-moment-audio?call_sid={call_sid}"
             response.play(filler_audio_url)
             response.pause(length=1)
             response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
@@ -7975,11 +8103,13 @@ async def process_recording(request: Request):
     
     try:
         form_data = await request.form()
+        if not _validate_twilio_webhook(request, dict(form_data)):
+            return Response(content="Forbidden", status_code=403, media_type="text/plain")
         call_sid = form_data.get("CallSid")
         recording_url = form_data.get("RecordingUrl", "")
         _restore_call_context(call_sid or "")
         
-        print(f"🎙️ Recording received: {recording_url} for call {call_sid}")
+        logger.info("recording_received call_sid=%s", call_sid or "")
         
         if not call_sid or call_sid not in active_calls:
             response = VoiceResponse()
@@ -7987,7 +8117,7 @@ async def process_recording(request: Request):
             return Response(content=str(response), media_type="application/xml")
         
         if not recording_url:
-            print("⚠️ No recording URL provided")
+            logger.warning("recording_missing_url call_sid=%s", call_sid or "")
             response = VoiceResponse()
             response.say("I didn't receive the recording. Please try again.", voice='alice')
             bu = _twilio_base_url(request)
@@ -8011,7 +8141,11 @@ async def process_recording(request: Request):
             timeout=30.0
         )
         if recording_response.status_code != 200:
-            print(f"❌ Failed to download recording: {recording_response.status_code}")
+            logger.warning(
+                "recording_download_failed call_sid=%s status=%s",
+                call_sid or "",
+                recording_response.status_code,
+            )
             response = VoiceResponse()
             response.say("I had trouble processing the recording. Please try again.", voice='alice')
             bu = _twilio_base_url(request)
@@ -8024,7 +8158,7 @@ async def process_recording(request: Request):
         temp_file = io.BytesIO(audio_data)
         temp_file.name = "recording.wav"
         
-        print(f"🔊 Transcribing with Whisper...")
+        logger.info("recording_transcribe_start call_sid=%s", call_sid or "")
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=temp_file
@@ -8032,7 +8166,7 @@ async def process_recording(request: Request):
         )
         
         speech_result = transcript.text
-        print(f"✅ Whisper transcription: {speech_result}")
+        logger.info("recording_transcribe_ok call_sid=%s transcript_len=%s", call_sid or "", len(speech_result or ""))
 
         base_url = _twilio_base_url(request)
         rec_key = (form_data.get("RecordingSid") or recording_url or "").strip()
@@ -8099,16 +8233,20 @@ async def recording_status(request: Request):
     """Handle recording status updates from Twilio"""
     # This endpoint can be used for logging or additional processing
     form_data = await request.form()
-    print(f"📹 Recording status: {form_data.get('RecordingStatus')}")
+    if not _validate_twilio_webhook(request, dict(form_data)):
+        return Response(content="Forbidden", status_code=403, media_type="text/plain")
+    logger.info("recording_status_update status=%s", form_data.get("RecordingStatus"))
     return Response(content="OK", media_type="text/plain")
 
 @app.post("/api/phone/transcribe")
-async def transcribe_phone_audio(audio_data: str = Form(...)):
+async def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
     """
     Transcribe audio from phone call using OpenAI Whisper.
     This endpoint receives base64-encoded audio from Twilio.
     """
     try:
+        if not _validate_twilio_webhook(request, {"audio_data": audio_data}):
+            raise HTTPException(status_code=403, detail="Forbidden")
         # Decode base64 audio
         audio_bytes = base64.b64decode(audio_data)
         
