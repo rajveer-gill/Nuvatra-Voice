@@ -1,13 +1,56 @@
+# Render Blueprint — Nuvatra Voice backend + Redis + cron jobs
+# Apply via Render Dashboard → Blueprints, or link repo with render.yaml at root.
+# Set secret values in the dashboard (sync: false); names only are declared here.
+
+databases:
+  - name: nuvatra-voice-db
+    plan: starter
+    region: virginia
+    databaseName: nuvatra
+    user: nuvatra
+
 services:
+  - type: redis
+    name: nuvatra-voice-redis
+    plan: starter
+    region: virginia
+    maxmemoryPolicy: allkeys-lru
+    # Empty ipAllowList = Render private network only; never add 0.0.0.0/0 (see docs/REDIS-SECURITY.md)
+    ipAllowList: []
+
   - type: web
     name: nuvatra-voice-backend
     env: python
+    region: virginia
+    plan: starter
+    healthCheckPath: /api/health
     buildCommand: cd backend && pip install -r requirements.txt
     startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: nuvatra-voice-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: nuvatra-voice-redis
+          property: connectionString
       - key: OPENAI_API_KEY
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: CLERK_JWKS_URL
+        sync: false
+      - key: CLERK_ISSUER
+        sync: false
+      - key: CLERK_AUDIENCE
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: ADMIN_CLERK_USER_IDS
         sync: false
       - key: TWILIO_ACCOUNT_SID
         sync: false
@@ -15,14 +58,114 @@ services:
         sync: false
       - key: TWILIO_PHONE_NUMBER
         sync: false
-      - key: NGROK_URL
+        optional: true
+      - key: STRIPE_SECRET_KEY
         sync: false
-      - key: FRONTEND_URL
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_STARTER_PRICE_ID
+        sync: false
+      - key: STRIPE_GROWTH_PRICE_ID
+        sync: false
+      - key: STRIPE_PRO_PRICE_ID
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: REMINDER_TIMEZONE
+        sync: false
+        optional: true
+      - key: OVERAGE_PRICE_PER_MINUTE
+        sync: false
+        optional: true
+      - key: RETENTION_DAYS
+        sync: false
+        optional: true
+      - key: OFFSITE_EXPORT_DIR
+        sync: false
+        optional: true
+      - key: EXPORT_INCLUDE_AUDIT_EVENTS
+        sync: false
+        optional: true
+      - key: SENTRY_DSN
+        sync: false
+        optional: true
+      - key: SENTRY_ENVIRONMENT
+        sync: false
+        optional: true
+      - key: SENTRY_TRACES_SAMPLE_RATE
+        sync: false
+        optional: true
+      - key: VOICE_STT_PROVIDER
+        sync: false
+        optional: true
+      - key: DEEPGRAM_API_KEY
+        sync: false
+        optional: true
+      - key: MEDIA_STREAM_SIGNING_SECRET
+        sync: false
+        optional: true
+      - key: CALL_RECORDING_ENABLED
+        sync: false
+        optional: true
+      - key: CALL_SUMMARY_ENABLED
+        sync: false
+        optional: true
+      - key: LOG_LEVEL
+        sync: false
+        optional: true
+      # Legacy alias — prefer PUBLIC_BASE_URL in production
+      - key: NGROK_URL
         sync: false
         optional: true
 
+  - type: cron
+    name: nuvatra-cron-appointment-reminders
+    env: docker
+    region: virginia
+    schedule: "0 14 * * *"
+    dockerCommand: |
+      curl -sf -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${PUBLIC_BASE_URL}/api/cron/appointment-reminders"
+    envVars:
+      - key: CRON_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
 
+  - type: cron
+    name: nuvatra-cron-process-overage
+    env: docker
+    region: virginia
+    schedule: "0 15 1 * *"
+    dockerCommand: |
+      curl -sf -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${PUBLIC_BASE_URL}/api/cron/process-overage"
+    envVars:
+      - key: CRON_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
 
+  - type: cron
+    name: nuvatra-cron-retention-purge
+    env: docker
+    region: virginia
+    schedule: "0 6 * * *"
+    dockerCommand: |
+      curl -sf -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${PUBLIC_BASE_URL}/api/cron/retention-purge"
+    envVars:
+      - key: CRON_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
 
-
-
+  - type: cron
+    name: nuvatra-cron-export-snapshot
+    env: docker
+    region: virginia
+    schedule: "15 6 * * *"
+    dockerCommand: |
+      curl -sf -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${PUBLIC_BASE_URL}/api/cron/export-snapshot"
+    envVars:
+      - key: CRON_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false

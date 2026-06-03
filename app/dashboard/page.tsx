@@ -16,11 +16,16 @@ export const TEAM_ROSTER_SECTION_ID = 'team-roster-settings'
 export const STORE_PHONE_SECTION_ID = 'store-phone-settings'
 
 type SetupStatusSnapshot = {
+  complete?: boolean
+  missing?: string[]
+  warnings?: string[]
   roster_ready?: boolean
   forwarding_phone_ready?: boolean
   voice_ready?: boolean
-  /** Store phone set but roster empty — callers are transferred, AI stays off */
   roster_only_gap?: boolean
+  twilio_number_set?: boolean
+  webhooks_configured?: boolean
+  onboarding_completed_at?: string | null
 }
 
 const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
@@ -264,6 +269,19 @@ export default function DashboardPage() {
     window.addEventListener('call-surge-setup-status', onRefresh)
     return () => window.removeEventListener('call-surge-setup-status', onRefresh)
   }, [access, fetchSetupStatus])
+
+  useEffect(() => {
+    if (access !== 'granted' || !setupStatus) return
+    const needsOnboarding =
+      !setupStatus.onboarding_completed_at &&
+      (setupStatus.voice_ready === false || setupStatus.webhooks_configured === false)
+    if (needsOnboarding && typeof window !== 'undefined') {
+      const path = window.location.pathname
+      if (path === '/dashboard' && !window.location.search.includes('tab=settings')) {
+        router.replace('/dashboard/onboarding')
+      }
+    }
+  }, [access, setupStatus, router])
 
   const showVoiceSetupWarning = access === 'granted' && setupStatus?.voice_ready === false
   const rosterOnlyGap =

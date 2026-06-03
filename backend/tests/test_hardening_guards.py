@@ -27,8 +27,11 @@ def test_twilio_webhook_validation_fail_closed_in_db(monkeypatch):
     assert main._validate_twilio_webhook(DummyReq(), {}) is False
 
 
+from voice.call_sid import SAMPLE_CALL_SID
+
+
 def test_call_runtime_cleanup_clears_response_status():
-    call_sid = "CA_cleanup_test"
+    call_sid = SAMPLE_CALL_SID
     main.active_calls[call_sid] = {"client_id": "tenant-a"}
     main.response_status[call_sid] = {"status": "pending"}
     main.cleanup_call_runtime_state(call_sid)
@@ -41,4 +44,10 @@ def test_phone_status_rejects_invalid_signature(monkeypatch):
     client = TestClient(main.app)
     resp = client.post("/api/phone/status", data={"CallSid": "CAx", "CallStatus": "completed"})
     assert resp.status_code == 403
+
+
+def test_active_calls_endpoint_requires_admin():
+    client = TestClient(main.app)
+    resp = client.get("/api/phone/calls")
+    assert resp.status_code == 401
 

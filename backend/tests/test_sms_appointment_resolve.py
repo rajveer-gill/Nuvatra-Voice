@@ -46,7 +46,7 @@ def test_post_booking_links_sms_session(monkeypatch):
         choices=[MagicMock(message=MagicMock(content="BOOKING: Pat|+15551110000||2026-05-28|14:00|Cut|"))]
     )
 
-    call_sid = "CA_test_link"
+    call_sid = "CAeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     call_data = {
         "client_id": "test",
         "from_number": "+15551110000",

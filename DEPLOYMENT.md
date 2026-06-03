@@ -93,16 +93,23 @@ In Railway, update the `NGROK_URL` variable to your Railway URL (no need for ngr
 Without `DATABASE_URL`, data is stored in memory/JSON and is lost on restart. With PostgreSQL, appointments, messages, call logs, caller memory, and booked slots persist.
 
 ### Step 4: Add Environment Variables
-In Render dashboard → your web service → Environment:
+In Render dashboard → your web service → Environment (or apply [render.yaml](./render.yaml) blueprint):
+
 ```
 DATABASE_URL=postgres://...   (from Step 3)
+REDIS_URL=redis://...         (Render Redis — voice call state)
 OPENAI_API_KEY=your_key
+PUBLIC_BASE_URL=https://your-app.onrender.com
+FRONTEND_URL=https://www.call-surge.com
+CLERK_JWKS_URL=https://clerk.call-surge.com/.well-known/jwks.json
+CLERK_ISSUER=https://clerk.call-surge.com
+CLERK_AUDIENCE=https://your-app.onrender.com
+CRON_SECRET=your-random-secret
 TWILIO_ACCOUNT_SID=your_sid
 TWILIO_AUTH_TOKEN=your_token
-TWILIO_PHONE_NUMBER=+19254815386
-NGROK_URL=https://your-app.onrender.com
-CLIENT_ID=demo-store
 ```
+
+**Do not set `CLIENT_ID` on multi-tenant production** — leave it unset when using Clerk + PostgreSQL. See [docs/PRODUCTION-ENV.md](./docs/PRODUCTION-ENV.md) for the full checklist.
 
 ### Step 5: Deploy
 1. Click "Create Web Service"
@@ -122,9 +129,13 @@ The Next.js app (marketing + login + dashboard) should be deployed where it runs
 |----------|--------|
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Your Clerk publishable key (pk_test_… or pk_live_…) |
 | `CLERK_SECRET_KEY` | Your Clerk secret key (sk_test_… or sk_live_…) |
-| `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL` | `/dashboard` |
-| `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL` | `/dashboard` |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_URL` | `/sign-in` |
+| `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | `/sign-up` |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL` | `/dashboard` |
+| `NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL` | `/dashboard` |
+| `NEXT_PUBLIC_CLERK_JWT_TEMPLATE` | `nuvatra-backend` |
 | `NEXT_PUBLIC_API_URL` | Your backend URL (e.g. `https://nuvatra-voice.onrender.com`) |
+| `ADMIN_CLERK_USER_IDS` | Same comma-separated IDs as backend |
 
 3. Deploy. Sign-in and the protected dashboard will work in production only when these are set.
 
@@ -189,7 +200,14 @@ Use this as a single reference for every env var used by the app.
 | `CLERK_AUDIENCE` | Yes (multi-tenant) | Must match JWT template `aud` claim. See `docs/CLERK-JWT-SETUP.md`. |
 | `CLERK_SECRET_KEY` | Yes (admin) | Clerk secret key for creating invitations. |
 | `ADMIN_CLERK_USER_IDS` | Yes (admin) | Comma-separated Clerk user IDs who can access `/admin`. |
-| `FRONTEND_URL` | Recommended | Frontend URL for CORS and Stripe redirects (e.g. `https://nuvatra-voice.vercel.app`). |
+| `PUBLIC_BASE_URL` | Yes (production) | Canonical HTTPS origin of this API (e.g. `https://nuvatra-voice.onrender.com`). Twilio webhooks and TwiML callbacks. Prefer over `NGROK_URL`. |
+| `REDIS_URL` | Yes (production) | Render Redis connection string for shared voice call state. Security audit: `docs/REDIS-SECURITY.md`. Confirm Admin → Ops **Redis production ready** before Deepgram. |
+| `FRONTEND_URL` | Recommended | Frontend URL for CORS and Stripe redirects (e.g. `https://www.call-surge.com`). |
+| `SENTRY_DSN` | Optional | Backend Sentry DSN. |
+| `SENTRY_ENVIRONMENT` | Optional | e.g. `production`. |
+| `SENTRY_TRACES_SAMPLE_RATE` | Optional | Default `0.1` in production. |
+| `VOICE_STT_PROVIDER` | Optional | `deepgram` or `twilio` (default). |
+| `DEEPGRAM_API_KEY` | Optional | Required when `VOICE_STT_PROVIDER=deepgram`. |
 | `TWILIO_ACCOUNT_SID` | Yes (phone/SMS) | Twilio account SID. |
 | `TWILIO_AUTH_TOKEN` | Recommended | Twilio auth token. When set, webhook signature is validated on `/api/phone/incoming` and `/api/sms/incoming`. |
 | `TWILIO_PHONE_NUMBER` | Optional | Default From number for SMS when not using per-tenant number. |
@@ -198,8 +216,8 @@ Use this as a single reference for every env var used by the app.
 | `STRIPE_STARTER_PRICE_ID` | Yes (billing) | Stripe price ID for Starter plan (monthly). |
 | `STRIPE_GROWTH_PRICE_ID` | Yes (billing) | Stripe price ID for Growth plan (monthly). |
 | `STRIPE_PRO_PRICE_ID` | Yes (billing) | Stripe price ID for Pro plan (monthly). |
-| `NGROK_URL` | Yes (phone) | Public backend URL (e.g. `https://your-app.onrender.com`) for TwiML callback URLs. |
-| `CLIENT_ID` | Optional | Single-tenant mode: use when `CLERK_JWKS_URL` is not set. |
+| `NGROK_URL` | Legacy | Dev/local alias for public URL. Production: use `PUBLIC_BASE_URL`. |
+| `CLIENT_ID` | Dev only | Single-tenant file mode when `CLERK_JWKS_URL` is not set. **Do not set on multi-tenant production.** |
 | `DEBUG_CORS` | Optional | Set to `1` to enable CORS debug middleware (file + console). Leave unset in production. |
 | `LOG_LEVEL` | Optional | Logging level: DEBUG, INFO, WARNING, ERROR. Default: INFO. |
 | `CRON_SECRET` | Yes (cron) | Shared secret for cron endpoints (`X-Cron-Secret` header). Required for appointment reminders and overage billing. |
@@ -211,10 +229,10 @@ Use this as a single reference for every env var used by the app.
 
 ### Cron Jobs (Render)
 
-To enable day-before appointment reminders (Growth/Pro plans):
+Cron jobs are declared in [render.yaml](./render.yaml). To add manually:
 
 1. In Render dashboard, add a **Cron Job** service.
-2. **Command**: `curl -s -X POST -H "X-Cron-Secret: $CRON_SECRET" https://your-backend.onrender.com/api/cron/appointment-reminders`
+2. **Command**: `curl -sf -X POST -H "X-Cron-Secret: $CRON_SECRET" $PUBLIC_BASE_URL/api/cron/appointment-reminders`
 3. **Schedule**: Daily at 14:00 UTC (or adjust for your timezone via `REMINDER_TIMEZONE`).
 4. Add `CRON_SECRET` as an environment variable (same value as on your web service).
 
@@ -245,10 +263,13 @@ To enable day-before appointment reminders (Growth/Pro plans):
 |----------|----------|-------------|
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Yes | Clerk publishable key. |
 | `CLERK_SECRET_KEY` | Yes | Clerk secret key. |
-| `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL` | Optional | Redirect after sign-in (e.g. `/dashboard`). |
-| `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL` | Optional | Redirect after sign-up (e.g. `/dashboard`). |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_URL` | Recommended | `/sign-in` |
+| `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | Recommended | `/sign-up` |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL` | Recommended | `/dashboard` |
 | `NEXT_PUBLIC_API_URL` | Yes | Backend API base URL. |
 | `NEXT_PUBLIC_CLERK_JWT_TEMPLATE` | Yes (multi-tenant) | Clerk JWT template name (e.g. `nuvatra-backend`). See `docs/CLERK-JWT-SETUP.md`. |
+| `NEXT_PUBLIC_SENTRY_DSN` | Optional | Frontend Sentry DSN. |
+| `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | Optional | Default `0.1`. |
 
 ## Audit log and retention
 

@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Request, Form, Depends, WebSocket
 from contextlib import asynccontextmanager
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, JSONResponse
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError, field_validator
 from typing import Optional, List, Literal, Any
 import uuid
@@ -64,6 +64,7 @@ except ImportError:
     STRIPE_AVAILABLE = False
 
 from prompts.receptionist import build_system_prompt
+from voice.call_session_store import MemoryCallSessionStore, get_call_session_store
 from settings import get_settings
 from security.webhooks import validate_twilio_webhook as validate_twilio_signature, verify_stripe_event
 from security.redaction import mask_phone_e164
@@ -206,10 +207,21 @@ def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) ->
     )
 
 
+def _sentry_traces_sample_rate() -> float:
+    raw = (os.environ.get("SENTRY_TRACES_SAMPLE_RATE") or "").strip()
+    if raw:
+        try:
+            return max(0.0, min(1.0, float(raw)))
+        except ValueError:
+            pass
+    env = (os.environ.get("SENTRY_ENVIRONMENT") or "production").lower()
+    return 1.0 if env in ("development", "dev", "local", "test") else 0.1
+
+
 sentry_sdk.init(
     dsn=os.environ.get("SENTRY_DSN"),
     environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
-    traces_sample_rate=1.0,
+    traces_sample_rate=_sentry_traces_sample_rate(),
     integrations=[StarletteIntegration(), FastApiIntegration()],
 )
 
@@ -346,9 +358,28 @@ async def request_id_middleware(request: Request, call_next):
 
 
 @app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add browser hardening headers on every response (additive, non-destructive)."""
+    from security.http_headers import apply_security_headers
+
+    response = await call_next(request)
+    apply_security_headers(response, request=request)
+    return response
+
+
+@app.middleware("http")
 async def observability_webhook_timing(request: Request, call_next):
     """When OBS_TRACE_WEBHOOKS=1, log /api/phone/* and /api/sms/* latency and status."""
     return await webhook_timing_middleware(request, call_next)
+
+
+@app.middleware("http")
+async def db_connection_release_middleware(request: Request, call_next):
+    """Return pooled DB connections after each HTTP request."""
+    try:
+        return await call_next(request)
+    finally:
+        db_release_thread_connection()
 
 
 # In-memory rate limit for public webhooks (phone/SMS) — 120 req/min per IP
@@ -612,11 +643,17 @@ try:
         db_appointments_mark_reminder_sent,
         db_appointments_in_date_range,
         db_ping,
+        db_release_thread_connection,
         db_retention_purge,
         db_export_tenant_snapshot,
         db_legal_hold_set,
         db_legal_hold_clear,
         db_legal_hold_list_active,
+        db_cron_run_start,
+        db_cron_run_finish,
+        db_cron_runs_last_success,
+        DAILY_CRON_JOBS,
+        CRON_JOB_NAMES,
     )
     _db_imported = True
     print("[INIT] Database module imported (connection deferred)", flush=True)
@@ -991,7 +1028,18 @@ def business_info_for_dashboard(tenant: Optional[dict]) -> dict:
 
 
 def _default_client_config_data(client_id: str, plan: str = "free") -> dict:
-    """Seed clients/<client_id>/config.json (admin create + first PATCH when file missing on disk)."""
+    """Seed clients/<client_id>/config.json from template when present."""
+    template_path = PROJECT_ROOT / "clients" / "template" / "config.json"
+    if template_path.is_file():
+        try:
+            base = json.loads(template_path.read_text(encoding="utf-8"))
+            if isinstance(base, dict):
+                out = dict(base)
+                out["client_id"] = client_id
+                out["plan"] = plan
+                return out
+        except Exception as e:
+            logger.warning("template_config_load_failed err=%s", e)
     return {
         "client_id": client_id,
         "business_name": "",
@@ -3532,6 +3580,8 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             call_sid=call_sid,
             client_id_prefix=str(call_data.get("client_id") or "")[:12],
         )
+    finally:
+        _persist_call_session(call_sid)
 
 def should_forward_to_human(
     user_input: str,
@@ -3741,8 +3791,13 @@ async def root():
 
 @app.get("/api/health")
 async def health():
-    """Health check for load balancers and monitoring. Returns 200 with status and DB reachability."""
+    """Health check for load balancers and monitoring. Returns 503 when DB is required but unreachable."""
     db_ok = "ok" if (USE_DB and db_ping()) else ("error" if USE_DB else "n/a")
+    if USE_DB and db_ok == "error":
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "database": db_ok},
+        )
     return {"status": "ok", "database": db_ok}
 
 
@@ -3778,13 +3833,36 @@ def _verify_cron_secret(request: Request) -> bool:
     received = request.headers.get("X-Cron-Secret", "")
     return hmac.compare_digest(expected.encode(), received.encode()) if received else False
 
+
+def _cron_stale_jobs(last_success: dict) -> List[str]:
+    """Daily cron jobs with no successful run in the last 36 hours."""
+    stale: List[str] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=36)
+    for job in DAILY_CRON_JOBS:
+        ts = last_success.get(job)
+        if not ts:
+            stale.append(job)
+            continue
+        try:
+            finished = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if finished.tzinfo is None:
+                finished = finished.replace(tzinfo=timezone.utc)
+            if finished < cutoff:
+                stale.append(job)
+        except Exception:
+            stale.append(job)
+    return stale
+
+
 @app.post("/api/cron/appointment-reminders")
 async def cron_appointment_reminders(request: Request):
     """Day-before SMS reminders for accepted appointments. Requires X-Cron-Secret. Idempotent."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
+    run_id = db_cron_run_start("appointment-reminders") if USE_DB else None
     if not USE_DB:
-        return {"ok": True, "reminders_sent": 0, "errors": 0, "skipped": 0, "tenants_processed": 0}
+        result = {"ok": True, "reminders_sent": 0, "errors": 0, "skipped": 0, "tenants_processed": 0}
+        return result
     tz_name = (os.getenv("REMINDER_TIMEZONE") or "UTC").strip()
     try:
         from zoneinfo import ZoneInfo
@@ -3834,15 +3912,21 @@ async def cron_appointment_reminders(request: Request):
                         time.sleep(2 ** attempt)
             if not ok:
                 errors += 1
-    return {"ok": True, "reminders_sent": reminders_sent, "errors": errors, "skipped": skipped, "tenants_processed": tenants_processed}
+    result = {"ok": True, "reminders_sent": reminders_sent, "errors": errors, "skipped": skipped, "tenants_processed": tenants_processed}
+    db_cron_run_finish(run_id, "success", result)
+    return result
 
 @app.post("/api/cron/process-overage")
 async def cron_process_overage(request: Request):
     """Monthly overage billing. Compute overage for previous month and create Stripe invoice items. Requires X-Cron-Secret."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
+    run_id = db_cron_run_start("process-overage") if USE_DB else None
     if not USE_DB or not STRIPE_AVAILABLE or not stripe:
-        return {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 0}
+        result = {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 0}
+        if run_id:
+            db_cron_run_finish(run_id, "success", result)
+        return result
     from billing_config import get_overage_price_per_minute
 
     price_per_min = get_overage_price_per_minute()
@@ -3852,7 +3936,10 @@ async def cron_process_overage(request: Request):
     errors = 0
     secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not secret:
-        return {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 1}
+        result = {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 1}
+        if run_id:
+            db_cron_run_finish(run_id, "success", result)
+        return result
     stripe.api_key = secret
     tenants = db_tenant_list_all()
     for t in tenants:
@@ -3888,7 +3975,10 @@ async def cron_process_overage(request: Request):
             logger.error("overage_invoice_failed", extra={"client_id": cid, "month": prev_month, "error": str(e)})
             errors += 1
         tenants_processed += 1
-    return {"ok": True, "tenants_processed": tenants_processed, "invoices_created": invoices_created, "errors": errors}
+    result = {"ok": True, "tenants_processed": tenants_processed, "invoices_created": invoices_created, "errors": errors}
+    if run_id:
+        db_cron_run_finish(run_id, "success", result)
+    return result
 
 
 @app.post("/api/cron/retention-purge")
@@ -3896,11 +3986,15 @@ async def cron_retention_purge(request: Request):
     """Purge expired rows (default 3 years) while honoring active legal holds."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
+    run_id = db_cron_run_start("retention-purge") if USE_DB else None
     if not USE_DB:
-        return {"ok": True, "deleted": {"audit_events": 0, "call_log": 0, "sms_sessions": 0}, "days": 0}
+        result = {"ok": True, "deleted": {"audit_events": 0, "call_log": 0, "sms_sessions": 0}, "days": 0}
+        return result
     days = max(1, int((os.getenv("RETENTION_DAYS") or str(365 * 3)).strip()))
     deleted = db_retention_purge(days=days)
-    return {"ok": True, "deleted": deleted, "days": days}
+    result = {"ok": True, "deleted": deleted, "days": days}
+    db_cron_run_finish(run_id, "success", result)
+    return result
 
 
 @app.post("/api/cron/export-snapshot")
@@ -3908,14 +4002,19 @@ async def cron_export_snapshot(request: Request):
     """Daily tenant-scoped JSON snapshot export with SHA256 manifest."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
+    run_id = db_cron_run_start("export-snapshot") if USE_DB else None
     if not USE_DB:
         return {"ok": True, "exported": False}
     export_root = (os.getenv("OFFSITE_EXPORT_DIR") or str(PROJECT_ROOT / "exports")).strip()
     include_audit = (os.getenv("EXPORT_INCLUDE_AUDIT_EVENTS") or "1").strip().lower() in ("1", "true", "yes")
     result = db_export_tenant_snapshot(export_root, include_audit=include_audit)
     if not result:
-        return {"ok": False, "exported": False}
-    return {"ok": True, "exported": True, **result}
+        out = {"ok": False, "exported": False}
+        db_cron_run_finish(run_id, "error", out)
+        return out
+    out = {"ok": True, "exported": True, **result}
+    db_cron_run_finish(run_id, "success", out)
+    return out
 
 class AdminCreateTenantRequest(BaseModel):
     client_id: str
@@ -4718,16 +4817,30 @@ async def admin_bulk_create_tenants(
 @app.get("/api/admin/ops/self-check")
 async def admin_ops_self_check(_: str = Depends(require_admin)):
     """Production safety checks for webhook and auth hardening."""
+    from voice.redis_ops_health import redis_ops_health
+
     cron_secret_set = bool((os.getenv("CRON_SECRET") or "").strip())
     twilio_auth_token_set = bool((os.getenv("TWILIO_AUTH_TOKEN") or "").strip())
     public_base_url_set = bool((os.getenv("PUBLIC_BASE_URL") or "").strip())
     client_id_set = bool((os.getenv("CLIENT_ID") or "").strip())
+    last_cron_runs = db_cron_runs_last_success() if USE_DB else {}
+    stale_cron_jobs = _cron_stale_jobs(last_cron_runs) if USE_DB and cron_secret_set else list(DAILY_CRON_JOBS)
+    stt_provider = (os.getenv("VOICE_STT_PROVIDER") or "twilio").strip().lower()
+    deepgram_key_set = bool((os.getenv("DEEPGRAM_API_KEY") or "").strip())
+    redis_health = redis_ops_health()
     return {
         "public_base_url_set": public_base_url_set,
         "twilio_signature_validation_enabled": twilio_auth_token_set,
         "cron_secret_set": cron_secret_set,
         "multi_tenant_client_id_env_ok": not client_id_set,
         "database_enabled": bool(USE_DB),
+        **redis_health,
+        "clerk_issuer_set": bool((os.getenv("CLERK_ISSUER") or "").strip()),
+        "clerk_audience_set": bool((os.getenv("CLERK_AUDIENCE") or "").strip()),
+        "deepgram_ready": stt_provider != "deepgram" or deepgram_key_set,
+        "last_cron_runs": last_cron_runs,
+        "stale_cron_jobs": stale_cron_jobs,
+        "cron_jobs_healthy": len(stale_cron_jobs) == 0,
     }
 
 
@@ -4822,6 +4935,16 @@ async def admin_update_tenant_twilio_phone(
     if not db_tenant_set_twilio_phone(tenant_id, phone):
         raise HTTPException(status_code=500, detail="Failed to update Twilio number")
     updated = db_tenant_get_by_id(tenant_id)
+    from twilio_provision import configure_webhooks, public_webhook_result
+
+    base = _public_base_url()
+    webhook_config = configure_webhooks(
+        account_sid=TWILIO_ACCOUNT_SID or "",
+        auth_token=TWILIO_AUTH_TOKEN or "",
+        phone=(updated or {}).get("twilio_phone_number") or phone,
+        base_url=base,
+    )
+    public_config = public_webhook_result(webhook_config)
     audit_log(
         "admin",
         "tenant_twilio_phone_updated",
@@ -4829,10 +4952,13 @@ async def admin_update_tenant_twilio_phone(
         resource_type="tenant",
         resource_id=tenant_id,
         client_id=tenant.get("client_id"),
-        details={"twilio_phone_number": (updated or {}).get("twilio_phone_number") or phone},
+        details={
+            "twilio_phone_number": (updated or {}).get("twilio_phone_number") or phone,
+            "webhook_config": public_config,
+        },
         request=request,
     )
-    return {"success": True, "tenant": updated}
+    return {"success": True, "tenant": updated, "webhook_config": public_config}
 
 @app.delete("/api/admin/tenants/{tenant_id}")
 async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: str = Depends(require_admin)):
@@ -5936,7 +6062,7 @@ SETUP_REQUIRED_FIELDS = [
     ("address", "Address"),
 ]
 
-def get_setup_status(info_override: Optional[dict] = None) -> dict:
+def get_setup_status(info_override: Optional[dict] = None, *, twilio_phone: Optional[str] = None) -> dict:
     """Return setup completeness. Uses info_override if provided (e.g. with tenant phone merged), else get_business_info()."""
     info = info_override if info_override is not None else get_business_info()
     missing: List[str] = []
@@ -5979,6 +6105,33 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
             "Add services in Settings so callers can choose a service type during booking. "
             "Without a service menu, the AI will not ask which service they want."
         )
+    twilio_number_set = bool((twilio_phone or "").strip())
+    webhooks_configured = False
+    if twilio_number_set:
+        from twilio_provision import verify_webhooks_match_cached
+
+        base = _public_base_url()
+        if base and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+            verify = verify_webhooks_match_cached(
+                account_sid=TWILIO_ACCOUNT_SID,
+                auth_token=TWILIO_AUTH_TOKEN,
+                phone=twilio_phone or "",
+                base_url=base,
+            )
+            webhooks_configured = bool(verify.get("webhooks_configured"))
+            if not webhooks_configured:
+                warnings.append(
+                    "Twilio webhooks for your AI phone number are missing or misconfigured. "
+                    "Ask your admin to save the number again in Admin or set Voice + Messaging URLs in Twilio Console."
+                )
+        else:
+            warnings.append(
+                "AI phone number is set but webhook verification is unavailable (PUBLIC_BASE_URL or Twilio credentials missing on server)."
+            )
+    elif voice_ready:
+        warnings.append(
+            "No AI phone number is linked to this account yet. Your admin must assign a Twilio number before callers can reach the AI."
+        )
     return {
         "complete": len(missing) == 0,
         "missing": missing,
@@ -5987,13 +6140,17 @@ def get_setup_status(info_override: Optional[dict] = None) -> dict:
         "forwarding_phone_ready": store_phone_ready,
         "voice_ready": voice_ready,
         "roster_only_gap": roster_only_gap,
+        "twilio_number_set": twilio_number_set,
+        "webhooks_configured": webhooks_configured,
+        "onboarding_completed_at": (info.get("onboarding_completed_at") or "").strip() or None,
     }
 
 @app.get("/api/setup-status")
 async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subscription)):
     """Return which required/recommended business info fields are missing. Used for setup checklist."""
     info = business_info_for_dashboard(tenant)
-    body = get_setup_status(info_override=info)
+    twilio_phone = (tenant or {}).get("twilio_phone_number") if tenant else None
+    body = get_setup_status(info_override=info, twilio_phone=twilio_phone)
     if _settings_load_debug_enabled():
         cid = (tenant or {}).get("client_id") if tenant else None
         prefix = (str(cid)[:10] + "…") if cid else "none"
@@ -6004,6 +6161,26 @@ async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subsc
             len(body.get("missing") or []),
         )
     return body
+
+
+@app.post("/api/onboarding/complete")
+async def api_onboarding_complete(tenant: Optional[dict] = Depends(require_active_subscription)):
+    """Mark guided onboarding as completed for this tenant."""
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Tenant required")
+    cid = (tenant.get("client_id") or "").strip()
+    if not cid:
+        raise HTTPException(status_code=400, detail="client_id missing")
+    set_request_client_id(cid)
+    raw = _read_raw_client_config(cid) or _default_client_config_data(cid, tenant.get("plan") or "free")
+    raw["onboarding_completed_at"] = datetime.now(timezone.utc).isoformat()
+    if USE_DB:
+        if not db_tenant_set_business_config(cid, raw):
+            raise HTTPException(status_code=500, detail="Failed to save onboarding state")
+    save_raw_client_config(cid, raw)
+    info = business_info_for_dashboard(tenant)
+    twilio_phone = tenant.get("twilio_phone_number")
+    return get_setup_status(info_override=info, twilio_phone=twilio_phone)
 
 
 def _staff_sanitize_single_line(raw: Optional[str]) -> str:
@@ -6355,6 +6532,56 @@ def _weekday_sun_zero(dt: datetime) -> int:
     return (dt.weekday() + 1) % 7
 
 
+@app.get("/api/analytics/health")
+async def get_analytics_health(
+    tenant: Optional[dict] = Depends(require_tenant),
+    _: None = Depends(require_active_subscription),
+):
+    """7-day call health metrics for tenant dashboard (not plan-gated)."""
+    period_days = 7
+    log = _load_call_log(days=period_days)
+    total = len(log)
+    if total == 0:
+        return {
+            "period_days": period_days,
+            "calls_total": 0,
+            "forward_rate": 0.0,
+            "error_rate": 0.0,
+            "missed_rate": 0.0,
+            "booking_completion_rate": 0.0,
+            "avg_duration_sec": 0,
+            "by_outcome": {},
+        }
+    by_outcome: dict[str, int] = {}
+    durations: list[int] = []
+    booking_signals = 0
+    for entry in log:
+        o = entry.get("outcome") or "unknown"
+        by_outcome[o] = by_outcome.get(o, 0) + 1
+        ds = entry.get("duration_sec")
+        if ds is not None:
+            try:
+                durations.append(int(ds))
+            except (TypeError, ValueError):
+                pass
+        if entry.get("call_summary") or entry.get("category") == "booking":
+            booking_signals += 1
+    forwarded = by_outcome.get("forwarded", 0)
+    errors = by_outcome.get("error", 0)
+    missed = by_outcome.get("missed", 0) + by_outcome.get("no_answer", 0)
+    answered = by_outcome.get("answered_by_ai", 0)
+    return {
+        "period_days": period_days,
+        "calls_total": total,
+        "forward_rate": round(forwarded / total, 3),
+        "error_rate": round(errors / total, 3),
+        "missed_rate": round(missed / total, 3),
+        "booking_completion_rate": round(booking_signals / total, 3) if booking_signals else round(answered / total, 3),
+        "avg_duration_sec": round(sum(durations) / len(durations), 1) if durations else 0,
+        "by_outcome": by_outcome,
+    }
+
+
 @app.get("/api/analytics/summary")
 async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
     """Pro: Peak call times, outcomes, total calls. Filtered by plan (call_log_days).
@@ -6522,8 +6749,26 @@ async def text_to_speech(request: TTSRequest, _: None = Depends(require_active_s
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Phone call storage (in production, use a database)
-active_calls = {}  # {call_sid: {session_id, conversation_history, stream_sid, client_id, ...}}
+# Phone call runtime state (memory or Redis via call_session_store)
+call_store = get_call_session_store()
+
+
+def _persist_call_session(call_sid: str) -> None:
+    """Write session back to Redis after in-place mutations (no-op for memory store)."""
+    if isinstance(call_store, MemoryCallSessionStore):
+        return
+    data = call_store.get(call_sid)
+    if data is not None:
+        call_store.save(call_sid, data)
+
+
+if isinstance(call_store, MemoryCallSessionStore):
+    active_calls = call_store.sessions
+    response_status = call_store.response_status
+else:
+    active_calls = call_store.sessions
+    response_status = call_store.response_status
+
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -6546,22 +6791,16 @@ def create_tracked_task(coro: Any, *, name: str) -> asyncio.Task:
 
 
 def cleanup_call_runtime_state(call_sid: str) -> None:
-    """Clear in-memory per-call runtime state deterministically."""
+    """Clear per-call runtime state deterministically."""
     if not call_sid:
         return
-    active_calls.pop(call_sid, None)
-    response_status.pop(call_sid, None)
-    try:
-        from voice.utterance import _utterance_locks
+    call_store.cleanup_call(call_sid)
 
-        _utterance_locks.pop(call_sid, None)
-    except Exception:
-        pass
 
 def _restore_call_context(call_sid: str) -> bool:
-    """Restore request client_id from active_calls for downstream phone handlers. Returns True if found."""
-    if call_sid and call_sid in active_calls:
-        cid = (active_calls[call_sid].get("client_id") or "").strip()
+    """Restore request client_id from call session for downstream phone handlers. Returns True if found."""
+    if call_sid and call_store.exists(call_sid):
+        cid = str((call_store.get(call_sid) or {}).get("client_id") or "").strip()
         if not cid:
             return False
         set_request_client_id(cid)
@@ -6571,16 +6810,12 @@ def _restore_call_context(call_sid: str) -> bool:
 # Fallback when OpenAI/TTS fails - play this so caller does not get dead air
 TTS_FALLBACK_TEXT = "We're experiencing a brief technical issue. Please try again in a moment."
 
-# Response generation status (for 2-step flow to eliminate dead air)
-response_status = {}  # {call_sid: {"status": "pending"|"ready"|"error", "audio_url": str, "ai_text": str}}
-
-
 
 def _get_client_id_from_call(request: Request) -> Optional[str]:
-    """Resolve client_id from call_sid query param (active_calls)."""
+    """Resolve client_id from call_sid query param (call session)."""
     call_sid = request.query_params.get("call_sid")
-    if call_sid and call_sid in active_calls:
-        return (active_calls[call_sid].get("client_id") or "").strip() or None
+    if call_sid and call_store.exists(call_sid):
+        return str((call_store.get(call_sid) or {}).get("client_id") or "").strip() or None
     return None
 
 
@@ -8570,8 +8805,8 @@ async def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/phone/calls")
-async def get_active_calls():
-    """Get list of active phone calls"""
+async def get_active_calls(_: str = Depends(require_admin)):
+    """Admin-only: list in-flight voice sessions (PII — never public)."""
     return {
         "active_calls": len(active_calls),
         "calls": [
@@ -8579,10 +8814,10 @@ async def get_active_calls():
                 "call_sid": sid,
                 "from": call_data["from_number"],
                 "to": call_data["to_number"],
-                "started_at": call_data["started_at"]
+                "started_at": call_data["started_at"],
             }
             for sid, call_data in active_calls.items()
-        ]
+        ],
     }
 
 if __name__ == "__main__":

@@ -87,13 +87,14 @@ Do this in order (human steps—cannot be done from git alone):
 ### Voice streaming STT (Deepgram Nova-2, optional)
 
 - Default is Twilio `<Gather input="speech">` (`VOICE_STT_PROVIDER` unset or `twilio`).
-- Set **`VOICE_STT_PROVIDER=deepgram`** on Render to use **Twilio `<Connect><Stream>` → `wss://…/api/phone/media`** bridged to **Deepgram Nova-2** live transcription (8 kHz mu-law) on **every** listen turn (inbound greeting, post-AI reply, empty-retry). When the caller speaks, the app **updates the live call via Twilio REST** to **got-it** + **`/api/phone/respond`** so queued “Still there?” verbs are skipped. If Deepgram or the media bridge fails, the call **fail-opens** to Twilio `<Gather>` (unchanged).
+- Set **`VOICE_STT_PROVIDER=deepgram`** on Render to use **Twilio `<Connect><Stream>` → `wss://…/api/phone/media`** bridged to **Deepgram Nova-2** live transcription (8 kHz mu-law) on **every** listen turn (inbound greeting, post-AI reply, empty-retry). When the caller speaks, the app **updates the live call via Twilio REST** to **got-it** + **`/api/phone/respond`** so queued “Still there?” verbs are skipped. If Deepgram or the media bridge fails, the call **fail-opens** to Twilio `<Gather>` (unchanged). **Requires `REDIS_URL`** (Render Redis) for shared call state across workers before enabling in production; rollback with `VOICE_STT_PROVIDER=twilio`.
 - **`DEEPGRAM_API_KEY`** — required for the Deepgram path (Render secret; never log or expose client-side).
 - **`MEDIA_STREAM_SIGNING_SECRET`** — optional HMAC secret for stream URL tokens; if unset, **`TWILIO_AUTH_TOKEN`** is used for signing (must be set for the Deepgram path to activate).
 - **`PUBLIC_BASE_URL`** (HTTPS origin of the API) should be set in production so TwiML builds a stable **`wss://`** media URL (the app can derive from `Host` / `X-Forwarded-*` if unset).
 - Optional tuning: **`VOICE_MEDIA_STREAM_MAX_SEC`** (default `30`), **`VOICE_DEEPGRAM_FINAL_DEBOUNCE_MS`** (default `450`).
 - **Rollback**: set `VOICE_STT_PROVIDER=twilio` or remove it, redeploy; inbound calls use Gather again.
-- **Scaling**: media streams still rely on in-memory `active_calls` / `response_status`; multiple stateless workers without sticky sessions can mis-route streaming calls—prefer a single voice worker or external session affinity until Redis-backed state exists.
+- **Scaling**: call state uses Redis when `REDIS_URL` is set (`RedisCallSessionStore`); without Redis, in-memory state is single-worker only.
+- **Redis security**: Keep Redis on Render private network only (`ipAllowList` empty — never `0.0.0.0/0`). Do not expose `REDIS_URL` to Vercel or logs. Before enabling Deepgram in production, confirm Admin → **Production ops** shows **Redis production ready** green. Full checklist: **`docs/REDIS-SECURITY.md`**. Local dev without Redis: set **`VOICE_STATE_BACKEND=memory`** explicitly.
 
 Ensure your jurisdiction’s consent/recording rules are satisfied; the disclosure is part of the generated greeting audio when recording is enabled.
 

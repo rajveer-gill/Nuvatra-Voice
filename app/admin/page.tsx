@@ -99,6 +99,46 @@ type InviteLinkResult = {
   clerk_users_matched_count?: number
 }
 
+type OpsSelfCheck = {
+  public_base_url_set?: boolean
+  twilio_signature_validation_enabled?: boolean
+  cron_secret_set?: boolean
+  multi_tenant_client_id_env_ok?: boolean
+  database_enabled?: boolean
+  last_cron_runs?: Record<string, string>
+  stale_cron_jobs?: string[]
+  cron_jobs_healthy?: boolean
+  redis_url_set?: boolean
+  redis_url_scheme_ok?: boolean
+  redis_ping_ok?: boolean
+  voice_state_backend?: 'redis' | 'memory'
+  redis_config_consistent?: boolean
+  redis_host_looks_external?: boolean
+  redis_production_ready?: boolean
+  clerk_issuer_set?: boolean
+  clerk_audience_set?: boolean
+  deepgram_ready?: boolean
+}
+
+function opsCheckRow(label: string, ok: boolean | undefined, detail?: string) {
+  const pass = ok === true
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2">
+      <div>
+        <p className="text-sm text-zinc-200">{label}</p>
+        {detail ? <p className="mt-0.5 text-xs text-zinc-500">{detail}</p> : null}
+      </div>
+      <span
+        className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
+          pass ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'
+        }`}
+      >
+        {pass ? 'OK' : 'Check'}
+      </span>
+    </div>
+  )
+}
+
 function formatRelinkSuccessMessage(data: InviteLinkResult): string {
   const ids =
     data.linked_clerk_user_ids?.length ?
@@ -194,6 +234,8 @@ export default function AdminPage() {
   const [emailLookup, setEmailLookup] = useState('')
   const [emailLookupResult, setEmailLookupResult] = useState<unknown>(null)
   const [emailLookupLoading, setEmailLookupLoading] = useState(false)
+  const [opsCheck, setOpsCheck] = useState<OpsSelfCheck | null>(null)
+  const [opsCheckLoading, setOpsCheckLoading] = useState(false)
 
   const listContainer = {
     hidden: {},
@@ -256,6 +298,18 @@ export default function AdminPage() {
     }
   }, [api, adminApi])
 
+  const fetchOpsCheck = useCallback(async () => {
+    setOpsCheckLoading(true)
+    try {
+      const res = await api.get<OpsSelfCheck>('/api/admin/ops/self-check', adminApi)
+      setOpsCheck(res.data)
+    } catch {
+      setOpsCheck(null)
+    } finally {
+      setOpsCheckLoading(false)
+    }
+  }, [api, adminApi])
+
   const verifyAdminSession = useCallback(async () => {
     setSessionError(null)
     setAdminAllowed(null)
@@ -281,7 +335,8 @@ export default function AdminPage() {
   useEffect(() => {
     if (adminAllowed !== true) return
     fetchTenants()
-  }, [adminAllowed, fetchTenants])
+    void fetchOpsCheck()
+  }, [adminAllowed, fetchTenants, fetchOpsCheck])
 
   useEffect(() => {
     setTwilioDraft((prev) => {
@@ -476,12 +531,22 @@ export default function AdminPage() {
     setError(null)
     setSuccess(null)
     try {
-      await api.patch(
+      const res = await api.patch<{
+        success?: boolean
+        webhook_config?: { voice_ok?: boolean; sms_ok?: boolean; errors?: string[] }
+      }>(
         `/api/admin/tenants/${tenantId}/twilio-phone`,
         { twilio_phone_number: phone },
         adminApi
       )
-      setSuccess('Twilio number saved. Inbound SMS/voice will match this number.')
+      const wc = res.data.webhook_config
+      if (wc?.voice_ok && wc?.sms_ok) {
+        setSuccess('Twilio number saved and Voice + Messaging webhooks configured.')
+      } else if (wc?.errors?.length) {
+        setSuccess(`Number saved. Webhook config: ${wc.errors.join('; ')}`)
+      } else {
+        setSuccess('Twilio number saved. Inbound SMS/voice will match this number.')
+      }
       await fetchTenants()
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } }
@@ -561,6 +626,62 @@ export default function AdminPage() {
           {success && (
             <div className="mb-6 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{success}</div>
           )}
+
+          <section className="mb-8 rounded-2xl border border-white/10 bg-zinc-900/70 p-6 shadow-xl backdrop-blur-md">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="font-display text-lg font-semibold text-white">Production ops</h2>
+              <button
+                type="button"
+                onClick={() => void fetchOpsCheck()}
+                disabled={opsCheckLoading}
+                className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+              >
+                {opsCheckLoading ? 'Refreshing…' : 'Refresh'}
+              </button>
+            </div>
+            {opsCheck ? (
+              <div className="grid gap-2">
+                {opsCheckRow('PUBLIC_BASE_URL set', opsCheck.public_base_url_set)}
+                {opsCheckRow('Twilio signature validation', opsCheck.twilio_signature_validation_enabled)}
+                {opsCheckRow('CRON_SECRET set', opsCheck.cron_secret_set)}
+                {opsCheckRow('CLIENT_ID unset (multi-tenant)', opsCheck.multi_tenant_client_id_env_ok)}
+                {opsCheckRow('Database enabled', opsCheck.database_enabled)}
+                {opsCheckRow('REDIS_URL set', opsCheck.redis_url_set)}
+                {opsCheckRow('Redis reachable (PING)', opsCheck.redis_ping_ok)}
+                {opsCheckRow('Voice state on Redis', opsCheck.voice_state_backend === 'redis')}
+                {opsCheckRow(
+                  'Redis config consistent',
+                  opsCheck.redis_config_consistent,
+                  opsCheck.redis_config_consistent === false && opsCheck.redis_url_set
+                    ? 'REDIS_URL is set but app is using in-memory voice state — critical for multi-worker / Deepgram'
+                    : undefined
+                )}
+                {opsCheckRow('Redis production ready', opsCheck.redis_production_ready)}
+                {opsCheck.redis_host_looks_external ? (
+                  <p className="text-xs text-amber-400/90">
+                    Redis host looks externally reachable — confirm private networking per docs/REDIS-SECURITY.md
+                  </p>
+                ) : null}
+                {opsCheckRow('CLERK_ISSUER set', opsCheck.clerk_issuer_set)}
+                {opsCheckRow('CLERK_AUDIENCE set', opsCheck.clerk_audience_set)}
+                {opsCheckRow('Deepgram ready', opsCheck.deepgram_ready)}
+                {opsCheckRow(
+                  'Daily cron jobs fresh',
+                  opsCheck.cron_jobs_healthy,
+                  opsCheck.stale_cron_jobs?.length
+                    ? `Stale: ${opsCheck.stale_cron_jobs.join(', ')}`
+                    : opsCheck.last_cron_runs
+                      ? `Last runs tracked for ${Object.keys(opsCheck.last_cron_runs).length} job(s)`
+                      : 'No cron runs recorded yet'
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-zinc-500">Ops self-check unavailable.</p>
+            )}
+            <p className="mt-3 text-xs text-zinc-500">
+              Redis security checklist: <code className="text-zinc-400">docs/REDIS-SECURITY.md</code> in the repo.
+            </p>
+          </section>
 
           <motion.form
             onSubmit={handleSubmit}

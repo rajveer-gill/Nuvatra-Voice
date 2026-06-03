@@ -38,7 +38,7 @@ async def safe_twilio_call_update(
     if require_active_session:
         import main as m
 
-        if call_sid not in m.active_calls:
+        if not m.call_store.exists(call_sid):
             voice_info(
                 "twilio_calls_update_skipped",
                 call_sid=call_sid,

@@ -54,6 +54,17 @@ interface AnalyticsSummary {
   by_day_of_week_timezone?: string
 }
 
+interface AnalyticsHealth {
+  period_days: number
+  calls_total: number
+  forward_rate: number
+  error_rate: number
+  missed_rate: number
+  booking_completion_rate: number
+  avg_duration_sec: number
+  by_outcome: Record<string, number>
+}
+
 interface CallLogEntry {
   call_sid: string
   from_number: string
@@ -83,6 +94,7 @@ export default function Dashboard() {
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [messages, setMessages] = useState<Message[]>([])
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
+  const [callHealth, setCallHealth] = useState<AnalyticsHealth | null>(null)
   const [recentCalls, setRecentCalls] = useState<CallLogEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [noTenant, setNoTenant] = useState(false)
@@ -99,13 +111,14 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     try {
-      const [statsRes, appointmentsRes, messagesRes, summaryRes, callsRes, subRes] = await Promise.all([
+      const [statsRes, appointmentsRes, messagesRes, summaryRes, callsRes, subRes, healthRes] = await Promise.all([
         api.get('/api/stats'),
         api.get('/api/appointments'),
         api.get('/api/messages'),
         api.get('/api/analytics/summary').catch(() => ({ data: null })),
         api.get('/api/analytics/calls?limit=20').catch(() => ({ data: { calls: [] } })),
-        api.get('/api/subscription').catch(() => ({ data: null }))
+        api.get('/api/subscription').catch(() => ({ data: null })),
+        api.get('/api/analytics/health').catch(() => ({ data: null })),
       ])
 
       const sub = subRes?.data as { limits?: { has_export?: boolean; minutes_cap?: number }; usage?: { voice_minutes?: number; sms_count?: number; month?: string } } | null
@@ -117,6 +130,7 @@ export default function Dashboard() {
       setAppointments(appointmentsRes.data.appointments || [])
       setMessages(messagesRes.data.messages || [])
       setAnalyticsSummary(summaryRes.data?.client_id != null ? summaryRes.data : null)
+      setCallHealth(healthRes.data?.calls_total != null ? healthRes.data : null)
       setRecentCalls(callsRes.data?.calls || [])
     } catch (error: unknown) {
       const status = (error as { response?: { status?: number } })?.response?.status
@@ -212,13 +226,42 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Pro: Call Analytics */}
+      {callHealth != null && (
+        <div className="bg-white rounded-lg shadow-md p-6">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center mb-4">
+            <Phone className="w-5 h-5 mr-2" />
+            Call health (last {callHealth.period_days} days)
+          </h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <p className="text-gray-600 text-sm">Total calls</p>
+              <p className="text-2xl font-bold text-gray-900">{callHealth.calls_total}</p>
+            </div>
+            <div>
+              <p className="text-gray-600 text-sm">Forward rate</p>
+              <p className="text-2xl font-bold text-gray-900">{Math.round(callHealth.forward_rate * 100)}%</p>
+            </div>
+            <div>
+              <p className="text-gray-600 text-sm">Missed / no answer</p>
+              <p className="text-2xl font-bold text-gray-900">{Math.round(callHealth.missed_rate * 100)}%</p>
+            </div>
+            <div>
+              <p className="text-gray-600 text-sm">Avg duration</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {callHealth.avg_duration_sec ? `${callHealth.avg_duration_sec}s` : '—'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Call Analytics */}
       {analyticsSummary != null && (
         <div className="bg-white rounded-lg shadow-md p-6">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-bold text-gray-900 flex items-center">
               <BarChart3 className="w-5 h-5 mr-2" />
-              Call Analytics (Pro)
+              Call Analytics
             </h2>
             {hasExport && (
               <button

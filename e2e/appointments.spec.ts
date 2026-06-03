@@ -17,14 +17,10 @@ test.describe('Appointments', () => {
     expect(hasSignIn || hasDashboard || hasAccess).toBeTruthy()
   })
 
-  test('appointments tab visible when on dashboard', async ({ page }) => {
-    // Navigate to dashboard - may redirect to sign-in
-    await page.goto('/dashboard')
-    await page.waitForLoadState('networkidle')
-    // If we're on the dashboard, Appointments button should exist
-    const appointmentsBtn = page.getByRole('button', { name: /Appointments/i })
-    const count = await appointmentsBtn.count()
-    // Either we see Appointments (if authed) or we're on sign-in page
-    expect(count >= 0).toBeTruthy()
+  test('onboarding route loads for unauthenticated users', async ({ page }) => {
+    await page.goto('/dashboard/onboarding')
+    await page.waitForLoadState('domcontentloaded')
+    const url = page.url()
+    expect(url.includes('onboarding') || url.includes('sign-in')).toBeTruthy()
   })
 })

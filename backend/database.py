@@ -8,6 +8,7 @@ import hashlib
 import uuid
 import contextvars
 import logging
+import threading
 from datetime import datetime, date
 from typing import Any, Optional, List, Tuple
 from pathlib import Path
@@ -33,21 +34,58 @@ def clear_request_client_id() -> None:
     except LookupError:
         pass
 
-# Will be set on first use
-_conn = None
+# Connection pool (ThreadedConnectionPool) — one borrowed conn per thread per request
+_pool = None
 _use_db = False
+_thread_local = threading.local()
+
+
+def _ensure_pool():
+    global _pool
+    if _pool is not None:
+        return _pool
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        return None
+    from psycopg2 import pool
+
+    minconn = max(1, int((os.getenv("DB_POOL_MIN") or "2").strip()))
+    maxconn = max(minconn, int((os.getenv("DB_POOL_MAX") or "10").strip()))
+    _pool = pool.ThreadedConnectionPool(minconn, maxconn, url, connect_timeout=10)
+    return _pool
+
 
 def _get_conn():
-    global _conn, _use_db
+    global _use_db
     if not _use_db:
         return None
-    if _conn is None or _conn.closed:
-        import psycopg2
-        url = os.getenv("DATABASE_URL")
-        if not url:
-            return None
-        _conn = psycopg2.connect(url, connect_timeout=10)
-    return _conn
+    conn = getattr(_thread_local, "conn", None)
+    if conn is not None and not conn.closed:
+        return conn
+    pool = _ensure_pool()
+    if not pool:
+        return None
+    try:
+        conn = pool.getconn()
+        _thread_local.conn = conn
+        return conn
+    except Exception as e:
+        _log.warning("db_pool_getconn_failed: %s", e)
+        return None
+
+
+def db_release_thread_connection() -> None:
+    """Return borrowed connection to pool (call after HTTP request or background DB work)."""
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        return
+    pool = _ensure_pool()
+    if pool:
+        try:
+            pool.putconn(conn)
+        except Exception as e:
+            _log.warning("db_pool_putconn_failed: %s", e)
+    _thread_local.conn = None
 
 def db_ping() -> bool:
     """Return True if DB is reachable (for health check)."""
@@ -365,6 +403,20 @@ def init_db() -> bool:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_conv_sms_sessions_client_period "
             "ON conversational_sms_session_keys(client_id, billing_period_key)"
+        )
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cron_runs (
+                id SERIAL PRIMARY KEY,
+                job_name TEXT NOT NULL,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at TIMESTAMPTZ,
+                status TEXT NOT NULL DEFAULT 'running',
+                summary JSONB
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cron_runs_job_finished "
+            "ON cron_runs(job_name, finished_at DESC)"
         )
         try:
             cur.execute(
@@ -2758,3 +2810,97 @@ def db_conversational_sms_clear_period(client_id: str, billing_period_key: str) 
     )
     conn.commit()
     cur.close()
+
+
+# --- Cron run tracking (ops visibility) ---
+
+CRON_JOB_NAMES = (
+    "appointment-reminders",
+    "process-overage",
+    "retention-purge",
+    "export-snapshot",
+)
+
+DAILY_CRON_JOBS = frozenset({"appointment-reminders", "retention-purge", "export-snapshot"})
+
+
+def db_cron_run_start(job_name: str) -> Optional[int]:
+    """Record cron job start. Returns run id or None."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO cron_runs (job_name, status)
+            VALUES (%s, 'running')
+            RETURNING id
+            """,
+            (job_name,),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return int(row[0]) if row else None
+    except Exception as e:
+        _log.warning("db_cron_run_start failed: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def db_cron_run_finish(run_id: Optional[int], status: str, summary: Optional[dict] = None) -> None:
+    """Mark cron run complete."""
+    if not run_id:
+        return
+    conn = _get_conn()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE cron_runs
+            SET finished_at = NOW(), status = %s, summary = %s
+            WHERE id = %s
+            """,
+            (status, json.dumps(summary or {}), run_id),
+        )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        _log.warning("db_cron_run_finish failed: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def db_cron_runs_last_success() -> dict:
+    """Return last successful finish time per known cron job (ISO strings)."""
+    conn = _get_conn()
+    if not conn:
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT ON (job_name) job_name, finished_at
+            FROM cron_runs
+            WHERE status = 'success' AND finished_at IS NOT NULL
+            ORDER BY job_name, finished_at DESC
+            """
+        )
+        rows = cur.fetchall()
+        cur.close()
+        out: dict = {}
+        for job_name, finished_at in rows:
+            if finished_at:
+                out[job_name] = finished_at.isoformat()
+        return out
+    except Exception as e:
+        _log.warning("db_cron_runs_last_success failed: %s", e)
+        return {}
