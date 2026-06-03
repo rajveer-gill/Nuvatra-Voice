@@ -205,6 +205,9 @@ Use this as a single reference for every env var used by the app.
 | `CRON_SECRET` | Yes (cron) | Shared secret for cron endpoints (`X-Cron-Secret` header). Required for appointment reminders and overage billing. |
 | `REMINDER_TIMEZONE` | Optional | Timezone for "tomorrow" in reminders (e.g. `America/New_York`). Default: UTC. |
 | `OVERAGE_PRICE_PER_MINUTE` | Yes (overage) | Price per minute in dollars (default 0.15 via `billing_config.OVERAGE_PRICE_PER_MINUTE_DEFAULT`) for extra minutes billing. |
+| `RETENTION_DAYS` | Optional | Data retention window in days for purge job. Default `1095` (3 years). |
+| `OFFSITE_EXPORT_DIR` | Optional | Filesystem directory for daily tenant snapshot export job (default `PROJECT_ROOT/exports`). |
+| `EXPORT_INCLUDE_AUDIT_EVENTS` | Optional | `1`/`0` include audit rows in snapshot export (default `1`). |
 
 ### Cron Jobs (Render)
 
@@ -222,6 +225,20 @@ To enable day-before appointment reminders (Growth/Pro plans):
 3. **Schedule**: Monthly on the 1st (e.g. `0 15 1 * *` for 15:00 UTC on the 1st).
 4. Set `OVERAGE_PRICE_PER_MINUTE` (e.g. `0.15`) and `CRON_SECRET`.
 
+**3-year retention purge:**
+
+1. Add a Cron Job service.
+2. **Command**: `curl -s -X POST -H "X-Cron-Secret: $CRON_SECRET" https://your-backend.onrender.com/api/cron/retention-purge`
+3. **Schedule**: daily (e.g. `0 6 * * *`).
+4. Optionally set `RETENTION_DAYS` (default `1095`).
+
+**Daily tenant snapshot export:**
+
+1. Add a Cron Job service.
+2. **Command**: `curl -s -X POST -H "X-Cron-Secret: $CRON_SECRET" https://your-backend.onrender.com/api/cron/export-snapshot`
+3. **Schedule**: daily (e.g. `15 6 * * *`).
+4. Set `OFFSITE_EXPORT_DIR` and persist/sync that path to your secure backup location.
+
 ### Frontend
 
 | Variable | Required | Description |
@@ -235,9 +252,9 @@ To enable day-before appointment reminders (Growth/Pro plans):
 
 ## Audit log and retention
 
-Audit events (admin actions, Stripe events, auth failures, business-info updates, appointment accept/reject) are stored in the **`audit_events`** table in PostgreSQL. Each row includes: `occurred_at`, `actor_type`, `actor_id`, `action`, `resource_type`, `resource_id`, `client_id`, `details` (JSONB), `ip`, `request_id`. No full PII (e.g. no message bodies) is logged.
+Audit events (admin actions, Stripe events, auth failures, business-info updates, voice/SMS lifecycle events, appointment accept/reject) are stored in the **`audit_events`** table in PostgreSQL. Each row includes: `occurred_at`, `actor_type`, `actor_id`, `action`, `resource_type`, `resource_id`, `client_id`, `details` (JSONB), `ip`, `request_id`. No full PII (e.g. no message bodies) is logged.
 
-For legal and billing protection, consider a **retention policy** (e.g. keep audit rows for 1 year) and document it in your terms or internal runbook. You can run periodic deletes (e.g. `DELETE FROM audit_events WHERE occurred_at < NOW() - INTERVAL '1 year'`) or use a scheduled job.
+For legal and billing protection, run the retention job with your chosen policy. This repository defaults to a **3-year baseline** via `RETENTION_DAYS=1095` and supports tenant legal holds that pause purge for specified client IDs.
 
 ## Need Help?
 

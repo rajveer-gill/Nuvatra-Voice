@@ -62,3 +62,39 @@ def test_cron_process_overage_200_with_valid_secret(client, monkeypatch):
     assert "tenants_processed" in data
     assert "invoices_created" in data
     assert "errors" in data
+
+
+def test_cron_retention_purge_401_without_secret(client):
+    resp = client.post("/api/cron/retention-purge")
+    assert resp.status_code == 401
+
+
+def test_cron_retention_purge_200_with_valid_secret(client, monkeypatch):
+    secret = "test-retention-secret-789"
+    monkeypatch.setenv("CRON_SECRET", secret)
+    resp = client.post(
+        "/api/cron/retention-purge",
+        headers={"X-Cron-Secret": secret},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    assert "deleted" in data
+
+
+def test_cron_export_snapshot_401_without_secret(client):
+    resp = client.post("/api/cron/export-snapshot")
+    assert resp.status_code == 401
+
+
+def test_cron_export_snapshot_200_with_valid_secret(client, monkeypatch):
+    secret = "test-export-secret-321"
+    monkeypatch.setenv("CRON_SECRET", secret)
+    resp = client.post(
+        "/api/cron/export-snapshot",
+        headers={"X-Cron-Secret": secret},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("ok") is True
+    assert "exported" in data

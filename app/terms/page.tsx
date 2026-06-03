@@ -50,6 +50,18 @@ export default function TermsPage() {
               <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">6. Contact</h2>
               <p>For questions about these Terms, contact us at <a href="mailto:info@nuvatrahq.com" className="text-blue-600 hover:underline">info@nuvatrahq.com</a>.</p>
             </section>
+            <section>
+              <h2 className="text-xl font-semibold text-gray-900 mt-8 mb-2">7. Data Retention and Exports</h2>
+              <p>
+                By default, operational records (including call logs, appointment data, SMS session history, and audit
+                records) are retained for up to 3 years unless law, contract, or legal hold requirements require longer
+                retention. Businesses may request tenant-scoped export or deletion workflows by contacting support.
+              </p>
+              <p className="mt-2">
+                Voice handling stores metadata and generated call summaries by default. Full call recordings are optional
+                and only available when recording is enabled for the business account.
+              </p>
+            </section>
           </div>
 
           <div className="mt-8">

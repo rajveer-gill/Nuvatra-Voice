@@ -20,6 +20,19 @@ jobs:
       - name: Run pytest
         run: cd backend && python -m pytest tests -v --tb=short
 
+  backend-security-regressions:
+    name: Backend Security Regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Run authz and cron hardening tests
+        run: cd backend && python -m pytest tests/test_cron_auth.py tests/test_admin_tenant_twilio.py tests/test_admin_hardening_endpoints.py -v --tb=short
+
   frontend-lint:
     name: Frontend Lint (ESLint)
     runs-on: ubuntu-latest

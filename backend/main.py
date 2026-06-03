@@ -23,6 +23,7 @@ import secrets
 import math
 import time
 import json
+import hashlib
 import re
 from pathlib import Path
 import shutil
@@ -611,6 +612,11 @@ try:
         db_appointments_mark_reminder_sent,
         db_appointments_in_date_range,
         db_ping,
+        db_retention_purge,
+        db_export_tenant_snapshot,
+        db_legal_hold_set,
+        db_legal_hold_clear,
+        db_legal_hold_list_active,
     )
     _db_imported = True
     print("[INIT] Database module imported (connection deferred)", flush=True)
@@ -658,6 +664,10 @@ def audit_log(
         )
     except Exception:
         pass
+
+
+def _stable_sha256(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 # In-memory fallback when no database (dev / testing)
 appointments: List[dict] = []
@@ -1674,6 +1684,20 @@ def send_sms(
                         db_usage_increment_sms(cid, month)
                     except Exception as e:
                         logger.error("SMS usage increment failed: %s", e)
+            audit_log(
+                "sms",
+                "outbound_sent",
+                resource_type="message",
+                resource_id=str(sid) if sid else None,
+                client_id=get_db_client_id() if USE_DB else None,
+                details={
+                    "to_masked": to_masked,
+                    "from_masked": mask_phone_e164(from_num),
+                    "body_len": len(body or ""),
+                    "body_sha256": _stable_sha256(body or ""),
+                    "force": bool(force),
+                },
+            )
             return True
         except Exception as e:
             last_err = e
@@ -1687,6 +1711,19 @@ def send_sms(
                 import time
                 time.sleep(2 ** attempt)
     sms_info("outbound_failed_after_retries", error=str(last_err), to_masked=to_masked)
+    audit_log(
+        "sms",
+        "outbound_failed",
+        resource_type="message",
+        client_id=get_db_client_id() if USE_DB else None,
+        details={
+            "to_masked": to_masked,
+            "from_masked": mask_phone_e164(from_num),
+            "body_len": len(body or ""),
+            "body_sha256": _stable_sha256(body or ""),
+            "error": str(last_err)[:240] if last_err else None,
+        },
+    )
     return False
 
 
@@ -2018,6 +2055,17 @@ def call_log_start(call_sid: str, from_number: str, to_number: str):
         "recording_status": None,
         "call_summary": None,
     }
+    audit_log(
+        "voice",
+        "call_started",
+        resource_type="call",
+        resource_id=call_sid,
+        client_id=get_db_client_id() if USE_DB else None,
+        details={
+            "from_masked": mask_phone_e164(from_number or ""),
+            "to_masked": mask_phone_e164(to_number or ""),
+        },
+    )
 
 def call_log_merge_recording(call_sid: str, **kwargs) -> None:
     """Merge recording / summary fields into in-memory call log entry."""
@@ -2076,6 +2124,18 @@ def call_log_end(call_sid: str):
             pass
     if not entry.get("outcome"):
         entry["outcome"] = "answered_by_ai"
+    audit_log(
+        "voice",
+        "call_ended",
+        resource_type="call",
+        resource_id=call_sid,
+        client_id=get_db_client_id() if USE_DB else None,
+        details={
+            "outcome": entry.get("outcome"),
+            "duration_sec": entry.get("duration_sec"),
+            "recording_status": entry.get("recording_status"),
+        },
+    )
     if USE_DB:
         db_call_log_append(entry)
     else:
@@ -3830,6 +3890,33 @@ async def cron_process_overage(request: Request):
         tenants_processed += 1
     return {"ok": True, "tenants_processed": tenants_processed, "invoices_created": invoices_created, "errors": errors}
 
+
+@app.post("/api/cron/retention-purge")
+async def cron_retention_purge(request: Request):
+    """Purge expired rows (default 3 years) while honoring active legal holds."""
+    if not _verify_cron_secret(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not USE_DB:
+        return {"ok": True, "deleted": {"audit_events": 0, "call_log": 0, "sms_sessions": 0}, "days": 0}
+    days = max(1, int((os.getenv("RETENTION_DAYS") or str(365 * 3)).strip()))
+    deleted = db_retention_purge(days=days)
+    return {"ok": True, "deleted": deleted, "days": days}
+
+
+@app.post("/api/cron/export-snapshot")
+async def cron_export_snapshot(request: Request):
+    """Daily tenant-scoped JSON snapshot export with SHA256 manifest."""
+    if not _verify_cron_secret(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not USE_DB:
+        return {"ok": True, "exported": False}
+    export_root = (os.getenv("OFFSITE_EXPORT_DIR") or str(PROJECT_ROOT / "exports")).strip()
+    include_audit = (os.getenv("EXPORT_INCLUDE_AUDIT_EVENTS") or "1").strip().lower() in ("1", "true", "yes")
+    result = db_export_tenant_snapshot(export_root, include_audit=include_audit)
+    if not result:
+        return {"ok": False, "exported": False}
+    return {"ok": True, "exported": True, **result}
+
 class AdminCreateTenantRequest(BaseModel):
     client_id: str
     name: str
@@ -3840,6 +3927,30 @@ class AdminCreateTenantRequest(BaseModel):
 
 class AdminResendInviteRequest(BaseModel):
     email: str
+
+
+class AdminBulkTenantRow(BaseModel):
+    client_id: str = Field(..., min_length=2, max_length=120)
+    name: str = Field(..., min_length=1, max_length=200)
+    twilio_phone_number: str = Field(..., min_length=7, max_length=30)
+    email: EmailStr
+    business_vertical: str = "salon_chair"
+
+
+class AdminBulkCreateTenantsRequest(BaseModel):
+    rows: List[AdminBulkTenantRow] = Field(default_factory=list, min_length=1, max_length=500)
+    dry_run: bool = False
+
+
+class AdminLegalHoldRequest(BaseModel):
+    client_id: str = Field(..., min_length=1, max_length=120)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+    hold_until: Optional[datetime] = None
+
+
+def _normalize_admin_phone(value: str) -> str:
+    e164 = _phone_to_e164(value or "")
+    return e164 or (value or "").strip()
 
 
 def _clerk_api_json_list(resp) -> list:
@@ -4510,6 +4621,170 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
                 }
             )
     return {"tenants": enriched, "db_enabled": True}
+
+
+@app.post("/api/admin/tenants/bulk")
+async def admin_bulk_create_tenants(
+    req: AdminBulkCreateTenantsRequest,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
+    """Bulk create tenants with validation and idempotency checks."""
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required for multi-tenant")
+    seen_client_ids: set[str] = set()
+    seen_phones: set[str] = set()
+    results: list[dict] = []
+    created = 0
+    skipped = 0
+    errors = 0
+    for row in req.rows:
+        cid = (row.client_id or "").strip()
+        normalized_phone = _normalize_admin_phone(row.twilio_phone_number)
+        email = str(row.email).strip().lower()
+        if cid in seen_client_ids:
+            results.append({"client_id": cid, "status": "error", "reason": "duplicate_client_id_in_payload"})
+            errors += 1
+            continue
+        seen_client_ids.add(cid)
+        if normalized_phone in seen_phones:
+            results.append({"client_id": cid, "status": "error", "reason": "duplicate_twilio_phone_in_payload"})
+            errors += 1
+            continue
+        seen_phones.add(normalized_phone)
+
+        existing_by_id = db_tenant_get_by_client_id(cid)
+        existing_by_phone = db_tenant_get_by_phone(normalized_phone)
+        if existing_by_id or existing_by_phone:
+            skipped += 1
+            results.append(
+                {
+                    "client_id": cid,
+                    "status": "skipped",
+                    "reason": "tenant_exists",
+                    "existing_tenant_id": (existing_by_id or existing_by_phone or {}).get("id"),
+                }
+            )
+            continue
+
+        if req.dry_run:
+            results.append({"client_id": cid, "status": "validated"})
+            continue
+
+        bv = (row.business_vertical or "salon_chair").strip()
+        if bv not in ALLOWED_BUSINESS_VERTICALS:
+            results.append({"client_id": cid, "status": "error", "reason": "invalid_business_vertical"})
+            errors += 1
+            continue
+        tenant = db_tenant_create(cid, row.name.strip(), normalized_phone, "free", bv)
+        if not tenant:
+            results.append({"client_id": cid, "status": "error", "reason": "create_failed"})
+            errors += 1
+            continue
+        cfg = _default_client_config_data(cid, tenant.get("plan") or "free")
+        save_raw_client_config(cid, cfg)
+        link = _clerk_link_email_to_tenant(email, tenant["id"])
+        created += 1
+        results.append(
+            {
+                "client_id": cid,
+                "status": "created",
+                "tenant_id": tenant["id"],
+                "invite_sent": bool(link.get("invite_sent")),
+                "user_relinked": bool(link.get("user_relinked")),
+            }
+        )
+        audit_log(
+            "admin",
+            "tenant_created_bulk",
+            actor_id=admin_user_id,
+            resource_type="tenant",
+            resource_id=tenant["id"],
+            client_id=tenant["client_id"],
+            details={"email": email, "invite_sent": bool(link.get("invite_sent")), "user_relinked": bool(link.get("user_relinked"))},
+            request=request,
+        )
+
+    return {
+        "success": True,
+        "dry_run": req.dry_run,
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+        "results": results,
+    }
+
+
+@app.get("/api/admin/ops/self-check")
+async def admin_ops_self_check(_: str = Depends(require_admin)):
+    """Production safety checks for webhook and auth hardening."""
+    cron_secret_set = bool((os.getenv("CRON_SECRET") or "").strip())
+    twilio_auth_token_set = bool((os.getenv("TWILIO_AUTH_TOKEN") or "").strip())
+    public_base_url_set = bool((os.getenv("PUBLIC_BASE_URL") or "").strip())
+    client_id_set = bool((os.getenv("CLIENT_ID") or "").strip())
+    return {
+        "public_base_url_set": public_base_url_set,
+        "twilio_signature_validation_enabled": twilio_auth_token_set,
+        "cron_secret_set": cron_secret_set,
+        "multi_tenant_client_id_env_ok": not client_id_set,
+        "database_enabled": bool(USE_DB),
+    }
+
+
+@app.get("/api/admin/legal-holds")
+async def admin_list_legal_holds(_: str = Depends(require_admin)):
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    return {"holds": db_legal_hold_list_active()}
+
+
+@app.post("/api/admin/legal-holds")
+async def admin_upsert_legal_hold(
+    req: AdminLegalHoldRequest,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    ok = db_legal_hold_set(
+        req.client_id.strip(),
+        reason=(req.reason or "").strip() or None,
+        hold_until=req.hold_until,
+        created_by=admin_user_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to set legal hold")
+    audit_log(
+        "admin",
+        "legal_hold_upserted",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        client_id=req.client_id.strip(),
+        details={"reason": (req.reason or "").strip()[:200], "hold_until": req.hold_until.isoformat() if req.hold_until else None},
+        request=request,
+    )
+    return {"success": True}
+
+
+@app.delete("/api/admin/legal-holds/{client_id}")
+async def admin_clear_legal_hold(
+    client_id: str,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
+    if not USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    cleared = db_legal_hold_clear(client_id)
+    audit_log(
+        "admin",
+        "legal_hold_cleared",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        client_id=(client_id or "").strip(),
+        details={"cleared": bool(cleared)},
+        request=request,
+    )
+    return {"success": True, "cleared": bool(cleared)}
 
 
 @app.get("/api/admin/tenants/{tenant_id}/access-debug")
@@ -5909,6 +6184,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
             if trow and trow.get("plan"):
                 plan = trow.get("plan") or plan
         data = _default_client_config_data(cid, plan)
+    before_data = json.loads(json.dumps(data))
     voice_affecting = False
     if update.name is not None:
         data["business_name"] = update.name
@@ -6010,7 +6286,21 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
             receptionist_set=bool((data.get("receptionist_name") or "").strip()),
             business_name_len=len(data.get("business_name") or data.get("name") or ""),
         )
-    audit_log("user", "business_info_updated", resource_type="config", client_id=cid, details={"fields": [k for k in update.model_dump(exclude_none=True)]}, request=request)
+    changed_fields = [k for k in update.model_dump(exclude_none=True)]
+    before_subset = {k: before_data.get(k) for k in changed_fields}
+    after_subset = {k: data.get(k) for k in changed_fields}
+    audit_log(
+        "user",
+        "business_info_updated",
+        resource_type="config",
+        client_id=cid,
+        details={
+            "fields": changed_fields,
+            "before_sha256": _stable_sha256(json.dumps(before_subset, sort_keys=True, default=str)),
+            "after_sha256": _stable_sha256(json.dumps(after_subset, sort_keys=True, default=str)),
+        },
+        request=request,
+    )
     resp_tenant: dict = {**tid, "client_id": cid}
     if "plan" not in resp_tenant or not resp_tenant.get("plan"):
         resp_tenant["plan"] = data.get("plan") or "free"
@@ -6577,6 +6867,19 @@ async def handle_incoming_sms(request: Request):
         to_number = form_data.get("To", "").strip()
         body = (form_data.get("Body", "") or "").strip()
         msg_sid = (form_data.get("MessageSid") or form_data.get("SmsMessageSid") or "").strip()
+        audit_log(
+            "sms",
+            "inbound_received",
+            resource_type="message",
+            resource_id=msg_sid or None,
+            details={
+                "from_masked": mask_phone_e164(from_number),
+                "to_masked": mask_phone_e164(to_number),
+                "body_len": len(body),
+                "body_sha256": _stable_sha256(body),
+            },
+            request=request,
+        )
         if not from_number or not to_number or not body:
             sms_info("inbound_skipped", reason="missing_fields", message_sid=msg_sid or None)
             sms_trace(

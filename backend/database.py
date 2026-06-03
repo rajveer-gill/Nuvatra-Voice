@@ -4,6 +4,8 @@ Tables: appointments, messages, call_log, caller_memory, booked_slots, tenants, 
 """
 import os
 import json
+import hashlib
+import uuid
 import contextvars
 import logging
 from datetime import datetime, date
@@ -274,6 +276,29 @@ def init_db() -> bool:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tenant_removed_archive_client ON tenant_removed_archive(client_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tenant_removed_archive_time ON tenant_removed_archive(archived_at)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS legal_holds (
+                id BIGSERIAL PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                reason TEXT,
+                hold_until TIMESTAMPTZ,
+                created_by TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(client_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_legal_holds_client ON legal_holds(client_id)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS backup_exports (
+                id BIGSERIAL PRIMARY KEY,
+                export_key TEXT NOT NULL UNIQUE,
+                destination_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_backup_exports_created ON backup_exports(created_at)")
         # Plan tier tables
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tenant_usage (
@@ -824,6 +849,7 @@ _CLIENT_SCOPED_TABLES = (
     "messages",
     "call_log",
     "appointments",
+    "audit_events",
 )
 
 
@@ -908,6 +934,208 @@ def db_archive_purge_and_delete_tenant(
             conn.rollback()
         except Exception:
             pass
+        return None
+
+
+def db_legal_hold_set(
+    client_id: str,
+    *,
+    reason: Optional[str] = None,
+    hold_until: Optional[datetime] = None,
+    created_by: Optional[str] = None,
+) -> bool:
+    """Create/update a legal hold for a tenant client_id."""
+    cid = (client_id or "").strip()
+    if not cid:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO legal_holds (client_id, reason, hold_until, created_by, updated_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (client_id) DO UPDATE SET
+                reason = EXCLUDED.reason,
+                hold_until = EXCLUDED.hold_until,
+                created_by = EXCLUDED.created_by,
+                updated_at = NOW()
+            """,
+            (cid, (reason or "").strip()[:2000] or None, hold_until, (created_by or "").strip()[:256] or None),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to set legal hold: {e}")
+        return False
+
+
+def db_legal_hold_clear(client_id: str) -> bool:
+    cid = (client_id or "").strip()
+    if not cid:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM legal_holds WHERE client_id = %s", (cid,))
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to clear legal hold: {e}")
+        return False
+
+
+def db_legal_hold_list_active() -> List[dict]:
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT client_id, reason, hold_until, created_by, created_at, updated_at
+            FROM legal_holds
+            WHERE hold_until IS NULL OR hold_until > NOW()
+            ORDER BY updated_at DESC
+            """
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "client_id": r[0],
+                "reason": r[1],
+                "hold_until": r[2].isoformat() if r[2] else None,
+                "created_by": r[3],
+                "created_at": r[4].isoformat() if r[4] else None,
+                "updated_at": r[5].isoformat() if r[5] else None,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"[DB] Failed to list legal holds: {e}")
+        return []
+
+
+def db_retention_purge(days: int = 365 * 3) -> dict:
+    """
+    Purge expired rows while honoring legal holds.
+    Returns deleted counts by table.
+    """
+    keep_days = max(1, int(days))
+    conn = _get_conn()
+    if not conn:
+        return {"audit_events": 0, "call_log": 0, "sms_sessions": 0}
+    out = {"audit_events": 0, "call_log": 0, "sms_sessions": 0}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM audit_events a
+            WHERE a.occurred_at < NOW() - make_interval(days => %s::int)
+              AND (
+                a.client_id IS NULL OR a.client_id = '' OR NOT EXISTS (
+                  SELECT 1 FROM legal_holds h
+                  WHERE h.client_id = a.client_id
+                    AND (h.hold_until IS NULL OR h.hold_until > NOW())
+                )
+              )
+            """,
+            (keep_days,),
+        )
+        out["audit_events"] = int(cur.rowcount or 0)
+        cur.execute(
+            """
+            DELETE FROM call_log c
+            WHERE c.created_at < NOW() - make_interval(days => %s::int)
+              AND NOT EXISTS (
+                SELECT 1 FROM legal_holds h
+                WHERE h.client_id = c.client_id
+                  AND (h.hold_until IS NULL OR h.hold_until > NOW())
+              )
+            """,
+            (keep_days,),
+        )
+        out["call_log"] = int(cur.rowcount or 0)
+        cur.execute(
+            """
+            DELETE FROM sms_sessions s
+            WHERE s.updated_at < NOW() - make_interval(days => %s::int)
+              AND NOT EXISTS (
+                SELECT 1 FROM legal_holds h
+                WHERE h.client_id = s.client_id
+                  AND (h.hold_until IS NULL OR h.hold_until > NOW())
+              )
+            """,
+            (keep_days,),
+        )
+        out["sms_sessions"] = int(cur.rowcount or 0)
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"[DB] retention purge failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    return out
+
+
+def db_export_tenant_snapshot(export_root: str, *, include_audit: bool = True) -> Optional[dict]:
+    """
+    Export tenant-scoped operational data to a local immutable snapshot file.
+    Returns metadata with path + sha256.
+    """
+    conn = _get_conn()
+    if not conn:
+        return None
+    root = Path(export_root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    export_key = f"tenant-export-{ts}-{uuid.uuid4().hex[:10]}"
+    out_path = root / f"{export_key}.json"
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {_tenant_select_cols()} FROM tenants ORDER BY created_at ASC")
+        tenant_rows = cur.fetchall()
+        payload = {
+            "export_key": export_key,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "tenants": [],
+            "schema_tables": list(_CLIENT_SCOPED_TABLES),
+        }
+        scoped_tables = [t for t in _CLIENT_SCOPED_TABLES if include_audit or t != "audit_events"]
+        for row in tenant_rows:
+            tenant = _row_to_tenant(row)
+            cid = (tenant.get("client_id") or "").strip()
+            scoped_data = {}
+            for table in scoped_tables:
+                scoped_data[table] = _fetch_all_rows_for_client(cur, table, cid)
+            payload["tenants"].append({"tenant": tenant, "tables": scoped_data})
+        encoded = json.dumps(payload, default=str, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        sha = hashlib.sha256(encoded).hexdigest()
+        with out_path.open("wb") as f:
+            f.write(encoded)
+        cur.execute(
+            """
+            INSERT INTO backup_exports (export_key, destination_path, sha256)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (export_key) DO NOTHING
+            """,
+            (export_key, str(out_path), sha),
+        )
+        conn.commit()
+        cur.close()
+        return {"export_key": export_key, "path": str(out_path), "sha256": sha, "tenants": len(payload["tenants"])}
+    except Exception as e:
+        print(f"[DB] tenant snapshot export failed: {e}")
         return None
 
 def db_tenant_list_all() -> List[dict]:
