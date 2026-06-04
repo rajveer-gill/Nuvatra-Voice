@@ -9580,19 +9580,27 @@ async def handle_no_speech(request: Request):
             )
             return Response(content=str(response), media_type="application/xml")
 
-        last_utterance = float(call_data.get("last_utterance_at") or 0)
-        if last_utterance and (time.time() - last_utterance) < 45:
+        # After AI spoke, silence on the follow-up listen is expected — re-prompt once, do not
+        # bounce to /respond (response_status was cleared when the reply TwiML was returned).
+        if call_data.get("awaiting_caller_reply"):
+            from voice.twiml_stt import empty_retry_twiml
+
+            call_store.merge_session(call_sid, {"awaiting_caller_reply": False})
             voice_respond_branch(
-                "no_speech_skipped_recent_utterance",
-                call_sid=call_sid,
+                "no_speech_post_ai_reprompt",
+                call_sid=call_sid or "",
                 client_id=str(call_data.get("client_id") or ""),
-                status="recent_speech",
+                status="reprompt",
             )
-            response = VoiceResponse()
-            response.redirect(
-                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+            lang_code = get_twilio_language_code(detected_lang)
+            xml = empty_retry_twiml(
+                base_url=base_url,
+                language=lang_code,
+                use_deepgram=_voice_stt_use_deepgram(),
+                call_sid=call_sid,
+                call_state=active_calls.get(call_sid, {}),
             )
-            return Response(content=str(response), media_type="application/xml")
+            return Response(content=xml, media_type="application/xml")
 
         if forwarding_phone:
             voice_forward(
@@ -9726,6 +9734,10 @@ async def respond_with_audio(request: Request):
                             use_deepgram=_voice_stt_use_deepgram(),
                             call_state=active_calls.get(call_sid, {}),
                         )
+                        if call_sid:
+                            call_store.merge_session(
+                                call_sid, {"awaiting_caller_reply": True}
+                            )
                 except Exception as e:
                     voice_warning(
                         "respond_ready_listen_setup_failed",

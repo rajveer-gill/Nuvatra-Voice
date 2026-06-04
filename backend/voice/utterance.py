@@ -177,6 +177,7 @@ async def _apply_caller_utterance_locked(
     user_message = {"role": "user", "content": speech_result}
     call_data["conversation_history"].append(user_message)
     call_data["last_utterance_at"] = time.time()
+    call_data["awaiting_caller_reply"] = False
     if m._suggests_booking(speech_result):
         call_data["booking_intent"] = True
 
