@@ -204,7 +204,9 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                 import main as m
 
                 row = m.active_calls.get(call_sid) or {}
-                max_gen = int(row.get("media_stream_gen") or 0)
+                max_gen = m.call_store.get_media_stream_max_gen(call_sid)
+                if max_gen < 1:
+                    max_gen = int(row.get("media_stream_gen") or 0)
                 tok_gen = token_stream_generation(token)
                 if not call_sid or not token or not max_gen:
                     voice_info(

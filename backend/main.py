@@ -5,7 +5,14 @@ from contextlib import asynccontextmanager
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response, JSONResponse
-from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    EmailStr,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 from typing import Optional, List, Literal, Any
 import uuid
 import logging
@@ -30,18 +37,22 @@ import shutil
 import io
 from urllib.parse import quote, urlparse
 import base64
+
 # Twilio imports (optional - only needed for phone integration)
 try:
     from twilio.twiml.voice_response import VoiceResponse
     from twilio.rest import Client as TwilioClient
     from twilio.request_validator import RequestValidator
+
     TWILIO_AVAILABLE = True
 except ImportError:
     VoiceResponse = None
     TwilioClient = None
     RequestValidator = None
     TWILIO_AVAILABLE = False
-    print("WARNING: Twilio not installed - phone features will be disabled. Install with: pip install twilio")
+    print(
+        "WARNING: Twilio not installed - phone features will be disabled. Install with: pip install twilio"
+    )
 
 try:
     from plans import get_plan_limits
@@ -53,11 +64,14 @@ from subscription_access import get_tenant_subscription_state
 try:
     from voice_preview import add_sentence_pauses
 except ImportError:
+
     def add_sentence_pauses(text: str) -> str:
         return (text or "").strip()
 
+
 try:
     import stripe
+
     STRIPE_AVAILABLE = True
 except ImportError:
     stripe = None
@@ -66,7 +80,10 @@ except ImportError:
 from prompts.receptionist import build_system_prompt
 from voice.call_session_store import MemoryCallSessionStore, get_call_session_store
 from settings import get_settings
-from security.webhooks import validate_twilio_webhook as validate_twilio_signature, verify_stripe_event
+from security.webhooks import (
+    validate_twilio_webhook as validate_twilio_signature,
+    verify_stripe_event,
+)
 from security.redaction import mask_phone_e164
 
 # Load .env from backend directory (where this script is located)
@@ -75,7 +92,7 @@ _this_file = Path(__file__).resolve()
 _backend_dir = _this_file.parent
 
 # The .env file is in the backend directory
-env_path = _backend_dir / '.env'
+env_path = _backend_dir / ".env"
 
 # Load .env file
 if env_path.exists():
@@ -114,15 +131,25 @@ from observability import (
 
 def _public_base_url() -> str:
     """HTTPS origin Twilio can reach for webhooks (use NGROK_URL or PUBLIC_BASE_URL)."""
-    return (os.getenv("NGROK_URL") or os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    return (
+        (os.getenv("NGROK_URL") or os.getenv("PUBLIC_BASE_URL") or "")
+        .strip()
+        .rstrip("/")
+    )
 
 
 def _derived_public_base_from_request(request: Request) -> str:
     """When PUBLIC_BASE_URL is unset, derive https://host from the inbound webhook (Render/proxies send X-Forwarded-*)."""
-    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+    host = (
+        (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+        .split(",")[0]
+        .strip()
+    )
     if not host:
         return ""
-    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    proto = (
+        (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    )
     if proto not in ("https", "http"):
         proto = (request.url.scheme or "https").lower()
         if proto not in ("http", "https"):
@@ -169,7 +196,9 @@ def _admin_access_log(event: str, **fields) -> None:
 
 def _greeting_debug_enabled() -> bool:
     """GREETING_DEBUG=1 or SETTINGS_LOAD_DEBUG=1 — logs greeting resolution on calls and Settings saves."""
-    return _settings_load_debug_enabled() or os.getenv("GREETING_DEBUG", "").strip().lower() in (
+    return _settings_load_debug_enabled() or os.getenv(
+        "GREETING_DEBUG", ""
+    ).strip().lower() in (
         "1",
         "true",
         "yes",
@@ -177,7 +206,9 @@ def _greeting_debug_enabled() -> bool:
 
 
 RECORDING_DISCLOSURE_TEXT = "This call may be recorded for quality and training."
-DEFAULT_GREETING_TEMPLATE = "Thank you for calling {business_name}. How can I help you today?"
+DEFAULT_GREETING_TEMPLATE = (
+    "Thank you for calling {business_name}. How can I help you today?"
+)
 
 
 def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) -> None:
@@ -232,7 +263,9 @@ if not api_key:
     print(f"ERROR: OPENAI_API_KEY not found!")
     print(f"Checked path: {env_path}")
     print(f"Path exists: {env_path.exists()}")
-    print(f"Make sure your .env file is in the backend directory with OPENAI_API_KEY=your_key")
+    print(
+        f"Make sure your .env file is in the backend directory with OPENAI_API_KEY=your_key"
+    )
     raise ValueError(
         f"OPENAI_API_KEY not found! Checked: {env_path}\n"
         f"Make sure your .env file is in the backend directory with OPENAI_API_KEY=your_key"
@@ -277,6 +310,7 @@ async def pre_warm_openai():
             return
         print(f"[WARN] Pre-warm warning (non-critical): {e}")
 
+
 async def keep_client_warm():
     """Background task to keep OpenAI client warm"""
     while True:
@@ -286,10 +320,13 @@ async def keep_client_warm():
         except Exception as e:
             print(f"[WARN] Keep-warm error (non-critical): {e}")
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Init DB first (in thread so it doesn't block the event loop), then pre-warm OpenAI
-    db_task = create_tracked_task(asyncio.to_thread(_init_db_background), name="init_db_background")
+    db_task = create_tracked_task(
+        asyncio.to_thread(_init_db_background), name="init_db_background"
+    )
     warm_task = create_tracked_task(pre_warm_openai(), name="pre_warm_openai")
     keep_warm_task = create_tracked_task(keep_client_warm(), name="keep_client_warm")
     yield
@@ -347,6 +384,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     """Set X-Request-ID for correlation; include in audit log and response."""
@@ -388,6 +426,7 @@ _webhook_rate_limit_lock = asyncio.Lock()
 WEBHOOK_RATE_LIMIT_PER_MIN = 120
 WEBHOOK_RATE_LIMIT_MAX_IPS = 5000
 
+
 async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
     """Return 429 response if IP over limit for /api/phone/incoming or /api/sms/incoming; else None."""
     path = request.url.path
@@ -424,6 +463,7 @@ async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
         times.append(now)
     return None
 
+
 @app.middleware("http")
 async def webhook_rate_limit_middleware(request: Request, call_next):
     """Apply rate limit to phone/SMS webhooks."""
@@ -433,11 +473,20 @@ async def webhook_rate_limit_middleware(request: Request, call_next):
             return resp
     return await call_next(request)
 
+
 # CORS debug: only when DEBUG_CORS=1 (avoid file I/O and noise in production)
 if os.getenv("DEBUG_CORS", "").strip() == "1":
+
     def _debug_log_payload(data: dict) -> None:
         import json as _json
-        payload = {"sessionId": "e3c6b1", "timestamp": __import__("time").time() * 1000, "location": "main.py:CORS", "message": "request", "data": data}
+
+        payload = {
+            "sessionId": "e3c6b1",
+            "timestamp": __import__("time").time() * 1000,
+            "location": "main.py:CORS",
+            "message": "request",
+            "data": data,
+        }
         try:
             _log_path = _backend_dir.parent / "debug-e3c6b1.log"
             with open(_log_path, "a", encoding="utf-8") as _f:
@@ -445,11 +494,20 @@ if os.getenv("DEBUG_CORS", "").strip() == "1":
         except Exception:
             pass
         print(f"[CORS-DEBUG] {payload}")
+
     @app.middleware("http")
     async def _cors_debug_middleware(request, call_next):
         origin = request.headers.get("origin") or ""
-        _debug_log_payload({"method": request.method, "path": request.url.path, "origin": origin, "allowed_origins": allowed_origins})
+        _debug_log_payload(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "origin": origin,
+                "allowed_origins": allowed_origins,
+            }
+        )
         return await call_next(request)
+
     _debug_log_payload({"event": "startup", "allowed_origins": allowed_origins})
 
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
@@ -461,8 +519,10 @@ ONE_MOMENT_PHRASE = "One moment."
 # Lazy OpenAI client — created on first use so import doesn't block port binding
 _openai_client = None
 
+
 class _LazyOpenAIClient:
     """Proxy that creates the real OpenAI client on first attribute access."""
+
     def __getattr__(self, name):
         global _openai_client
         if _openai_client is None:
@@ -471,7 +531,9 @@ class _LazyOpenAIClient:
             print("[OK] OpenAI client created successfully")
         return getattr(_openai_client, name)
 
+
 client = _LazyOpenAIClient()
+
 
 def _ensure_openai_client():
     """Eagerly create the client if not yet initialized."""
@@ -487,7 +549,9 @@ print("[INIT] Initializing Twilio...", flush=True)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
-TWILIO_SMS_FROM = os.getenv("TWILIO_SMS_FROM") or TWILIO_PHONE_NUMBER  # Same or separate number for SMS
+TWILIO_SMS_FROM = (
+    os.getenv("TWILIO_SMS_FROM") or TWILIO_PHONE_NUMBER
+)  # Same or separate number for SMS
 
 twilio_client = None
 if TWILIO_AVAILABLE and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
@@ -497,7 +561,9 @@ if TWILIO_AVAILABLE and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
     except Exception as e:
         print(f"WARNING: Twilio initialization failed: {e}")
 elif not TWILIO_AVAILABLE:
-    print("WARNING: Twilio not installed - phone features disabled. Install with: pip install twilio")
+    print(
+        "WARNING: Twilio not installed - phone features disabled. Install with: pip install twilio"
+    )
 elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
     print("WARNING: Twilio credentials not found - phone features will be disabled")
 
@@ -508,14 +574,22 @@ def _voice_stt_use_deepgram() -> bool:
         from voice.stt_runtime import deepgram_stt_active
     except ImportError:
         return False
-    return deepgram_stt_active(twilio_available=TWILIO_AVAILABLE, twilio_client=twilio_client)
+    return deepgram_stt_active(
+        twilio_available=TWILIO_AVAILABLE, twilio_client=twilio_client
+    )
+
 
 # Project root (parent of backend) for client configs
 PROJECT_ROOT = _backend_dir.parent
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 
+
 def _call_recording_env_enabled() -> bool:
-    return os.getenv("CALL_RECORDING_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    return os.getenv("CALL_RECORDING_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def _tenant_for_call_recording(tenant: Optional[dict] = None) -> Optional[dict]:
@@ -552,6 +626,7 @@ def _call_summary_enabled_for_tenant(tenant: Optional[dict] = None) -> bool:
     if not str(raw).strip().lower() in ("1", "true", "yes"):
         return False
     return _call_recording_enabled_for_tenant(tenant)
+
 
 # Auth: Clerk JWT verification for multi-tenant
 try:
@@ -655,10 +730,12 @@ try:
         DAILY_CRON_JOBS,
         CRON_JOB_NAMES,
     )
+
     _db_imported = True
     print("[INIT] Database module imported (connection deferred)", flush=True)
 except ImportError as e:
     print(f"[WARN] Database module import failed: {e}", flush=True)
+
 
 def _init_db_background():
     """Initialize DB connection in background thread so server starts immediately."""
@@ -670,6 +747,7 @@ def _init_db_background():
         print(f"[INIT] Database ready (USE_DB={USE_DB})", flush=True)
     except Exception as e:
         print(f"[WARN] Database init failed (using in-memory): {e}", flush=True)
+
 
 def audit_log(
     actor_type: str,
@@ -705,6 +783,7 @@ def audit_log(
 
 def _stable_sha256(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
 
 # In-memory fallback when no database (dev / testing)
 appointments: List[dict] = []
@@ -803,7 +882,7 @@ def _normalize_rule_entries(raw) -> List[dict]:
 
 def _config_data_to_business_info(data: dict) -> dict:
     """Normalize raw config.json / DB business_config dict to get_business_info() shape."""
-    forwarding = (data.get("forwarding_phone") or "")
+    forwarding = data.get("forwarding_phone") or ""
     if not forwarding and data.get("locations"):
         forwarding = data["locations"][0].get("forwarding_phone", "")
     _departments = data.get("departments")
@@ -827,7 +906,9 @@ def _config_data_to_business_info(data: dict) -> dict:
         "greeting": data.get("greeting", ""),
         "plan": data.get("plan", "starter"),
         "voice": data.get("voice", "fable"),
-        "speed": float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0,
+        "speed": (
+            float(data.get("speed", 1.0)) if data.get("speed") is not None else 1.0
+        ),
         "receptionist_name": data.get("receptionist_name", ""),
         "business_type": data.get("business_type", ""),
     }
@@ -871,7 +952,9 @@ def _read_raw_client_config(cid: str) -> Optional[dict]:
             try:
                 db_tenant_set_business_config(cid, raw)
             except Exception as e:
-                logger.warning("business_config file->db migrate failed client_id=%s: %s", cid, e)
+                logger.warning(
+                    "business_config file->db migrate failed client_id=%s: %s", cid, e
+                )
         return raw
     except Exception as e:
         logger.warning("Failed to read client config file client_id=%s: %s", cid, e)
@@ -884,7 +967,9 @@ def save_raw_client_config(cid: str, data: dict) -> None:
     if USE_DB:
         db_ok = bool(db_tenant_set_business_config(cid, data))
         if not db_ok:
-            raise HTTPException(status_code=500, detail="Failed to save settings to database")
+            raise HTTPException(
+                status_code=500, detail="Failed to save settings to database"
+            )
     config_path = PROJECT_ROOT / "clients" / cid / "config.json"
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -892,8 +977,12 @@ def save_raw_client_config(cid: str, data: dict) -> None:
             json.dump(data, f, indent=2)
     except Exception as e:
         if not USE_DB:
-            raise HTTPException(status_code=500, detail=f"Failed to write config: {e}") from e
-        logger.warning("config file write failed client_id=%s (saved to db): %s", cid, e)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to write config: {e}"
+            ) from e
+        logger.warning(
+            "config file write failed client_id=%s (saved to db): %s", cid, e
+        )
 
 
 def load_client_config(client_id: Optional[str] = None):
@@ -912,31 +1001,32 @@ def load_client_config(client_id: Optional[str] = None):
         print(f"WARNING: Failed to load client config: {e}")
         return None
 
+
 # Business configuration: loaded per-request (multi-tenant) or at startup (single-tenant).
 # Single-tenant / no-DB fallback only — do not put global env (e.g. BUSINESS_FORWARDING_PHONE) here
 # or it will appear as every tenant’s “forwarding” in the UI when config is missing.
 _DEMO_BUSINESS_INFO = {
-        "name": "",
-        "hours": "",
-        "phone": "",
-        "forwarding_phone": "",
-        "email": "",
-        "address": "",
-        "departments": [],
-        "menu_link": "",
-        "services": [],
-        "specials": [],
-        "reservation_rules": [],
-        "staff": [],
-        "transfer_targets": [],
-        "locations": [],
-        "greeting": "",
-        "plan": "starter",
-        "voice": "fable",
-        "speed": 1.0,
-        "receptionist_name": "",
-        "business_type": "",
-    }
+    "name": "",
+    "hours": "",
+    "phone": "",
+    "forwarding_phone": "",
+    "email": "",
+    "address": "",
+    "departments": [],
+    "menu_link": "",
+    "services": [],
+    "specials": [],
+    "reservation_rules": [],
+    "staff": [],
+    "transfer_targets": [],
+    "locations": [],
+    "greeting": "",
+    "plan": "starter",
+    "voice": "fable",
+    "speed": 1.0,
+    "receptionist_name": "",
+    "business_type": "",
+}
 
 
 def _minimal_business_info_from_tenant_dict(tenant: dict) -> dict:
@@ -978,6 +1068,7 @@ def _default_business_info_for_tenant() -> Optional[dict]:
         return None
     try:
         from database import _get_conn
+
         conn = _get_conn()
         if not conn:
             return None
@@ -1094,9 +1185,11 @@ def get_business_info() -> dict:
                     out["name"] = (t.get("name") or "").strip()
     return out
 
+
 def get_tts_voice() -> str:
     """Voice for TTS (phone/SMS). From business config or default fable."""
     return get_business_info().get("voice", "fable") or "fable"
+
 
 def get_tts_speed() -> float:
     """Speaking speed for TTS (OpenAI allows 0.25–4.0). From business config or default 1.0."""
@@ -1105,6 +1198,7 @@ def get_tts_speed() -> float:
         return max(0.25, min(4.0, s))
     except (TypeError, ValueError):
         return 1.0
+
 
 def invalidate_voice_cache(client_id: Optional[str] = None) -> None:
     """Clear greeting/got-it audio cache when voice, speed, greeting, name, or receptionist changes."""
@@ -1180,7 +1274,9 @@ def warm_client_voice_cache(client_id: str) -> None:
             payload = build_phone_greeting_payload(info, tenant)
             voice = (payload.get("voice") or get_tts_voice() or "fable").strip()
             speed = get_tts_speed()
-            data = _synthesize_tts_clip(payload["spoken_text"], voice=voice, speed=speed)
+            data = _synthesize_tts_clip(
+                payload["spoken_text"], voice=voice, speed=speed
+            )
             put_cached(PROJECT_ROOT, "greeting", greeting_key, data)
             voice_info(
                 "greeting_audio_prewarmed",
@@ -1218,11 +1314,14 @@ def warm_client_voice_cache(client_id: str) -> None:
             client_id_prefix=cid[:12],
             error_type=type(e).__name__,
         )
-        logger.warning("warm_client_voice_cache failed client_id=%s: %s", cid, e, exc_info=True)
+        logger.warning(
+            "warm_client_voice_cache failed client_id=%s: %s", cid, e, exc_info=True
+        )
 
 
 async def _warm_client_voice_cache_async(client_id: str) -> None:
     await asyncio.to_thread(warm_client_voice_cache, client_id)
+
 
 def _format_greeting_template(raw: str, info: dict) -> str:
     """Substitute {business_name} and {receptionist_name} in custom greeting text."""
@@ -1280,13 +1379,25 @@ def build_phone_greeting_payload(info: dict, tenant: Optional[dict] = None) -> d
     tenant_rec = tenant if tenant is not None else _tenant_for_call_recording()
     recording_enabled = _call_recording_enabled_for_tenant(tenant_rec)
     recording_disclosure = RECORDING_DISCLOSURE_TEXT if recording_enabled else ""
-    spoken_text = f"{main_greeting} {recording_disclosure}".strip() if recording_disclosure else main_greeting
+    spoken_text = (
+        f"{main_greeting} {recording_disclosure}".strip()
+        if recording_disclosure
+        else main_greeting
+    )
 
     warnings: List[str] = []
     if "{receptionist_name}" in raw_template and not receptionist_name:
-        warnings.append("Greeting uses {receptionist_name} but AI receptionist name is empty in Settings.")
-    if "{business_name}" in raw_template and business_name == "us" and not (info.get("name") or "").strip():
-        warnings.append("Greeting uses {business_name} but business name is empty in Settings (using fallback 'us').")
+        warnings.append(
+            "Greeting uses {receptionist_name} but AI receptionist name is empty in Settings."
+        )
+    if (
+        "{business_name}" in raw_template
+        and business_name == "us"
+        and not (info.get("name") or "").strip()
+    ):
+        warnings.append(
+            "Greeting uses {business_name} but business name is empty in Settings (using fallback 'us')."
+        )
 
     return {
         "spoken_text": spoken_text,
@@ -1307,7 +1418,9 @@ def build_phone_greeting_payload(info: dict, tenant: Optional[dict] = None) -> d
     }
 
 
-def _log_greeting_debug(event: str, payload: dict, *, call_sid: str = "", cache_hit: Optional[bool] = None) -> None:
+def _log_greeting_debug(
+    event: str, payload: dict, *, call_sid: str = "", cache_hit: Optional[bool] = None
+) -> None:
     """Structured greeting logs (Render: GREETING_DEBUG=1 or OBS_TRACE_VOICE=1)."""
     cid = (payload.get("client_id") or "")[:12]
     fields = {
@@ -1319,7 +1432,9 @@ def _log_greeting_debug(event: str, payload: dict, *, call_sid: str = "", cache_
         "raw_greeting_len": len(payload.get("raw_greeting_saved") or ""),
         "spoken_len": len(payload.get("spoken_text") or ""),
         "business_name": (payload.get("placeholders") or {}).get("business_name"),
-        "receptionist_name": (payload.get("placeholders") or {}).get("receptionist_name"),
+        "receptionist_name": (payload.get("placeholders") or {}).get(
+            "receptionist_name"
+        ),
         "voice": payload.get("voice"),
     }
     if call_sid:
@@ -1344,15 +1459,18 @@ def get_greeting_text() -> str:
     _log_greeting_debug("greeting_built", payload)
     return payload["spoken_text"]
 
+
 class ConversationRequest(BaseModel):
     message: str
     session_id: str
     conversation_history: Optional[List[dict]] = []
 
+
 class ConversationResponse(BaseModel):
     response: str
     action: Optional[str] = None
     data: Optional[dict] = None
+
 
 class AppointmentRequest(BaseModel):
     name: str
@@ -1363,6 +1481,7 @@ class AppointmentRequest(BaseModel):
     reason: str
     source: Optional[str] = "manual"  # "receptionist" | "manual"
     staff_id: Optional[str] = None  # stylist UUID from Settings staff list
+
 
 class AppointmentUpdate(BaseModel):
     status: Optional[str] = None
@@ -1393,10 +1512,12 @@ class MessageRequest(BaseModel):
     message: str
     urgency: str = "normal"
 
+
 class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "fable"  # nova, alloy, echo, fable, onyx, shimmer
     speed: Optional[float] = None  # OpenAI 0.25–4.0; if omitted uses business config
+
 
 def _ensure_db_ready():
     """Block briefly to let background init_db finish if it hasn't yet."""
@@ -1404,6 +1525,7 @@ def _ensure_db_ready():
     if USE_DB or not _db_imported or not os.getenv("DATABASE_URL"):
         return
     import time
+
     for _ in range(20):
         if USE_DB:
             return
@@ -1414,6 +1536,7 @@ def _ensure_db_ready():
     except Exception:
         pass
 
+
 def _clerk_fetch_user_link(clerk_user_id: str) -> Optional[dict]:
     """Clerk Backend API: public_metadata.tenant_id and verified email addresses."""
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
@@ -1421,6 +1544,7 @@ def _clerk_fetch_user_link(clerk_user_id: str) -> Optional[dict]:
         return None
     try:
         import httpx
+
         resp = httpx.get(
             f"https://api.clerk.com/v1/users/{clerk_user_id}",
             headers={"Authorization": f"Bearer {clerk_secret}"},
@@ -1454,9 +1578,13 @@ def _clerk_patch_user_tenant_metadata(clerk_user_id: str, tenant_id: str) -> boo
         return False
     try:
         import httpx
+
         resp = httpx.patch(
             f"https://api.clerk.com/v1/users/{clerk_user_id}",
-            headers={"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {clerk_secret}",
+                "Content-Type": "application/json",
+            },
             json={"public_metadata": {"tenant_id": tenant_id}},
             timeout=10.0,
         )
@@ -1464,6 +1592,7 @@ def _clerk_patch_user_tenant_metadata(clerk_user_id: str, tenant_id: str) -> boo
     except Exception as e:
         print(f"[Auth] Clerk metadata patch failed for {clerk_user_id}: {e}")
         return False
+
 
 def require_tenant(request: Request):
     """
@@ -1475,7 +1604,9 @@ def require_tenant(request: Request):
         return None
     token = get_bearer_token(request)
     if not token:
-        audit_log("user", "auth_failure", details={"reason": "no_token"}, request=request)
+        audit_log(
+            "user", "auth_failure", details={"reason": "no_token"}, request=request
+        )
         raise HTTPException(status_code=401, detail="Authorization required")
     user_id, tenant_id_from_meta = verify_clerk_token(token)
     _ensure_db_ready()
@@ -1499,7 +1630,9 @@ def require_tenant(request: Request):
                 tenant = db_tenant_get_by_id(str(api_tenant_id))
                 if tenant:
                     db_tenant_member_set_single(user_id, tenant["id"])
-                    print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via Clerk metadata")
+                    print(
+                        f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via Clerk metadata"
+                    )
             if not tenant:
                 for em in link.get("emails") or []:
                     invited_tid = db_tenant_invite_consume(em)
@@ -1509,7 +1642,9 @@ def require_tenant(request: Request):
                     if tenant:
                         db_tenant_member_set_single(user_id, tenant["id"])
                         _clerk_patch_user_tenant_metadata(user_id, tenant["id"])
-                        print(f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via invite email {em}")
+                        print(
+                            f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via invite email {em}"
+                        )
                         break
     elif USE_DB and user_id and not preferred_tid:
         link = _clerk_fetch_user_link(user_id)
@@ -1525,8 +1660,16 @@ def require_tenant(request: Request):
         if tid and meta_tid != tid:
             _clerk_patch_user_tenant_metadata(user_id, tid)
     if not tenant:
-        print(f"[Auth] no_tenant user_id={user_id} jwt_metadata_tenant_id={tenant_id_from_meta!r}")
-        audit_log("user", "auth_failure", actor_id=user_id, details={"reason": "no_tenant"}, request=request)
+        print(
+            f"[Auth] no_tenant user_id={user_id} jwt_metadata_tenant_id={tenant_id_from_meta!r}"
+        )
+        audit_log(
+            "user",
+            "auth_failure",
+            actor_id=user_id,
+            details={"reason": "no_tenant"},
+            request=request,
+        )
         raise HTTPException(
             status_code=403,
             detail=(
@@ -1537,21 +1680,41 @@ def require_tenant(request: Request):
     set_request_client_id(tenant["client_id"])
     return tenant
 
+
 def require_admin(request: Request):
     """Dependency: require Bearer token and admin user (user_id in ADMIN_CLERK_USER_IDS)."""
     token = get_bearer_token(request)
     if not token:
-        audit_log("admin", "auth_failure", details={"reason": "no_token"}, request=request)
+        audit_log(
+            "admin", "auth_failure", details={"reason": "no_token"}, request=request
+        )
         raise HTTPException(status_code=401, detail="Authorization required")
     user_id, _ = verify_clerk_token(token)
-    admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+    admin_ids = [
+        x.strip()
+        for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
+        if x.strip()
+    ]
     if not admin_ids:
-        audit_log("admin", "auth_failure", actor_id=user_id, details={"reason": "admin_not_configured"}, request=request)
+        audit_log(
+            "admin",
+            "auth_failure",
+            actor_id=user_id,
+            details={"reason": "admin_not_configured"},
+            request=request,
+        )
         raise HTTPException(status_code=403, detail="Admin not configured")
     if user_id not in admin_ids:
-        audit_log("admin", "auth_failure", actor_id=user_id, details={"reason": "not_admin"}, request=request)
+        audit_log(
+            "admin",
+            "auth_failure",
+            actor_id=user_id,
+            details={"reason": "not_admin"},
+            request=request,
+        )
         raise HTTPException(status_code=403, detail="Admin access required")
     return user_id
+
 
 def require_active_subscription(tenant: Optional[dict] = Depends(require_tenant)):
     """Dependency: after require_tenant, require that tenant can use the app (trial or paid or exempt)."""
@@ -1566,7 +1729,10 @@ def require_active_subscription(tenant: Optional[dict] = Depends(require_tenant)
         )
         raise HTTPException(
             status_code=403,
-            detail={"code": "SUBSCRIPTION_REQUIRED", "message": "Subscription required. Your trial has ended. Please choose a plan to continue."},
+            detail={
+                "code": "SUBSCRIPTION_REQUIRED",
+                "message": "Subscription required. Your trial has ended. Please choose a plan to continue.",
+            },
             headers={"X-Subscription-Required": "true"},
         )
     return tenant
@@ -1589,6 +1755,7 @@ def _phone_to_e164(phone: str) -> Optional[str]:
     if len(digits) >= 10:
         return f"+{digits}"
     return None
+
 
 def _is_sms_confirmation(body: str) -> bool:
     """True if the message looks like the customer confirming their appointment (yes, looks good, etc.)."""
@@ -1668,7 +1835,8 @@ def send_sms(
 ) -> bool:
     """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number).
     Records usage via db_usage_increment_sms when client_id is set.
-    If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only)."""
+    If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only).
+    """
     if not TWILIO_AVAILABLE or not twilio_client:
         sms_info("outbound_skipped", reason="twilio_not_configured")
         return False
@@ -1757,7 +1925,8 @@ def send_sms(
             )
             if attempt < 2:
                 import time
-                time.sleep(2 ** attempt)
+
+                time.sleep(2**attempt)
     sms_info("outbound_failed_after_retries", error=str(last_err), to_masked=to_masked)
     audit_log(
         "sms",
@@ -1788,6 +1957,7 @@ def _tenant_sms_from_number() -> Optional[str]:
     phone = (get_business_info().get("phone") or "").strip()
     return phone or None
 
+
 def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
     """Validate X-Twilio-Signature so only Twilio can trigger webhooks."""
     allow_insecure = (os.getenv("ALLOW_INSECURE_WEBHOOKS") or "").strip().lower() in (
@@ -1804,6 +1974,7 @@ def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
         strict_required=strict_required,
     )
 
+
 def get_client_data_dir() -> Optional[Path]:
     """Return Path to client data directory (for call_log, caller_memory). None if no client_id."""
     cid = get_db_client_id()
@@ -1813,9 +1984,11 @@ def get_client_data_dir() -> Optional[Path]:
     d.mkdir(parents=True, exist_ok=True)
     return d
 
+
 def normalize_phone(phone: str) -> str:
     """Normalize to E.164-ish key (digits only, no +)."""
     return "".join(c for c in phone if c.isdigit())
+
 
 def get_caller_memory(phone: str) -> Optional[dict]:
     """Load caller memory for repeat-caller recognition. Returns None or {name, call_count, last_call_iso, last_reason}."""
@@ -1850,7 +2023,9 @@ def get_caller_memory(phone: str) -> Optional[dict]:
         return None
 
 
-def refresh_caller_memory_for_prompt(phone: str, client_id: Optional[str] = None) -> Optional[dict]:
+def refresh_caller_memory_for_prompt(
+    phone: str, client_id: Optional[str] = None
+) -> Optional[dict]:
     """
     Load caller memory for voice/SMS prompts, syncing name/email from the latest appointment
     when the DB row is stale (e.g. still 'Jake' after the customer texted a new name).
@@ -1930,7 +2105,13 @@ def update_caller_memory(
     key = normalize_phone(phone)
     entry = data.setdefault(
         key,
-        {"name": "", "call_count": 0, "last_call_iso": "", "last_reason": "", "data": {}},
+        {
+            "name": "",
+            "call_count": 0,
+            "last_call_iso": "",
+            "last_reason": "",
+            "data": {},
+        },
     )
     if increment_count:
         entry["call_count"] = entry.get("call_count", 0) + 1
@@ -1949,6 +2130,7 @@ def update_caller_memory(
             json.dump(data, f, indent=2)
     except Exception as e:
         print(f"Failed to save caller memory: {e}")
+
 
 def get_staff_phone_by_name(name: str) -> Optional[str]:
     """Return E.164 for a plan-authorized transfer destination by name (not the full staff roster)."""
@@ -2042,7 +2224,9 @@ def append_dial_forwarding_only(response: VoiceResponse, forwarding_phone: str) 
     response.hangup()
 
 
-def twiml_setup_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str = "") -> VoiceResponse:
+def twiml_setup_not_ready_handoff(
+    base_url: str, biz_info: dict, call_sid: str = ""
+) -> VoiceResponse:
     """
     Play setup-not-ready message. Transfer to the store only when store phone is set but roster is not
     (roster-only gap). If store phone is missing, end the call after the message.
@@ -2051,7 +2235,9 @@ def twiml_setup_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str =
     message = setup_not_ready_call_message(biz_info)
     if message:
         msg_encoded = quote(message)
-        response.play(f"{base_url}/api/phone/tts-audio?text={msg_encoded}&voice={get_tts_voice()}")
+        response.play(
+            f"{base_url}/api/phone/tts-audio?text={msg_encoded}&voice={get_tts_voice()}"
+        )
     forwarding_phone = (biz_info.get("forwarding_phone") or "").strip()
     if setup_transfers_to_store_after_message(biz_info) and forwarding_phone:
         append_dial_forwarding_only(response, forwarding_phone)
@@ -2068,9 +2254,12 @@ def twiml_setup_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str =
     return response
 
 
-def twiml_roster_not_ready_handoff(base_url: str, biz_info: dict, call_sid: str = "") -> VoiceResponse:
+def twiml_roster_not_ready_handoff(
+    base_url: str, biz_info: dict, call_sid: str = ""
+) -> VoiceResponse:
     """Backward-compatible alias for setup-not-ready handoff TwiML."""
     return twiml_setup_not_ready_handoff(base_url, biz_info, call_sid=call_sid)
+
 
 def parse_transfer_to(ai_text: str) -> Optional[str]:
     """If AI responded with TRANSFER_TO: Name, return the name; else None."""
@@ -2079,12 +2268,14 @@ def parse_transfer_to(ai_text: str) -> Optional[str]:
     t = ai_text.strip()
     prefix = "TRANSFER_TO:"
     if t.upper().startswith(prefix):
-        return t[len(prefix):].strip()
+        return t[len(prefix) :].strip()
     return None
+
 
 # Call log (Pro analytics): in-memory index by call_sid, persisted to JSON
 call_log_entries = {}  # call_sid -> {from_number, to_number, start_iso, outcome, ...}
 CALL_LOG_MAX_ENTRIES = 5000
+
 
 def call_log_start(call_sid: str, from_number: str, to_number: str):
     """Record call start. Outcome set when we forward or in status callback."""
@@ -2115,6 +2306,7 @@ def call_log_start(call_sid: str, from_number: str, to_number: str):
         },
     )
 
+
 def call_log_merge_recording(call_sid: str, **kwargs) -> None:
     """Merge recording / summary fields into in-memory call log entry."""
     ent = call_log_entries.get(call_sid)
@@ -2123,6 +2315,7 @@ def call_log_merge_recording(call_sid: str, **kwargs) -> None:
     for k, v in kwargs.items():
         if v is not None:
             ent[k] = v
+
 
 def _file_call_log_merge_recording(call_sid: str, **kwargs) -> None:
     """Best-effort merge into clients/<id>/call_log.json when not using DB."""
@@ -2151,10 +2344,12 @@ def _file_call_log_merge_recording(call_sid: str, **kwargs) -> None:
     except Exception as ex:
         print(f"Failed to merge recording into file call log: {ex}")
 
+
 def call_log_set_outcome(call_sid: str, outcome: str):
     """Set outcome: 'forwarded', 'answered_by_ai', 'missed', 'error', 'no-answer'."""
     if call_sid in call_log_entries:
         call_log_entries[call_sid]["outcome"] = outcome
+
 
 def call_log_end(call_sid: str):
     """Write completed call to persistent log and remove from in-memory."""
@@ -2206,6 +2401,7 @@ def call_log_end(call_sid: str):
             except Exception as e:
                 print(f"Failed to save call log: {e}")
     del call_log_entries[call_sid]
+
 
 # Booked slots (avoid double-book; inject into AI prompt)
 DEFAULT_SLOT_DURATION_MINUTES = 30
@@ -2272,6 +2468,7 @@ def _load_booked_slots() -> List[dict]:
     except Exception:
         return []
 
+
 def _save_booked_slots(slots: List[dict]) -> None:
     if USE_DB:
         db_booked_slots_save(slots)
@@ -2285,6 +2482,7 @@ def _save_booked_slots(slots: List[dict]) -> None:
             json.dump(slots, f, indent=2)
     except Exception as e:
         print(f"Failed to save booked_slots: {e}")
+
 
 def _staff_slot_key(sid: Optional[str]) -> str:
     s = (sid or "").strip()
@@ -2318,7 +2516,9 @@ def _appointment_by_id_map(rows: List[dict]) -> dict[int, dict]:
     return m
 
 
-def _booked_slot_rows_that_hold_calendar(raw_slots: List[dict], apt_by_id: dict[int, dict]) -> List[dict]:
+def _booked_slot_rows_that_hold_calendar(
+    raw_slots: List[dict], apt_by_id: dict[int, dict]
+) -> List[dict]:
     """Keep persisted booked_slots entries only when the linked appointment still holds the slot."""
     kept: List[dict] = []
     for s in raw_slots:
@@ -2345,29 +2545,42 @@ def _get_all_booked_slots_merged() -> List[dict]:
     apt_by_id = _appointment_by_id_map(apts)
     slots = _booked_slot_rows_that_hold_calendar(_load_booked_slots(), apt_by_id)
     if USE_DB:
-        seen = {(s.get("date"), s.get("time"), _staff_slot_key(s.get("staff_id"))) for s in slots}
+        seen = {
+            (s.get("date"), s.get("time"), _staff_slot_key(s.get("staff_id")))
+            for s in slots
+        }
         for a in apts:
             if not a.get("date") or not a.get("time"):
                 continue
             # pending_customer: details texted to caller; slot is not held until they SMS-confirm (see handle_incoming_sms).
-            if a.get("status") in ("accepted", "confirmed", "completed", "pending", "pending_review"):
+            if a.get("status") in (
+                "accepted",
+                "confirmed",
+                "completed",
+                "pending",
+                "pending_review",
+            ):
                 sk = _staff_slot_key(a.get("staff_id"))
                 k = (a["date"], a["time"], sk)
                 if k not in seen:
-                    slots.append({
-                        "date": a["date"],
-                        "time": a["time"],
-                        "appointment_id": a.get("id", 0),
-                        "duration_minutes": DEFAULT_SLOT_DURATION_MINUTES,
-                        "staff_id": a.get("staff_id"),
-                    })
+                    slots.append(
+                        {
+                            "date": a["date"],
+                            "time": a["time"],
+                            "appointment_id": a.get("id", 0),
+                            "duration_minutes": DEFAULT_SLOT_DURATION_MINUTES,
+                            "staff_id": a.get("staff_id"),
+                        }
+                    )
                     seen.add(k)
     return slots
+
 
 def get_booked_slots(date: str) -> List[dict]:
     """Return slots already booked for the given date (YYYY-MM-DD)."""
     slots = _get_all_booked_slots_merged()
     return [s for s in slots if s.get("date") == date]
+
 
 def _time_to_minutes(t: str) -> int:
     """Parse time string (e.g. '10', '10:00', '2:00 PM') to minutes since midnight."""
@@ -2406,6 +2619,7 @@ def _time_to_minutes(t: str) -> int:
             h += 12
     return h * 60 + m
 
+
 def _normalize_time_to_hhmm(t: str) -> str:
     """Normalize time to HH:MM (e.g. '10' -> '10:00', '10:00 AM' -> '10:00')."""
     if not t or not (t or "").strip():
@@ -2413,6 +2627,7 @@ def _normalize_time_to_hhmm(t: str) -> str:
     mins = _time_to_minutes(t)
     h, m = divmod(mins, 60)
     return f"{h:02d}:{m:02d}"
+
 
 def _format_appointment_details_confirmation_sms(apt: dict) -> str:
     """Full appointment summary for SMS — used after voice booking and when customer updates details."""
@@ -2425,12 +2640,12 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
     if customer:
         customer_line = f"Customer: {customer}"
     else:
-        customer_line = "Customer: Not on file yet — reply with your name if we should update it."
+        customer_line = (
+            "Customer: Not on file yet — reply with your name if we should update it."
+        )
     stylist_line = f"Stylist: {stylist}\n" if stylist else ""
     if status == "pending_customer":
-        intro = (
-            "Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:"
-        )
+        intro = "Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:"
         footer = (
             "Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
             "You can also reply with changes.\n\n"
@@ -2471,9 +2686,9 @@ def _hhmm_to_ampm(hhmm: str) -> str:
         return f"12:{m:02d} PM"
     return f"{h - 12}:{m:02d} PM"
 
+
 def _slot_overlaps(
-    start_a: str, duration_a: int,
-    start_b: str, duration_b: int
+    start_a: str, duration_a: int, start_b: str, duration_b: int
 ) -> bool:
     """True if two time windows overlap. start_* is HH:MM or flexible (10, 10:00, etc.)."""
     a_start = _time_to_minutes(start_a)
@@ -2481,6 +2696,7 @@ def _slot_overlaps(
     b_start = _time_to_minutes(start_b)
     b_end = b_start + duration_b
     return a_start < b_end and b_start < a_end
+
 
 def _slot_blocking_details(
     date: str,
@@ -2546,17 +2762,21 @@ def _supersede_pending_customer_drafts_for_slot(
     norm_time = _normalize_time_to_hhmm(time) or time
     cancelled = 0
     for apt in _appointment_rows_for_calendar_merge():
-        st = (apt.get("status") or "")
+        st = apt.get("status") or ""
         if st not in ("pending_customer", "pending_review"):
             continue
         if st == "pending_review":
             if (apt.get("source") or "").strip() != "receptionist":
                 continue
-            if not phone or not _phones_match_for_booking(phone, apt.get("phone") or ""):
+            if not phone or not _phones_match_for_booking(
+                phone, apt.get("phone") or ""
+            ):
                 continue
         if (apt.get("date") or "") != date:
             continue
-        apt_time = _normalize_time_to_hhmm(apt.get("time") or "") or (apt.get("time") or "")
+        apt_time = _normalize_time_to_hhmm(apt.get("time") or "") or (
+            apt.get("time") or ""
+        )
         if apt_time != norm_time:
             continue
         if _staff_slot_key(apt.get("staff_id")) != want_staff:
@@ -2601,8 +2821,11 @@ def is_slot_available(
             blockers=blockers,
         )
         return False
-    system_debug("slot_available", date=date, time=time, staff_key=_staff_slot_key(staff_id))
+    system_debug(
+        "slot_available", date=date, time=time, staff_key=_staff_slot_key(staff_id)
+    )
     return True
+
 
 def reserve_slot(
     date: str,
@@ -2613,13 +2836,15 @@ def reserve_slot(
 ) -> None:
     """Record a slot as booked when creating an appointment."""
     slots = _load_booked_slots()
-    slots.append({
-        "date": date,
-        "time": time,
-        "appointment_id": appointment_id,
-        "duration_minutes": duration_minutes,
-        "staff_id": staff_id,
-    })
+    slots.append(
+        {
+            "date": date,
+            "time": time,
+            "appointment_id": appointment_id,
+            "duration_minutes": duration_minutes,
+            "staff_id": staff_id,
+        }
+    )
     _save_booked_slots(slots)
     _invalidate_booked_slots_cache()
     system_debug(
@@ -2629,6 +2854,7 @@ def reserve_slot(
         appointment_id=appointment_id,
         staff_id=staff_id,
     )
+
 
 def release_slot(appointment_id: int) -> None:
     """Remove slot when appointment is rejected or cancelled."""
@@ -2675,7 +2901,8 @@ def _voice_calendar_holds() -> List[dict]:
         holds.append(
             {
                 "date": s.get("date"),
-                "time": _normalize_time_to_hhmm(s.get("time") or "") or (s.get("time") or ""),
+                "time": _normalize_time_to_hhmm(s.get("time") or "")
+                or (s.get("time") or ""),
                 "appointment_id": aid,
                 "status": (apt.get("status") if apt else None) or "unknown",
                 "name": (apt.get("name") if apt else None) or "",
@@ -2688,22 +2915,31 @@ def _voice_calendar_holds() -> List[dict]:
 
 # Cache for booked slots prompt (avoids repeated DB hits during rapid turns)
 _booked_slots_cache: dict = {}  # {client_key: (text, expires_at)}
-_BOOKED_SLOTS_CACHE_TTL_SEC = 10  # Short TTL so "available" and actual check stay in sync
+_BOOKED_SLOTS_CACHE_TTL_SEC = (
+    10  # Short TTL so "available" and actual check stay in sync
+)
+
 
 def _invalidate_booked_slots_cache() -> None:
     """Clear booked slots cache so next prompt build sees current availability (e.g. after reserve/release)."""
     _booked_slots_cache.clear()
 
+
 def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False) -> str:
     """Build a short line for the system prompt: already booked slots for today + days_ahead."""
     from datetime import timedelta
+
     now = datetime.now(timezone.utc)
     client_key = get_db_client_id() or "default"
     cache_key = f"{client_key}:{days_ahead}"
     if not skip_cache and cache_key in _booked_slots_cache:
         text, expires = _booked_slots_cache[cache_key]
         if expires > now:
-            system_debug("booked_slots_prompt_cache_hit", client_key=client_key, slots_text_len=len(text))
+            system_debug(
+                "booked_slots_prompt_cache_hit",
+                client_key=client_key,
+                slots_text_len=len(text),
+            )
             return text
         del _booked_slots_cache[cache_key]
     # Single merge + group by date (was: 90x get_booked_slots = 90x DB fetches)
@@ -2744,20 +2980,39 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
             if safe:
                 safe_display = [_hhmm_to_ampm(t) for t in safe]
                 taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]
-                suggest_parts.append(f"For {date_str} ONLY suggest these times (they are free): {', '.join(safe_display)}. Never suggest {', '.join(taken_display)}—already taken.")
-    text = ("Booked slots (do not double-book): " + "; ".join(parts) + ". ") if parts else ""
+                suggest_parts.append(
+                    f"For {date_str} ONLY suggest these times (they are free): {', '.join(safe_display)}. Never suggest {', '.join(taken_display)}—already taken."
+                )
+    text = (
+        ("Booked slots (do not double-book): " + "; ".join(parts) + ". ")
+        if parts
+        else ""
+    )
     if suggest_parts:
         text += " " + " ".join(suggest_parts)
     expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
     _booked_slots_cache[cache_key] = (text, expires_at)
     return text
 
+
 def _suggests_booking(text: str) -> bool:
     """True if the message suggests the caller wants to book/appointment/reservation."""
     if not text or len(text.strip()) < 2:
         return False
     t = text.lower()
-    return any(k in t for k in ("book", "appointment", "reservation", "reserve", "schedule", "available", "slot", "time for"))
+    return any(
+        k in t
+        for k in (
+            "book",
+            "appointment",
+            "reservation",
+            "reserve",
+            "schedule",
+            "available",
+            "slot",
+            "time for",
+        )
+    )
 
 
 _STYLIST_NO_PREF_PHRASES = (
@@ -2788,7 +3043,9 @@ def _conversation_user_text(conversation_history: Optional[list]) -> str:
     return " ".join(p for p in parts if p)
 
 
-def _caller_indicated_stylist_choice(user_text: str, info: Optional[dict] = None) -> bool:
+def _caller_indicated_stylist_choice(
+    user_text: str, info: Optional[dict] = None
+) -> bool:
     t = (user_text or "").lower()
     if not t.strip():
         return False
@@ -2801,7 +3058,9 @@ def _caller_indicated_stylist_choice(user_text: str, info: Optional[dict] = None
         nl = name.lower()
         if len(name) == 1 and nl == "a":
             # Avoid "book a haircut" — only stylist-context uses of the name A.
-            if re.search(r"\b(with|stylist|see|prefer|choose)\s+a\b|\ba\s+(please|for|at)\b", t):
+            if re.search(
+                r"\b(with|stylist|see|prefer|choose)\s+a\b|\ba\s+(please|for|at)\b", t
+            ):
                 return True
             continue
         if re.search(rf"\b{re.escape(nl)}\b", t):
@@ -2809,7 +3068,9 @@ def _caller_indicated_stylist_choice(user_text: str, info: Optional[dict] = None
     return False
 
 
-def _caller_indicated_service_choice(user_text: str, info: Optional[dict] = None) -> bool:
+def _caller_indicated_service_choice(
+    user_text: str, info: Optional[dict] = None
+) -> bool:
     biz = info or get_business_info()
     services = _normalize_service_entries(biz.get("services") or [])
     if not services:
@@ -2829,13 +3090,19 @@ def _caller_indicated_service_choice(user_text: str, info: Optional[dict] = None
 
 def _staff_choice_required(info: Optional[dict] = None) -> bool:
     biz = info or get_business_info()
-    names = [(s.get("name") or "").strip() for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
+    names = [
+        (s.get("name") or "").strip()
+        for s in (biz.get("staff") or [])
+        if (s.get("name") or "").strip()
+    ]
     return len(names) >= 2
 
 
 def _conversation_suggests_booking(conversation_history: Optional[list]) -> bool:
     for m in conversation_history or []:
-        if (m.get("role") or "").strip() == "user" and _suggests_booking(m.get("content") or ""):
+        if (m.get("role") or "").strip() == "user" and _suggests_booking(
+            m.get("content") or ""
+        ):
             return True
     return False
 
@@ -2848,7 +3115,9 @@ def _count_booking_user_turns(conversation_history: Optional[list]) -> int:
     )
 
 
-def _voice_booking_nudge_message(conversation_history: list, info: Optional[dict] = None) -> Optional[str]:
+def _voice_booking_nudge_message(
+    conversation_history: list, info: Optional[dict] = None
+) -> Optional[str]:
     """Inject after several booking turns if GPT has not emitted BOOKING: yet."""
     biz = info or get_business_info()
     if not _conversation_suggests_booking(conversation_history):
@@ -2858,7 +3127,9 @@ def _voice_booking_nudge_message(conversation_history: list, info: Optional[dict
         return None
     user_text = _conversation_user_text(conversation_history)
     missing: List[str] = []
-    if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
+    if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(
+        user_text, biz
+    ):
         missing.append("stylist preference (or 'anyone is fine')")
     services = _normalize_service_entries(biz.get("services") or [])
     if services and not _caller_indicated_service_choice(user_text, biz):
@@ -2898,6 +3169,7 @@ def _ai_implies_committed_booking(ai_text: str) -> bool:
             "all set for",
         )
     )
+
 
 def parse_booking(ai_text: str) -> Optional[dict]:
     """If AI responded with BOOKING: name|phone|email|date|time|reason|staff_optional, return dict; else None.
@@ -3008,7 +3280,9 @@ def _staff_display_name_for_appointment(apt: dict, info: Optional[dict] = None) 
     return ""
 
 
-def _normalize_service_choice_for_booking(reason_raw: Optional[str], info: Optional[dict] = None) -> tuple[Optional[str], bool]:
+def _normalize_service_choice_for_booking(
+    reason_raw: Optional[str], info: Optional[dict] = None
+) -> tuple[Optional[str], bool]:
     """Return (canonical_service_name_or_none, service_required)."""
     biz = info or get_business_info()
     services = _normalize_service_entries((biz or {}).get("services") or [])
@@ -3049,35 +3323,63 @@ def _validate_booking_requirements(
                 staff_name = (s.get("name") or "").strip()
                 break
     if staff_rows and not staff_id:
-        choices = ", ".join((s.get("name") or "").strip() for s in staff_rows[:5] if (s.get("name") or "").strip())
+        choices = ", ".join(
+            (s.get("name") or "").strip()
+            for s in staff_rows[:5]
+            if (s.get("name") or "").strip()
+        )
         msg = (
             "Absolutely — which stylist would you like to see?"
             + (f" We currently have {choices}." if choices else "")
             + " You can also say anyone if you have no preference."
         )
         return False, msg, None, None
-    if staff_id and _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
-        choices = ", ".join((s.get("name") or "").strip() for s in staff_rows[:5] if (s.get("name") or "").strip())
+    if (
+        staff_id
+        and _staff_choice_required(biz)
+        and not _caller_indicated_stylist_choice(user_text, biz)
+    ):
+        choices = ", ".join(
+            (s.get("name") or "").strip()
+            for s in staff_rows[:5]
+            if (s.get("name") or "").strip()
+        )
         msg = (
             "Before I lock this in, which stylist would you like?"
             + (f" We have {choices}." if choices else "")
             + " Or say anyone if you have no preference."
         )
         return False, msg, None, None
-    service_name, service_required = _normalize_service_choice_for_booking(booking.get("reason"), biz)
+    service_name, service_required = _normalize_service_choice_for_booking(
+        booking.get("reason"), biz
+    )
     if service_required and not service_name:
-        service_choices = ", ".join((s.get("name") or "").strip() for s in _normalize_service_entries(biz.get("services") or [])[:5] if (s.get("name") or "").strip())
-        msg = (
-            (f"Great, and which service would you like with {staff_name}? " if staff_name else "Great, which service would you like? ")
-            + (f"We currently offer {service_choices}." if service_choices else "")
+        service_choices = ", ".join(
+            (s.get("name") or "").strip()
+            for s in _normalize_service_entries(biz.get("services") or [])[:5]
+            if (s.get("name") or "").strip()
         )
+        msg = (
+            f"Great, and which service would you like with {staff_name}? "
+            if staff_name
+            else "Great, which service would you like? "
+        ) + (f"We currently offer {service_choices}." if service_choices else "")
         return False, msg, staff_id, None
-    if service_required and service_name and not _caller_indicated_service_choice(user_text, biz):
-        service_choices = ", ".join((s.get("name") or "").strip() for s in _normalize_service_entries(biz.get("services") or [])[:5] if (s.get("name") or "").strip())
-        msg = (
-            (f"Just to confirm, which service did you want with {staff_name}? " if staff_name else "Just to confirm, which service would you like? ")
-            + (f"We currently offer {service_choices}." if service_choices else "")
+    if (
+        service_required
+        and service_name
+        and not _caller_indicated_service_choice(user_text, biz)
+    ):
+        service_choices = ", ".join(
+            (s.get("name") or "").strip()
+            for s in _normalize_service_entries(biz.get("services") or [])[:5]
+            if (s.get("name") or "").strip()
         )
+        msg = (
+            f"Just to confirm, which service did you want with {staff_name}? "
+            if staff_name
+            else "Just to confirm, which service would you like? "
+        ) + (f"We currently offer {service_choices}." if service_choices else "")
         return False, msg, staff_id, None
     return True, None, staff_id, service_name
 
@@ -3126,7 +3428,9 @@ def _create_appointment_from_booking(
     )
     if not is_slot_available(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key):
         _invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
-        blockers = _slot_blocking_details(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
+        blockers = _slot_blocking_details(
+            date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key
+        )
         system_info(
             "booking_create_failed_slot_taken",
             name=name,
@@ -3173,19 +3477,44 @@ def _create_appointment_from_booking(
     )
     return appointment_data
 
+
 def uses_non_latin_script(language_name: str) -> bool:
     """
     Check if a language uses a non-Latin script (where Twilio transcription struggles).
     Returns True for languages like Japanese, Punjabi, Chinese, Arabic, Hindi, etc.
     """
     non_latin_languages = {
-        'Japanese', 'Punjabi', 'Chinese', 'Hindi', 'Arabic', 'Russian', 
-        'Korean', 'Thai', 'Vietnamese', 'Bengali', 'Tamil', 'Telugu',
-        'Gujarati', 'Kannada', 'Malayalam', 'Marathi', 'Urdu', 'Hebrew',
-        'Greek', 'Georgian', 'Armenian', 'Khmer', 'Lao', 'Myanmar',
-        'Tibetan', 'Mongolian', 'Nepali', 'Sinhala'
+        "Japanese",
+        "Punjabi",
+        "Chinese",
+        "Hindi",
+        "Arabic",
+        "Russian",
+        "Korean",
+        "Thai",
+        "Vietnamese",
+        "Bengali",
+        "Tamil",
+        "Telugu",
+        "Gujarati",
+        "Kannada",
+        "Malayalam",
+        "Marathi",
+        "Urdu",
+        "Hebrew",
+        "Greek",
+        "Georgian",
+        "Armenian",
+        "Khmer",
+        "Lao",
+        "Myanmar",
+        "Tibetan",
+        "Mongolian",
+        "Nepali",
+        "Sinhala",
     }
     return language_name in non_latin_languages
+
 
 def get_twilio_language_code(language_name: str) -> str:
     """
@@ -3194,49 +3523,52 @@ def get_twilio_language_code(language_name: str) -> str:
     Defaults to 'en-US' if language not supported.
     """
     language_map = {
-        'English': 'en-US',
-        'Spanish': 'es-ES',
-        'French': 'fr-FR',
-        'German': 'de-DE',
-        'Italian': 'it-IT',
-        'Portuguese': 'pt-PT',
-        'Chinese': 'zh-CN',
-        'Japanese': 'ja-JP',
-        'Korean': 'ko-KR',
-        'Hindi': 'hi-IN',
-        'Punjabi': 'pa-IN',  # Punjabi (Gurmukhi)
-        'Arabic': 'ar-SA',
-        'Russian': 'ru-RU',
-        'Dutch': 'nl-NL',
-        'Polish': 'pl-PL',
-        'Turkish': 'tr-TR',
-        'Swedish': 'sv-SE',
-        'Norwegian': 'nb-NO',
-        'Danish': 'da-DK',
-        'Finnish': 'fi-FI',
-        'Greek': 'el-GR',
-        'Czech': 'cs-CZ',
-        'Romanian': 'ro-RO',
-        'Hungarian': 'hu-HU',
-        'Thai': 'th-TH',
-        'Vietnamese': 'vi-VN',
-        'Indonesian': 'id-ID',
-        'Malay': 'ms-MY',
+        "English": "en-US",
+        "Spanish": "es-ES",
+        "French": "fr-FR",
+        "German": "de-DE",
+        "Italian": "it-IT",
+        "Portuguese": "pt-PT",
+        "Chinese": "zh-CN",
+        "Japanese": "ja-JP",
+        "Korean": "ko-KR",
+        "Hindi": "hi-IN",
+        "Punjabi": "pa-IN",  # Punjabi (Gurmukhi)
+        "Arabic": "ar-SA",
+        "Russian": "ru-RU",
+        "Dutch": "nl-NL",
+        "Polish": "pl-PL",
+        "Turkish": "tr-TR",
+        "Swedish": "sv-SE",
+        "Norwegian": "nb-NO",
+        "Danish": "da-DK",
+        "Finnish": "fi-FI",
+        "Greek": "el-GR",
+        "Czech": "cs-CZ",
+        "Romanian": "ro-RO",
+        "Hungarian": "hu-HU",
+        "Thai": "th-TH",
+        "Vietnamese": "vi-VN",
+        "Indonesian": "id-ID",
+        "Malay": "ms-MY",
     }
-    
+
     # Try exact match first
     if language_name in language_map:
         return language_map[language_name]
-    
+
     # Try case-insensitive match
     for key, code in language_map.items():
         if key.lower() == language_name.lower():
             return code
-    
-    # Default to English if not found
-    return 'en-US'
 
-async def generate_response_async(call_sid: str, call_data: dict, detected_lang: str, base_url: str):
+    # Default to English if not found
+    return "en-US"
+
+
+async def generate_response_async(
+    call_sid: str, call_data: dict, detected_lang: str, base_url: str
+):
     """
     Background task to generate GPT response and TTS audio.
     Updates response_status when ready.
@@ -3255,10 +3587,18 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             from_number=call_data.get("from_number") or None,
             client_id=call_data.get("client_id") or None,
         )
-        
+
         # Always include booked slots (skip cache so prompt and is_slot_available see same data—avoids "available" then "booked")
         messages = [
-            {"role": "system", "content": get_system_prompt(detected_lang, call_data.get("caller_memory"), include_booked_slots=True, skip_slots_cache=True)}
+            {
+                "role": "system",
+                "content": get_system_prompt(
+                    detected_lang,
+                    call_data.get("caller_memory"),
+                    include_booked_slots=True,
+                    skip_slots_cache=True,
+                ),
+            }
         ]
         messages.extend(call_data["conversation_history"])
         nudge = _voice_booking_nudge_message(call_data["conversation_history"])
@@ -3270,15 +3610,15 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 client_id=str(call_data.get("client_id") or ""),
                 user_turns=_count_booking_user_turns(call_data["conversation_history"]),
             )
-        
+
         ai_response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.8,
             max_tokens=200,
-            stream=False
+            stream=False,
         )
-        
+
         ai_text = ai_response.choices[0].message.content
         voice_debug("gpt_reply", call_sid=call_sid, reply_preview=(ai_text or "")[:80])
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
@@ -3306,14 +3646,21 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     )
                     # Use caller's phone from Twilio when available (don't require asking)
                     if from_num:
-                        booking["phone"] = (booking.get("phone") or "").strip() or from_num
+                        booking["phone"] = (
+                            booking.get("phone") or ""
+                        ).strip() or from_num
                     cid = (call_data.get("client_id") or "").strip() or None
-                    ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(
-                        booking,
-                        conversation_history=call_data.get("conversation_history"),
+                    ok_booking, fail_msg, _, canonical_service = (
+                        _validate_booking_requirements(
+                            booking,
+                            conversation_history=call_data.get("conversation_history"),
+                        )
                     )
                     if not ok_booking:
-                        ai_text = fail_msg or "I need your stylist and service before I can book that."
+                        ai_text = (
+                            fail_msg
+                            or "I need your stylist and service before I can book that."
+                        )
                         apt = None
                     else:
                         if canonical_service:
@@ -3326,23 +3673,40 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         )
                     if apt:
                         call_data["appointment_created"] = True
-                        if not (apt.get("phone") or "").strip() and call_data.get("from_number"):
+                        if not (apt.get("phone") or "").strip() and call_data.get(
+                            "from_number"
+                        ):
                             apt["phone"] = call_data["from_number"]
                             if USE_DB and apt.get("id"):
                                 try:
-                                    db_appointments_update(apt["id"], phone=apt["phone"])
+                                    db_appointments_update(
+                                        apt["id"], phone=apt["phone"]
+                                    )
                                 except Exception:
                                     pass
                         thanks_msg = _format_appointment_details_confirmation_sms(apt)
-                        to_number_sms = (call_data.get("from_number") or "").strip() or (apt.get("phone") or "").strip() or ""
-                        from_number_sms = (call_data.get("to_number") or "").strip() or None
+                        to_number_sms = (
+                            (call_data.get("from_number") or "").strip()
+                            or (apt.get("phone") or "").strip()
+                            or ""
+                        )
+                        from_number_sms = (
+                            call_data.get("to_number") or ""
+                        ).strip() or None
                         if not from_number_sms and cid and USE_DB:
                             tenant_row = db_tenant_get_by_client_id(cid)
                             if tenant_row:
-                                from_number_sms = (tenant_row.get("twilio_phone_number") or "").strip()
-                                sms_info("confirmation_sms_from_tenant_lookup", client_id=cid)
+                                from_number_sms = (
+                                    tenant_row.get("twilio_phone_number") or ""
+                                ).strip()
+                                sms_info(
+                                    "confirmation_sms_from_tenant_lookup", client_id=cid
+                                )
                             else:
-                                sms_info("confirmation_sms_tenant_missing_for_from_override", client_id=cid)
+                                sms_info(
+                                    "confirmation_sms_tenant_missing_for_from_override",
+                                    client_id=cid,
+                                )
                         if not from_number_sms:
                             from_number_sms = _tenant_sms_from_number()
                         sms_info(
@@ -3352,7 +3716,11 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                             from_set=bool(from_number_sms),
                         )
                         if to_number_sms:
-                            ok = send_sms(to_number_sms, thanks_msg, from_override=from_number_sms or None)
+                            ok = send_sms(
+                                to_number_sms,
+                                thanks_msg,
+                                from_override=from_number_sms or None,
+                            )
                             sms_info(
                                 "post_booking_confirmation_sms",
                                 client_id=cid,
@@ -3394,20 +3762,22 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                                     "The time is not finalized until you confirm by text."
                                 )
                             else:
-                                ai_text = (
-                                    "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
-                                )
+                                ai_text = "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
                         else:
-                            sms_info("post_booking_confirmation_skipped", reason="no_caller_phone", client_id=cid)
-                            ai_text = (
-                                "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
+                            sms_info(
+                                "post_booking_confirmation_skipped",
+                                reason="no_caller_phone",
+                                client_id=cid,
                             )
+                            ai_text = "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
                         fn_mem = (call_data.get("from_number") or "").strip()
                         if fn_mem:
                             dp = {
                                 "last_voice_booking_date": apt.get("date"),
                                 "last_voice_booking_time": apt.get("time"),
-                                "last_service": ((apt.get("reason") or "").strip()[:120] or None),
+                                "last_service": (
+                                    (apt.get("reason") or "").strip()[:120] or None
+                                ),
                             }
                             em_patch = (apt.get("email") or "").strip()
                             if em_patch:
@@ -3422,7 +3792,9 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                                     data_patch=dp if dp else None,
                                 )
                                 if call_sid in active_calls:
-                                    active_calls[call_sid]["caller_memory"] = get_caller_memory(fn_mem)
+                                    active_calls[call_sid]["caller_memory"] = (
+                                        get_caller_memory(fn_mem)
+                                    )
                             except Exception:
                                 pass
                     else:
@@ -3432,7 +3804,11 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         if fail_msg:
                             reason = "missing_required_booking_fields"
                         else:
-                            reason = "slot_taken" if (name_ok and date_ok and time_ok) else ("no_name" if not name_ok else "no_date_time")
+                            reason = (
+                                "slot_taken"
+                                if (name_ok and date_ok and time_ok)
+                                else ("no_name" if not name_ok else "no_date_time")
+                            )
                         system_info(
                             "voice_booking_not_created",
                             reason=reason,
@@ -3449,10 +3825,14 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                         else:
                             ai_text = "That time slot just got booked. Would you like to try another time or another day?"
                 except Exception as e:
-                    logger.exception("voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e)
+                    logger.exception(
+                        "voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e
+                    )
                     ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
         elif _conversation_suggests_booking(call_data.get("conversation_history")):
-            user_turns = _count_booking_user_turns(call_data.get("conversation_history"))
+            user_turns = _count_booking_user_turns(
+                call_data.get("conversation_history")
+            )
             if user_turns >= 2:
                 system_info(
                     "voice_booking_intent_no_marker",
@@ -3477,16 +3857,16 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 "I'm still putting your visit together—I haven't locked in the time yet. "
                 "Let me confirm the details with you first."
             )
-        
+
         # Never send BOOKING: machine line to TTS or conversation history
         ai_text = _strip_booking_directive_for_voice(ai_text or "")
         if not ai_text:
             ai_text = "Thanks—we've noted that. Let us know if you need anything else."
-        
+
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
         call_data["conversation_history"].append(ai_message)
-        
+
         # Pro: Staff transfer - AI may respond with TRANSFER_TO: Name
         transfer_name = parse_transfer_to(ai_text)
         if transfer_name:
@@ -3505,7 +3885,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     "status": "forward",
                     "audio_url": None,
                     "ai_text": ai_text,
-                    "forwarding_phone": staff_phone
+                    "forwarding_phone": staff_phone,
                 }
                 return
             voice_warning(
@@ -3514,7 +3894,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                 client_id_prefix=str(call_data.get("client_id") or "")[:12],
                 staff_name=transfer_name[:80],
             )
-        
+
         # Check if user wants to talk to a real person - forward if needed
         if should_forward_to_human(
             "",
@@ -3537,19 +3917,19 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
                     "status": "forward",
                     "audio_url": None,
                     "ai_text": ai_text,
-                    "forwarding_phone": forwarding_phone
+                    "forwarding_phone": forwarding_phone,
                 }
                 return
-        
+
         # Generate TTS audio URL
         ai_text_encoded = quote(ai_text)
         tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={get_tts_voice()}"
-        
+
         # Mark as ready
         response_status[call_sid] = {
             "status": "ready",
             "audio_url": tts_audio_url,
-            "ai_text": ai_text
+            "ai_text": ai_text,
         }
         voice_call_phase(
             "gpt_response_ready",
@@ -3557,7 +3937,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             client_id=str(call_data.get("client_id") or ""),
             reply_len=len(ai_text or ""),
         )
-        
+
     except Exception as e:
         voice_warning(
             "gpt_response_failed",
@@ -3573,7 +3953,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
             "status": "ready",
             "audio_url": fallback_tts_url,
             "ai_text": TTS_FALLBACK_TEXT,
-            "error": str(e)
+            "error": str(e),
         }
         voice_info(
             "gpt_response_fallback_tts",
@@ -3582,6 +3962,7 @@ async def generate_response_async(call_sid: str, call_data: dict, detected_lang:
         )
     finally:
         _persist_call_session(call_sid)
+
 
 def should_forward_to_human(
     user_input: str,
@@ -3596,10 +3977,10 @@ def should_forward_to_human(
     """
     if not user_input:
         return False
-    
+
     user_lower = user_input.lower()
     ai_lower = ai_response.lower() if ai_response else ""
-    
+
     # Keywords that indicate user wants to talk to a person
     forward_keywords = [
         "talk to a person",
@@ -3619,9 +4000,9 @@ def should_forward_to_human(
         "i need to talk to",
         "operator",
         "manager",
-        "supervisor"
+        "supervisor",
     ]
-    
+
     # Check user input
     for keyword in forward_keywords:
         if keyword in user_lower:
@@ -3634,7 +4015,7 @@ def should_forward_to_human(
                 input_len=len(user_input or ""),
             )
             return True
-    
+
     # Check AI response for forwarding signals (AI might detect intent)
     if "transfer" in ai_lower and ("you" in ai_lower or "connect" in ai_lower):
         voice_forward(
@@ -3645,8 +4026,9 @@ def should_forward_to_human(
             reply_preview=(ai_response or "")[:80],
         )
         return True
-    
+
     return False
+
 
 def append_forward_call_verbs(
     response: VoiceResponse,
@@ -3663,7 +4045,9 @@ def append_forward_call_verbs(
         message = "Connecting you with someone now. Please hold."
 
     message_encoded = quote(message)
-    tts_url = f"{base_url}/api/phone/tts-audio?text={message_encoded}&voice={get_tts_voice()}"
+    tts_url = (
+        f"{base_url}/api/phone/tts-audio?text={message_encoded}&voice={get_tts_voice()}"
+    )
     response.play(tts_url)
 
     clean_phone = "".join(c for c in forwarding_phone if c.isdigit() or c == "+")
@@ -3684,13 +4068,16 @@ def append_forward_call_verbs(
     response.hangup()
 
 
-def forward_call_to_business(forwarding_phone: str, base_url: str, detected_lang: str = "English") -> VoiceResponse:
+def forward_call_to_business(
+    forwarding_phone: str, base_url: str, detected_lang: str = "English"
+) -> VoiceResponse:
     """
     Forward the call to the business's actual phone number using Twilio Dial.
     """
     response = VoiceResponse()
     append_forward_call_verbs(response, forwarding_phone, base_url, detected_lang)
     return response
+
 
 def detect_language(text: str) -> str:
     """
@@ -3701,13 +4088,13 @@ def detect_language(text: str) -> str:
     """
     if not text or len(text.strip()) < 3:
         return "English"
-    
+
     # Use OpenAI to detect language - it can detect any language automatically
     try:
         # Check if client is available
-        if 'client' not in globals() or client is None:
+        if "client" not in globals() or client is None:
             return "English"
-        
+
         # Use OpenAI to intelligently detect the language
         # This works for any language, not just hardcoded ones
         detection_prompt = f"""Detect the language of this text and respond with ONLY the language name in English (e.g., 'Spanish', 'Punjabi', 'English', 'French', 'German', 'Chinese', 'Hindi', 'Italian', 'Portuguese', 'Japanese', 'Korean', 'Arabic', 'Russian', etc.). 
@@ -3715,33 +4102,38 @@ def detect_language(text: str) -> str:
 Text: {text[:200]}
 
 Respond with just the language name, nothing else."""
-        
+
         detection_response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": detection_prompt}],
             max_tokens=15,
-            temperature=0  # Low temperature for consistent language detection
+            temperature=0,  # Low temperature for consistent language detection
         )
         detected_lang = detection_response.choices[0].message.content.strip()
-        
+
         # Clean up response (remove quotes, extra words, periods)
-        detected_lang = detected_lang.replace('"', '').replace("'", "").replace('.', '').strip()
-        
+        detected_lang = (
+            detected_lang.replace('"', "").replace("'", "").replace(".", "").strip()
+        )
+
         # Extract just the language name (in case GPT adds extra text)
         # Take the first word which should be the language name
-        detected_lang = detected_lang.split()[0] if detected_lang.split() else detected_lang
-        
+        detected_lang = (
+            detected_lang.split()[0] if detected_lang.split() else detected_lang
+        )
+
         # Capitalize first letter (e.g., "spanish" -> "Spanish")
         if detected_lang:
             detected_lang = detected_lang.capitalize()
-        
+
         if detected_lang and len(detected_lang) < 30:  # Sanity check
             return detected_lang
     except Exception as e:
         print(f"Language detection error: {e}")
         import traceback
+
         traceback.print_exc()
-    
+
     # Default to English if detection fails
     return "English"
 
@@ -3785,9 +4177,11 @@ def get_system_prompt(
         booked_slots_prompt_text=booked_text,
     )
 
+
 @app.get("/")
 async def root():
     return {"message": "Call Surge API", "status": "running"}
+
 
 @app.get("/api/health")
 async def health():
@@ -3803,7 +4197,11 @@ async def health():
 
 def _sentry_debug_allowed(request: Request) -> bool:
     """Do not expose a public crash endpoint in production. Opt-in via env or shared secret header."""
-    if (os.getenv("ENABLE_SENTRY_DEBUG_ROUTE") or "").strip().lower() in ("1", "true", "yes"):
+    if (os.getenv("ENABLE_SENTRY_DEBUG_ROUTE") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         return True
     secret = (os.getenv("SENTRY_DEBUG_SECRET") or "").strip()
     if secret:
@@ -3831,7 +4229,9 @@ def _verify_cron_secret(request: Request) -> bool:
         logger.warning("CRON_SECRET not set; cron auth disabled")
         return False
     received = request.headers.get("X-Cron-Secret", "")
-    return hmac.compare_digest(expected.encode(), received.encode()) if received else False
+    return (
+        hmac.compare_digest(expected.encode(), received.encode()) if received else False
+    )
 
 
 def _cron_stale_jobs(last_success: dict) -> List[str]:
@@ -3861,11 +4261,18 @@ async def cron_appointment_reminders(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     run_id = db_cron_run_start("appointment-reminders") if USE_DB else None
     if not USE_DB:
-        result = {"ok": True, "reminders_sent": 0, "errors": 0, "skipped": 0, "tenants_processed": 0}
+        result = {
+            "ok": True,
+            "reminders_sent": 0,
+            "errors": 0,
+            "skipped": 0,
+            "tenants_processed": 0,
+        }
         return result
     tz_name = (os.getenv("REMINDER_TIMEZONE") or "UTC").strip()
     try:
         from zoneinfo import ZoneInfo
+
         tz = ZoneInfo(tz_name)
     except Exception:
         tz = timezone.utc
@@ -3895,7 +4302,9 @@ async def cron_appointment_reminders(request: Request):
                 skipped += 1
                 continue
             cfg = load_client_config(cid)
-            business_name = (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
+            business_name = (
+                (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
+            )
             time_str = apt.get("time", "")
             body = f"Reminder: You have an appointment tomorrow at {time_str} at {business_name}. Reply YES to confirm or if you need to reschedule."
             ok = False
@@ -3907,14 +4316,28 @@ async def cron_appointment_reminders(request: Request):
                         reminders_sent += 1
                         break
                 except Exception as e:
-                    logger.error("reminder_sms_failed", extra={"client_id": cid, "appointment_id": apt_id, "error": str(e)})
+                    logger.error(
+                        "reminder_sms_failed",
+                        extra={
+                            "client_id": cid,
+                            "appointment_id": apt_id,
+                            "error": str(e),
+                        },
+                    )
                     if attempt < 2:
-                        time.sleep(2 ** attempt)
+                        time.sleep(2**attempt)
             if not ok:
                 errors += 1
-    result = {"ok": True, "reminders_sent": reminders_sent, "errors": errors, "skipped": skipped, "tenants_processed": tenants_processed}
+    result = {
+        "ok": True,
+        "reminders_sent": reminders_sent,
+        "errors": errors,
+        "skipped": skipped,
+        "tenants_processed": tenants_processed,
+    }
     db_cron_run_finish(run_id, "success", result)
     return result
+
 
 @app.post("/api/cron/process-overage")
 async def cron_process_overage(request: Request):
@@ -3923,7 +4346,12 @@ async def cron_process_overage(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     run_id = db_cron_run_start("process-overage") if USE_DB else None
     if not USE_DB or not STRIPE_AVAILABLE or not stripe:
-        result = {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 0}
+        result = {
+            "ok": True,
+            "tenants_processed": 0,
+            "invoices_created": 0,
+            "errors": 0,
+        }
         if run_id:
             db_cron_run_finish(run_id, "success", result)
         return result
@@ -3936,7 +4364,12 @@ async def cron_process_overage(request: Request):
     errors = 0
     secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not secret:
-        result = {"ok": True, "tenants_processed": 0, "invoices_created": 0, "errors": 1}
+        result = {
+            "ok": True,
+            "tenants_processed": 0,
+            "invoices_created": 0,
+            "errors": 1,
+        }
         if run_id:
             db_cron_run_finish(run_id, "success", result)
         return result
@@ -3972,10 +4405,18 @@ async def cron_process_overage(request: Request):
             db_overage_processed_insert(cid, prev_month)
             invoices_created += 1
         except Exception as e:
-            logger.error("overage_invoice_failed", extra={"client_id": cid, "month": prev_month, "error": str(e)})
+            logger.error(
+                "overage_invoice_failed",
+                extra={"client_id": cid, "month": prev_month, "error": str(e)},
+            )
             errors += 1
         tenants_processed += 1
-    result = {"ok": True, "tenants_processed": tenants_processed, "invoices_created": invoices_created, "errors": errors}
+    result = {
+        "ok": True,
+        "tenants_processed": tenants_processed,
+        "invoices_created": invoices_created,
+        "errors": errors,
+    }
     if run_id:
         db_cron_run_finish(run_id, "success", result)
     return result
@@ -3988,7 +4429,11 @@ async def cron_retention_purge(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     run_id = db_cron_run_start("retention-purge") if USE_DB else None
     if not USE_DB:
-        result = {"ok": True, "deleted": {"audit_events": 0, "call_log": 0, "sms_sessions": 0}, "days": 0}
+        result = {
+            "ok": True,
+            "deleted": {"audit_events": 0, "call_log": 0, "sms_sessions": 0},
+            "days": 0,
+        }
         return result
     days = max(1, int((os.getenv("RETENTION_DAYS") or str(365 * 3)).strip()))
     deleted = db_retention_purge(days=days)
@@ -4005,8 +4450,12 @@ async def cron_export_snapshot(request: Request):
     run_id = db_cron_run_start("export-snapshot") if USE_DB else None
     if not USE_DB:
         return {"ok": True, "exported": False}
-    export_root = (os.getenv("OFFSITE_EXPORT_DIR") or str(PROJECT_ROOT / "exports")).strip()
-    include_audit = (os.getenv("EXPORT_INCLUDE_AUDIT_EVENTS") or "1").strip().lower() in ("1", "true", "yes")
+    export_root = (
+        os.getenv("OFFSITE_EXPORT_DIR") or str(PROJECT_ROOT / "exports")
+    ).strip()
+    include_audit = (
+        os.getenv("EXPORT_INCLUDE_AUDIT_EVENTS") or "1"
+    ).strip().lower() in ("1", "true", "yes")
     result = db_export_tenant_snapshot(export_root, include_audit=include_audit)
     if not result:
         out = {"ok": False, "exported": False}
@@ -4016,6 +4465,7 @@ async def cron_export_snapshot(request: Request):
     db_cron_run_finish(run_id, "success", out)
     return out
 
+
 class AdminCreateTenantRequest(BaseModel):
     client_id: str
     name: str
@@ -4023,6 +4473,7 @@ class AdminCreateTenantRequest(BaseModel):
     email: str
     plan: Optional[str] = "starter"
     business_vertical: str = "salon_chair"
+
 
 class AdminResendInviteRequest(BaseModel):
     email: str
@@ -4037,7 +4488,9 @@ class AdminBulkTenantRow(BaseModel):
 
 
 class AdminBulkCreateTenantsRequest(BaseModel):
-    rows: List[AdminBulkTenantRow] = Field(default_factory=list, min_length=1, max_length=500)
+    rows: List[AdminBulkTenantRow] = Field(
+        default_factory=list, min_length=1, max_length=500
+    )
     dry_run: bool = False
 
 
@@ -4179,7 +4632,9 @@ def _clerk_relink_users_to_tenant(
             displaced = _clerk_relink_user_to_tenant(uid, tenant_id, headers)
             displaced_all.extend(displaced or [])
             linked.append(uid)
-            print(f"[Admin] Re-linked existing user {uid} to tenant {tenant_id} (email={email})")
+            print(
+                f"[Admin] Re-linked existing user {uid} to tenant {tenant_id} (email={email})"
+            )
         except Exception as e:
             link_errors.append(f"{uid}: {e}")
             print(f"[Admin] Error re-linking user {uid}: {e}")
@@ -4220,16 +4675,22 @@ def _clerk_clear_tenant_access(clerk_user_id: str, headers: dict) -> None:
     _clerk_revoke_active_sessions(clerk_user_id, headers)
 
 
-def _clerk_relink_user_to_tenant(clerk_user_id: str, tenant_id: str, headers: dict) -> List[str]:
+def _clerk_relink_user_to_tenant(
+    clerk_user_id: str, tenant_id: str, headers: dict
+) -> List[str]:
     """
     Make this user the sole owner of the tenant; clear access for anyone else on that tenant.
     Returns displaced clerk_user_ids (previous owners).
     """
     displaced = db_tenant_member_assign_owner(clerk_user_id, tenant_id)
     if displaced is None:
-        raise RuntimeError(f"Database membership update failed for {clerk_user_id} (tenant_id={tenant_id})")
+        raise RuntimeError(
+            f"Database membership update failed for {clerk_user_id} (tenant_id={tenant_id})"
+        )
     if not _clerk_patch_user_tenant_metadata(clerk_user_id, tenant_id):
-        raise RuntimeError(f"Clerk metadata patch failed for {clerk_user_id} (tenant_id={tenant_id})")
+        raise RuntimeError(
+            f"Clerk metadata patch failed for {clerk_user_id} (tenant_id={tenant_id})"
+        )
     for uid in displaced:
         _clerk_clear_tenant_access(uid, headers)
     _clerk_revoke_active_sessions(clerk_user_id, headers)
@@ -4250,7 +4711,11 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
             "clerk_error": "Valid email required",
         }
     lowered = email.lower()
-    if lowered.endswith("@example.com") or lowered.endswith("@example.org") or lowered.endswith("@test.com"):
+    if (
+        lowered.endswith("@example.com")
+        or lowered.endswith("@example.org")
+        or lowered.endswith("@test.com")
+    ):
         return {
             "invite_sent": False,
             "user_relinked": False,
@@ -4276,7 +4741,11 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
             "clerk_error": "CLERK_SECRET_KEY is not set on the backend (Render). Invites cannot be sent.",
         }
     import httpx
-    headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+
+    headers = {
+        "Authorization": f"Bearer {clerk_secret}",
+        "Content-Type": "application/json",
+    }
     existing_user_ids = _clerk_user_ids_for_email(email, headers)
     clerk_users_matched_count = len(existing_user_ids)
     if clerk_users_matched_count > 1:
@@ -4325,7 +4794,8 @@ def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
                 json={
                     "email_address": email,
                     "public_metadata": {"tenant_id": tenant_id},
-                    "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/",
+                    "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com")
+                    + "/",
                 },
                 timeout=10.0,
             )
@@ -4406,6 +4876,7 @@ def _extend_trial_through_exempt(tenant_id: str, exempt_until: datetime) -> None
 class AdminTenantTwilioUpdate(BaseModel):
     twilio_phone_number: str
 
+
 @app.get("/api/admin/session")
 async def admin_session(request: Request):
     """True if the bearer token user id is in ADMIN_CLERK_USER_IDS. No tenant required."""
@@ -4416,7 +4887,11 @@ async def admin_session(request: Request):
         user_id, _ = verify_clerk_token(token)
     except HTTPException:
         return {"is_admin": False}
-    admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+    admin_ids = [
+        x.strip()
+        for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
+        if x.strip()
+    ]
     if not admin_ids:
         return {"is_admin": False}
     return {"is_admin": user_id in admin_ids}
@@ -4538,7 +5013,11 @@ def _admin_resolve_email_debug(email: str) -> dict:
             tid = str(t.get("id") or "")
             if db_tenant_get_invite_email(tid) == _normalize_invite_email(email):
                 tenants_by_client.append(
-                    {"tenant_id": tid, "client_id": t.get("client_id"), "role": "pending_invite_on_tenant"}
+                    {
+                        "tenant_id": tid,
+                        "client_id": t.get("client_id"),
+                        "role": "pending_invite_on_tenant",
+                    }
                 )
             for uid in db_tenant_get_members(tid):
                 link = _clerk_fetch_user_link(uid) if headers else None
@@ -4555,7 +5034,10 @@ def _admin_resolve_email_debug(email: str) -> dict:
     return {
         "email": email,
         "pending_invite_tenant": (
-            {"tenant_id": invite_tid, "client_id": (invite_tenant or {}).get("client_id")}
+            {
+                "tenant_id": invite_tid,
+                "client_id": (invite_tenant or {}).get("client_id"),
+            }
             if invite_tid
             else None
         ),
@@ -4583,9 +5065,15 @@ async def me_access(request: Request):
     tenant = db_tenant_get_for_user(user_id) if USE_DB else None
     link = _clerk_fetch_user_link(user_id) if USE_DB else None
     memberships = db_tenant_memberships_for_user(user_id) if USE_DB else []
-    admin_ids = [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+    admin_ids = [
+        x.strip()
+        for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
+        if x.strip()
+    ]
     primary_email = ((link or {}).get("emails") or [None])[0]
-    pending_invite_tid = db_tenant_invite_peek(primary_email) if USE_DB and primary_email else None
+    pending_invite_tid = (
+        db_tenant_invite_peek(primary_email) if USE_DB and primary_email else None
+    )
     diagnosis = _membership_diagnosis(user_id, jwt_tid, link, tenant, memberships)
     return {
         "signed_in": True,
@@ -4603,30 +5091,58 @@ async def me_access(request: Request):
         "diagnosis": diagnosis,
     }
 
+
 @app.get("/api/debug/cors")
 async def debug_cors():
     """No-auth endpoint to verify CORS config on deployed backend. e.g. curl https://your-api/api/debug/cors"""
     return {"allowed_origins": allowed_origins}
 
+
 @app.post("/api/admin/tenants")
-async def admin_create_tenant(req: AdminCreateTenantRequest, request: Request, admin_user_id: str = Depends(require_admin)):
+async def admin_create_tenant(
+    req: AdminCreateTenantRequest,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
     """Create tenant and send Clerk invite. Requires admin auth."""
     if not USE_DB:
-        raise HTTPException(status_code=503, detail="Database required for multi-tenant")
+        raise HTTPException(
+            status_code=503, detail="Database required for multi-tenant"
+        )
     bv = (req.business_vertical or "salon_chair").strip()
     if bv not in ALLOWED_BUSINESS_VERTICALS:
         raise HTTPException(status_code=400, detail="Invalid business_vertical")
     # New tenants get 7-day trial (plan=free, subscription_status=trialing); no paid plan at creation
-    tenant = db_tenant_create(req.client_id, req.name, req.twilio_phone_number, "free", bv)
+    tenant = db_tenant_create(
+        req.client_id, req.name, req.twilio_phone_number, "free", bv
+    )
     if not tenant:
-        raise HTTPException(status_code=409, detail="Tenant already exists or create failed")
+        raise HTTPException(
+            status_code=409, detail="Tenant already exists or create failed"
+        )
     cfg = _default_client_config_data(req.client_id, tenant.get("plan") or "free")
     save_raw_client_config(req.client_id, cfg)
     link = _clerk_link_email_to_tenant(req.email, tenant["id"])
     invite_sent = bool(link.get("invite_sent"))
     user_relinked = bool(link.get("user_relinked"))
-    audit_log("admin", "tenant_created", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant["id"], client_id=tenant["client_id"], details={"name": req.name, **link}, request=request)
-    return {"success": True, "tenant": tenant, "invite_sent": invite_sent, "user_relinked": user_relinked, "clerk_error": link.get("clerk_error"), "linked_clerk_user_id": link.get("linked_clerk_user_id")}
+    audit_log(
+        "admin",
+        "tenant_created",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant["id"],
+        client_id=tenant["client_id"],
+        details={"name": req.name, **link},
+        request=request,
+    )
+    return {
+        "success": True,
+        "tenant": tenant,
+        "invite_sent": invite_sent,
+        "user_relinked": user_relinked,
+        "clerk_error": link.get("clerk_error"),
+        "linked_clerk_user_id": link.get("linked_clerk_user_id"),
+    }
 
 
 @app.post("/api/admin/tenants/{tenant_id}/resend-invite")
@@ -4638,7 +5154,9 @@ async def admin_resend_invite(
 ):
     """Re-queue pending invite by email and send a new Clerk invitation (existing tenants)."""
     if not USE_DB:
-        raise HTTPException(status_code=503, detail="Database required for multi-tenant")
+        raise HTTPException(
+            status_code=503, detail="Database required for multi-tenant"
+        )
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -4675,7 +5193,9 @@ def _admin_tenant_with_access_email(tenant: dict) -> dict:
             if emails:
                 owner_email = str(emails[0]).strip()
     except Exception as e:
-        print(f"[Admin] tenant access email lookup failed client_id={tenant.get('client_id')}: {e}")
+        print(
+            f"[Admin] tenant access email lookup failed client_id={tenant.get('client_id')}: {e}"
+        )
     allocated = owner_email or pending
     if owner_email and pending and owner_email.lower() != pending.lower():
         access_status = "active_pending_mismatch"
@@ -4703,7 +5223,9 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
         tenants = db_tenant_list_all()
     except Exception as e:
         print(f"[Admin] db_tenant_list_all failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load tenants from database") from e
+        raise HTTPException(
+            status_code=500, detail="Failed to load tenants from database"
+        ) from e
     enriched: List[dict] = []
     for t in tenants:
         try:
@@ -4730,7 +5252,9 @@ async def admin_bulk_create_tenants(
 ):
     """Bulk create tenants with validation and idempotency checks."""
     if not USE_DB:
-        raise HTTPException(status_code=503, detail="Database required for multi-tenant")
+        raise HTTPException(
+            status_code=503, detail="Database required for multi-tenant"
+        )
     seen_client_ids: set[str] = set()
     seen_phones: set[str] = set()
     results: list[dict] = []
@@ -4742,12 +5266,24 @@ async def admin_bulk_create_tenants(
         normalized_phone = _normalize_admin_phone(row.twilio_phone_number)
         email = str(row.email).strip().lower()
         if cid in seen_client_ids:
-            results.append({"client_id": cid, "status": "error", "reason": "duplicate_client_id_in_payload"})
+            results.append(
+                {
+                    "client_id": cid,
+                    "status": "error",
+                    "reason": "duplicate_client_id_in_payload",
+                }
+            )
             errors += 1
             continue
         seen_client_ids.add(cid)
         if normalized_phone in seen_phones:
-            results.append({"client_id": cid, "status": "error", "reason": "duplicate_twilio_phone_in_payload"})
+            results.append(
+                {
+                    "client_id": cid,
+                    "status": "error",
+                    "reason": "duplicate_twilio_phone_in_payload",
+                }
+            )
             errors += 1
             continue
         seen_phones.add(normalized_phone)
@@ -4761,7 +5297,9 @@ async def admin_bulk_create_tenants(
                     "client_id": cid,
                     "status": "skipped",
                     "reason": "tenant_exists",
-                    "existing_tenant_id": (existing_by_id or existing_by_phone or {}).get("id"),
+                    "existing_tenant_id": (
+                        existing_by_id or existing_by_phone or {}
+                    ).get("id"),
                 }
             )
             continue
@@ -4772,12 +5310,20 @@ async def admin_bulk_create_tenants(
 
         bv = (row.business_vertical or "salon_chair").strip()
         if bv not in ALLOWED_BUSINESS_VERTICALS:
-            results.append({"client_id": cid, "status": "error", "reason": "invalid_business_vertical"})
+            results.append(
+                {
+                    "client_id": cid,
+                    "status": "error",
+                    "reason": "invalid_business_vertical",
+                }
+            )
             errors += 1
             continue
         tenant = db_tenant_create(cid, row.name.strip(), normalized_phone, "free", bv)
         if not tenant:
-            results.append({"client_id": cid, "status": "error", "reason": "create_failed"})
+            results.append(
+                {"client_id": cid, "status": "error", "reason": "create_failed"}
+            )
             errors += 1
             continue
         cfg = _default_client_config_data(cid, tenant.get("plan") or "free")
@@ -4800,7 +5346,11 @@ async def admin_bulk_create_tenants(
             resource_type="tenant",
             resource_id=tenant["id"],
             client_id=tenant["client_id"],
-            details={"email": email, "invite_sent": bool(link.get("invite_sent")), "user_relinked": bool(link.get("user_relinked"))},
+            details={
+                "email": email,
+                "invite_sent": bool(link.get("invite_sent")),
+                "user_relinked": bool(link.get("user_relinked")),
+            },
             request=request,
         )
 
@@ -4824,7 +5374,11 @@ async def admin_ops_self_check(_: str = Depends(require_admin)):
     public_base_url_set = bool((os.getenv("PUBLIC_BASE_URL") or "").strip())
     client_id_set = bool((os.getenv("CLIENT_ID") or "").strip())
     last_cron_runs = db_cron_runs_last_success() if USE_DB else {}
-    stale_cron_jobs = _cron_stale_jobs(last_cron_runs) if USE_DB and cron_secret_set else list(DAILY_CRON_JOBS)
+    stale_cron_jobs = (
+        _cron_stale_jobs(last_cron_runs)
+        if USE_DB and cron_secret_set
+        else list(DAILY_CRON_JOBS)
+    )
     stt_provider = (os.getenv("VOICE_STT_PROVIDER") or "twilio").strip().lower()
     deepgram_key_set = bool((os.getenv("DEEPGRAM_API_KEY") or "").strip())
     redis_health = redis_ops_health()
@@ -4873,7 +5427,10 @@ async def admin_upsert_legal_hold(
         actor_id=admin_user_id,
         resource_type="tenant",
         client_id=req.client_id.strip(),
-        details={"reason": (req.reason or "").strip()[:200], "hold_until": req.hold_until.isoformat() if req.hold_until else None},
+        details={
+            "reason": (req.reason or "").strip()[:200],
+            "hold_until": req.hold_until.isoformat() if req.hold_until else None,
+        },
         request=request,
     )
     return {"success": True}
@@ -4928,7 +5485,10 @@ async def admin_update_tenant_twilio_phone(
         raise HTTPException(status_code=503, detail="Database required")
     phone = (req.twilio_phone_number or "").strip()
     if not any(c.isdigit() for c in phone):
-        raise HTTPException(status_code=400, detail="twilio_phone_number must contain digits (E.164 or US local is fine)")
+        raise HTTPException(
+            status_code=400,
+            detail="twilio_phone_number must contain digits (E.164 or US local is fine)",
+        )
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -4960,8 +5520,11 @@ async def admin_update_tenant_twilio_phone(
     )
     return {"success": True, "tenant": updated, "webhook_config": public_config}
 
+
 @app.delete("/api/admin/tenants/{tenant_id}")
-async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: str = Depends(require_admin)):
+async def admin_delete_tenant(
+    tenant_id: str, request: Request, admin_user_id: str = Depends(require_admin)
+):
     """Delete a tenant and revoke access for its members.
 
     Steps:
@@ -4979,7 +5542,9 @@ async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: s
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     member_ids = db_tenant_get_members(tenant_id)
-    archive_id = db_archive_purge_and_delete_tenant(tenant_id, tenant, actor_clerk_id=admin_user_id)
+    archive_id = db_archive_purge_and_delete_tenant(
+        tenant_id, tenant, actor_clerk_id=admin_user_id
+    )
     if archive_id is None:
         raise HTTPException(
             status_code=500,
@@ -4997,7 +5562,11 @@ async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: s
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     if clerk_secret and member_ids:
         import httpx
-        headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+
+        headers = {
+            "Authorization": f"Bearer {clerk_secret}",
+            "Content-Type": "application/json",
+        }
         for uid in member_ids:
             try:
                 httpx.patch(
@@ -5033,15 +5602,27 @@ async def admin_delete_tenant(tenant_id: str, request: Request, admin_user_id: s
         details={"name": tenant.get("name"), "data_archive_id": archive_id},
         request=request,
     )
-    return {"success": True, "deleted_tenant": tenant, "revoked_users": revoked_users, "data_archive_id": archive_id}
+    return {
+        "success": True,
+        "deleted_tenant": tenant,
+        "revoked_users": revoked_users,
+        "data_archive_id": archive_id,
+    }
+
 
 class BillingExemptUpdate(BaseModel):
     exempt_until: Optional[str] = None
     extend_months: Optional[int] = None
     extend_trial_months: Optional[int] = None
 
+
 @app.patch("/api/admin/tenants/{tenant_id}/billing-exempt")
-async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, request: Request, admin_user_id: str = Depends(require_admin)):
+async def admin_tenant_billing_exempt(
+    tenant_id: str,
+    req: BillingExemptUpdate,
+    request: Request,
+    admin_user_id: str = Depends(require_admin),
+):
     """Set billing exemption or extend trial for a tenant. Admin only."""
     if not USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
@@ -5053,7 +5634,11 @@ async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, 
         trial_ends_at = tenant.get("trial_ends_at")
         try:
             if trial_ends_at:
-                trial_dt = datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00")) if isinstance(trial_ends_at, str) else trial_ends_at
+                trial_dt = (
+                    datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00"))
+                    if isinstance(trial_ends_at, str)
+                    else trial_ends_at
+                )
                 if trial_dt.tzinfo is None:
                     trial_dt = trial_dt.replace(tzinfo=timezone.utc)
                 base = max(trial_dt, now)
@@ -5061,7 +5646,20 @@ async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, 
                 base = now
             new_ends = base + timedelta(days=30 * req.extend_trial_months)
             if db_tenant_extend_trial(tenant_id, new_ends):
-                audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "extend_trial_months", "months": req.extend_trial_months, "trial_ends_at": new_ends.isoformat()}, request=request)
+                audit_log(
+                    "admin",
+                    "billing_exempt",
+                    actor_id=admin_user_id,
+                    resource_type="tenant",
+                    resource_id=tenant_id,
+                    client_id=tenant.get("client_id"),
+                    details={
+                        "action": "extend_trial_months",
+                        "months": req.extend_trial_months,
+                        "trial_ends_at": new_ends.isoformat(),
+                    },
+                    request=request,
+                )
                 return {"success": True, "trial_ends_at": new_ends.isoformat()}
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -5069,7 +5667,20 @@ async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, 
         exempt_until = now + timedelta(days=30 * req.extend_months)
         if db_tenant_set_billing_exempt(tenant_id, exempt_until):
             _extend_trial_through_exempt(tenant_id, exempt_until)
-            audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "extend_months", "months": req.extend_months, "exempt_until": exempt_until.isoformat()}, request=request)
+            audit_log(
+                "admin",
+                "billing_exempt",
+                actor_id=admin_user_id,
+                resource_type="tenant",
+                resource_id=tenant_id,
+                client_id=tenant.get("client_id"),
+                details={
+                    "action": "extend_months",
+                    "months": req.extend_months,
+                    "exempt_until": exempt_until.isoformat(),
+                },
+                request=request,
+            )
             return {"success": True, "billing_exempt_until": exempt_until.isoformat()}
     if req.exempt_until:
         try:
@@ -5078,11 +5689,29 @@ async def admin_tenant_billing_exempt(tenant_id: str, req: BillingExemptUpdate, 
                 exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
             if db_tenant_set_billing_exempt(tenant_id, exempt_dt):
                 _extend_trial_through_exempt(tenant_id, exempt_dt)
-                audit_log("admin", "billing_exempt", actor_id=admin_user_id, resource_type="tenant", resource_id=tenant_id, client_id=tenant.get("client_id"), details={"action": "exempt_until", "exempt_until": exempt_dt.isoformat()}, request=request)
+                audit_log(
+                    "admin",
+                    "billing_exempt",
+                    actor_id=admin_user_id,
+                    resource_type="tenant",
+                    resource_id=tenant_id,
+                    client_id=tenant.get("client_id"),
+                    details={
+                        "action": "exempt_until",
+                        "exempt_until": exempt_dt.isoformat(),
+                    },
+                    request=request,
+                )
                 return {"success": True, "billing_exempt_until": exempt_dt.isoformat()}
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"Invalid exempt_until date: {e}")
-    raise HTTPException(status_code=400, detail="Provide exempt_until, extend_months, or extend_trial_months")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid exempt_until date: {e}"
+            )
+    raise HTTPException(
+        status_code=400,
+        detail="Provide exempt_until, extend_months, or extend_trial_months",
+    )
+
 
 @app.post("/api/admin/tenants/{tenant_id}/members")
 async def admin_add_tenant_member(
@@ -5113,8 +5742,11 @@ async def admin_add_tenant_member(
     )
     return {"success": True, **link}
 
+
 @app.post("/api/conversation", response_model=ConversationResponse)
-async def handle_conversation(request: ConversationRequest, _: None = Depends(require_active_subscription)):
+async def handle_conversation(
+    request: ConversationRequest, _: None = Depends(require_active_subscription)
+):
     try:
         # Always include booked slots so the AI knows which times are taken and avoids double-booking
         system_content = get_system_prompt(include_booked_slots=True)
@@ -5122,22 +5754,21 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
         if request.conversation_history:
             messages.extend(request.conversation_history)
         messages.append({"role": "user", "content": request.message})
-        
+
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=200
+            model="gpt-3.5-turbo", messages=messages, temperature=0.7, max_tokens=200
         )
-        
+
         ai_response = response.choices[0].message.content
         action = None
         data = None
-        
+
         # BOOKING: create appointment from AI output if present
         booking = parse_booking(ai_response)
         if booking:
-            ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(booking)
+            ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(
+                booking
+            )
             if not ok_booking:
                 apt = None
             else:
@@ -5153,28 +5784,36 @@ async def handle_conversation(request: ConversationRequest, _: None = Depends(re
                 date_ok = bool((booking.get("date") or "").strip())
                 time_ok = bool((booking.get("time") or "").strip())
                 if not ok_booking:
-                    ai_response = fail_msg or "Before I can book this, please choose a stylist and service."
+                    ai_response = (
+                        fail_msg
+                        or "Before I can book this, please choose a stylist and service."
+                    )
                 elif not name_ok:
                     ai_response = "I'd love to book that for you—what's your name?"
                 elif not date_ok or not time_ok:
                     ai_response = "I need the date and time again to confirm—which day and time would you like?"
                 else:
                     ai_response = "That time slot just got booked. Would you like to try another time or another day?"
-        
+
         ai_response = _strip_booking_directive_for_voice(ai_response or "")
-        if "schedule" in request.message.lower() or "appointment" in request.message.lower():
+        if (
+            "schedule" in request.message.lower()
+            or "appointment" in request.message.lower()
+        ):
             action = action or "schedule_appointment"
-        elif "message" in request.message.lower() or "leave a message" in request.message.lower():
+        elif (
+            "message" in request.message.lower()
+            or "leave a message" in request.message.lower()
+        ):
             action = "take_message"
-        elif "transfer" in request.message.lower() or "department" in request.message.lower():
+        elif (
+            "transfer" in request.message.lower()
+            or "department" in request.message.lower()
+        ):
             action = "route_call"
-        
-        return ConversationResponse(
-            response=ai_response,
-            action=action,
-            data=data
-        )
-    
+
+        return ConversationResponse(response=ai_response, action=action, data=data)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -5244,10 +5883,17 @@ def polish_owner_decline_sms(raw_reason: str, business_name: str, apt: dict) -> 
 
 
 def _staff_pending_review_sms_enabled() -> bool:
-    return (os.getenv("STAFF_PENDING_REVIEW_SMS") or "").strip().lower() in ("1", "true", "yes", "on")
+    return (os.getenv("STAFF_PENDING_REVIEW_SMS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
-def _notify_staff_pending_review(apt: dict, tenant: dict, twilio_from_number: str) -> None:
+def _notify_staff_pending_review(
+    apt: dict, tenant: dict, twilio_from_number: str
+) -> None:
     """Optional cost-controlled SMS to each staff phone when a customer submits the booking for shop approval."""
     if not _staff_pending_review_sms_enabled():
         return
@@ -5280,10 +5926,14 @@ def _notify_staff_pending_review(apt: dict, tenant: dict, twilio_from_number: st
         try:
             send_sms(phone, msg[:1580], from_override=twilio_from_number)
         except Exception as e:
-            logger.warning("[SMS] staff_pending_review_notify_failed apt_id=%s err=%s", apt_id, e)
+            logger.warning(
+                "[SMS] staff_pending_review_notify_failed apt_id=%s err=%s", apt_id, e
+            )
 
 
-def _maybe_handle_staff_sms_approval(from_number: str, body: str, tenant: dict, to_number: str) -> bool:
+def _maybe_handle_staff_sms_approval(
+    from_number: str, body: str, tenant: dict, to_number: str
+) -> bool:
     """
     If From matches a staff member's phone, parse APPROVE/YES or DECLINE/NO <apt_id> [reason].
     Returns True if this webhook turn was consumed as a staff command.
@@ -5310,14 +5960,24 @@ def _maybe_handle_staff_sms_approval(from_number: str, body: str, tenant: dict, 
         token_count=len(tokens),
     )
     if len(tokens) < 2:
-        sms_debug("staff_command_incomplete", from_number=from_number, body_len=len(raw))
-        sms_trace("inbound_staff_command_incomplete", client_id=tenant["client_id"], token_count=len(tokens))
+        sms_debug(
+            "staff_command_incomplete", from_number=from_number, body_len=len(raw)
+        )
+        sms_trace(
+            "inbound_staff_command_incomplete",
+            client_id=tenant["client_id"],
+            token_count=len(tokens),
+        )
         return False
     verb = tokens[0].upper()
     try:
         apt_id = int(tokens[1])
     except ValueError:
-        sms_info("staff_command_invalid_id_token", from_number=from_number, token=str(tokens[1])[:20])
+        sms_info(
+            "staff_command_invalid_id_token",
+            from_number=from_number,
+            token=str(tokens[1])[:20],
+        )
         return False
     apt = db_appointments_get_by_id(apt_id) if USE_DB else None
     if not apt:
@@ -5382,7 +6042,9 @@ def _maybe_handle_staff_sms_approval(from_number: str, body: str, tenant: dict, 
     if verb in ("NO", "DECLINE", "REJECT"):
         reason = " ".join(tokens[2:]).strip() or "We could not accommodate that time."
         if USE_DB:
-            db_appointments_update(apt_id, status="rejected", owner_decline_reason=reason[:2000])
+            db_appointments_update(
+                apt_id, status="rejected", owner_decline_reason=reason[:2000]
+            )
         release_slot(apt_id)
         audit_log(
             "staff_sms",
@@ -5411,7 +6073,10 @@ def _maybe_handle_staff_sms_approval(from_number: str, body: str, tenant: dict, 
 
 
 @app.post("/api/appointments")
-async def create_appointment(appointment: AppointmentRequest, tenant: Optional[dict] = Depends(require_active_subscription)):
+async def create_appointment(
+    appointment: AppointmentRequest,
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     cid = _bind_tenant_db_context(tenant)
     try:
         source = (appointment.source or "manual").strip().lower()
@@ -5422,8 +6087,12 @@ async def create_appointment(appointment: AppointmentRequest, tenant: Optional[d
         time = (appointment.time or "").strip()
         staff_key = _optional_staff_id_validated(appointment.staff_id)
         if date and time:
-            if not is_slot_available(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key):
-                raise HTTPException(status_code=409, detail="That time slot is already booked.")
+            if not is_slot_available(
+                date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key
+            ):
+                raise HTTPException(
+                    status_code=409, detail="That time slot is already booked."
+                )
         appointment_data = {
             "name": appointment.name,
             "email": appointment.email or "",
@@ -5445,7 +6114,9 @@ async def create_appointment(appointment: AppointmentRequest, tenant: Optional[d
             appointment_data["created_at"] = datetime.now().isoformat()
             appointments.append(appointment_data)
         if date and time:
-            reserve_slot(date, time, appointment_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
+            reserve_slot(
+                date, time, appointment_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key
+            )
         appointment_data["id"] = appointment_id
         appointment_data.setdefault("created_at", datetime.now().isoformat())
         return {"success": True, "appointment": appointment_data}
@@ -5454,8 +6125,11 @@ async def create_appointment(appointment: AppointmentRequest, tenant: Optional[d
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/appointments")
-async def get_appointments(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def get_appointments(
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     cid = _bind_tenant_db_context(tenant)
     orphans_removed = _reconcile_booked_slots_orphans() if USE_DB else 0
     lst = db_appointments_get_all(client_id=cid) if USE_DB else appointments
@@ -5495,14 +6169,17 @@ async def get_appointments(tenant: Optional[dict] = Depends(require_active_subsc
 
 
 @app.get("/api/appointments/diagnostics")
-async def get_appointments_diagnostics(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def get_appointments_diagnostics(
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """Tenant-scoped appointment debug snapshot (for dashboard troubleshooting)."""
     cid = _bind_tenant_db_context(tenant)
     holds = _voice_calendar_holds() if USE_DB else []
     diag = db_appointments_diagnostics(cid) if USE_DB else {}
     return {
         "client_id": cid,
-        "twilio_phone_number": ((tenant or {}).get("twilio_phone_number") or "").strip() or None,
+        "twilio_phone_number": ((tenant or {}).get("twilio_phone_number") or "").strip()
+        or None,
         "calendar_holds": holds,
         **diag,
     }
@@ -5538,13 +6215,20 @@ async def update_appointment(
     """Update appointment status or details. Used by the appointments frontend."""
     cid = _bind_tenant_db_context(tenant)
     kwargs = {}
-    if update.status is not None: kwargs["status"] = update.status
-    if update.date is not None: kwargs["date"] = update.date
-    if update.time is not None: kwargs["time"] = update.time
-    if update.reason is not None: kwargs["reason"] = update.reason
-    if update.name is not None: kwargs["name"] = update.name
-    if update.email is not None: kwargs["email"] = update.email
-    if update.phone is not None: kwargs["phone"] = update.phone
+    if update.status is not None:
+        kwargs["status"] = update.status
+    if update.date is not None:
+        kwargs["date"] = update.date
+    if update.time is not None:
+        kwargs["time"] = update.time
+    if update.reason is not None:
+        kwargs["reason"] = update.reason
+    if update.name is not None:
+        kwargs["name"] = update.name
+    if update.email is not None:
+        kwargs["email"] = update.email
+    if update.phone is not None:
+        kwargs["phone"] = update.phone
     if USE_DB and kwargs:
         apt = db_appointments_update(appointment_id, client_id=cid, **kwargs)
         if apt:
@@ -5555,6 +6239,7 @@ async def update_appointment(
                 apt.update(kwargs)
                 return {"success": True, "appointment": apt}
     raise HTTPException(status_code=404, detail="Appointment not found")
+
 
 def _appointment_email_enabled() -> bool:
     """Off by default; set APPOINTMENT_EMAIL_ENABLED=1 to send Resend/SMTP confirmations."""
@@ -5584,7 +6269,9 @@ def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
         time_ampm=_hhmm_to_ampm(apt.get("time") or ""),
         service=(apt.get("reason") or "").strip(),
     )
-    ok = send_appointment_email(to=email, subject=subject, html_body=html, text_body=text)
+    ok = send_appointment_email(
+        to=email, subject=subject, html_body=html, text_body=text
+    )
     from observability import email_hint_for_log
 
     system_info(
@@ -5618,12 +6305,24 @@ async def accept_appointment(
         )
         raise HTTPException(status_code=404, detail="Appointment not found")
     if str(apt.get("status") or "") != "pending_review":
-        raise HTTPException(status_code=400, detail="Appointment is not awaiting approval")
+        raise HTTPException(
+            status_code=400, detail="Appointment is not awaiting approval"
+        )
     if USE_DB:
-        apt = db_appointments_update(appointment_id, status="accepted", client_id=cid) or apt
+        apt = (
+            db_appointments_update(appointment_id, status="accepted", client_id=cid)
+            or apt
+        )
     else:
         apt["status"] = "accepted"
-    audit_log("user", "appointment_accepted", resource_type="appointment", resource_id=str(appointment_id), details={"date": apt.get("date"), "time": apt.get("time")}, request=request)
+    audit_log(
+        "user",
+        "appointment_accepted",
+        resource_type="appointment",
+        resource_id=str(appointment_id),
+        details={"date": apt.get("date"), "time": apt.get("time")},
+        request=request,
+    )
     business_name = get_business_info().get("name", "us")
     date = apt.get("date", "")
     time_ampm = _hhmm_to_ampm(apt.get("time") or "")
@@ -5649,15 +6348,20 @@ async def reject_appointment(
     if not apt:
         raise HTTPException(status_code=404, detail="Appointment not found")
     if str(apt.get("status") or "") != "pending_review":
-        raise HTTPException(status_code=400, detail="Appointment is not awaiting approval")
+        raise HTTPException(
+            status_code=400, detail="Appointment is not awaiting approval"
+        )
     reason_clean = body.reason.strip()
     if USE_DB:
-        apt = db_appointments_update(
-            appointment_id,
-            status="rejected",
-            owner_decline_reason=reason_clean,
-            client_id=cid,
-        ) or apt
+        apt = (
+            db_appointments_update(
+                appointment_id,
+                status="rejected",
+                owner_decline_reason=reason_clean,
+                client_id=cid,
+            )
+            or apt
+        )
     else:
         apt["status"] = "rejected"
     audit_log(
@@ -5699,12 +6403,15 @@ async def cancel_appointment(
         )
     reason_clean = body.reason.strip()
     if USE_DB:
-        apt = db_appointments_update(
-            appointment_id,
-            status="cancelled",
-            owner_decline_reason=reason_clean,
-            client_id=cid,
-        ) or apt
+        apt = (
+            db_appointments_update(
+                appointment_id,
+                status="cancelled",
+                owner_decline_reason=reason_clean,
+                client_id=cid,
+            )
+            or apt
+        )
     else:
         apt["status"] = "cancelled"
     audit_log(
@@ -5755,39 +6462,61 @@ async def preview_decline_sms(
 
 
 @app.post("/api/messages")
-async def create_message(message: MessageRequest, _: None = Depends(require_active_subscription)):
+async def create_message(
+    message: MessageRequest, _: None = Depends(require_active_subscription)
+):
     try:
-        data = {"caller_name": message.caller_name, "caller_phone": message.caller_phone, "message": message.message, "urgency": message.urgency, "status": "unread"}
+        data = {
+            "caller_name": message.caller_name,
+            "caller_phone": message.caller_phone,
+            "message": message.message,
+            "urgency": message.urgency,
+            "status": "unread",
+        }
         if USE_DB:
             message_data = db_messages_insert(data)
         else:
-            message_data = {"id": len(messages) + 1, **data, "created_at": datetime.now().isoformat()}
+            message_data = {
+                "id": len(messages) + 1,
+                **data,
+                "created_at": datetime.now().isoformat(),
+            }
             messages.append(message_data)
         return {"success": True, "message": message_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 class SmsAutomationCreate(BaseModel):
     trigger: Literal["after_inquiry", "post_call"]
     template: str
+
 
 class SmsAutomationUpdate(BaseModel):
     template: Optional[str] = None
     enabled: Optional[bool] = None
 
+
 @app.get("/api/sms-automations")
-async def get_sms_automations(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def get_sms_automations(
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """List SMS automations. Growth/Pro only."""
     cid = get_db_client_id()
     if not cid or cid == "default":
         if _settings_load_debug_enabled():
-            logger.info("settings_load_debug GET /api/sms-automations early_empty cid_default=%s", not cid or cid == "default")
+            logger.info(
+                "settings_load_debug GET /api/sms-automations early_empty cid_default=%s",
+                not cid or cid == "default",
+            )
         return {"automations": []}
     if get_plan_limits:
         limits = get_plan_limits(tenant) if tenant else {}
         if limits.get("sms_automations_max", 0) <= 0:
             if _settings_load_debug_enabled():
-                logger.info("settings_load_debug GET /api/sms-automations plan_has_no_automations_slot")
+                logger.info(
+                    "settings_load_debug GET /api/sms-automations plan_has_no_automations_slot"
+                )
             return {"automations": []}
     automations = db_sms_automations_get_all(cid)
     if _settings_load_debug_enabled():
@@ -5798,37 +6527,59 @@ async def get_sms_automations(tenant: Optional[dict] = Depends(require_active_su
         )
     return {"automations": automations}
 
+
 @app.post("/api/sms-automations")
-async def create_sms_automation(req: SmsAutomationCreate, tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+async def create_sms_automation(
+    req: SmsAutomationCreate,
+    tenant: Optional[dict] = Depends(require_tenant),
+    _: None = Depends(require_active_subscription),
+):
     """Create SMS automation. Growth: max 2, Pro: unlimited."""
     cid = get_db_client_id()
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
     if not tenant or not get_plan_limits:
-        raise HTTPException(status_code=403, detail="Plan does not include SMS automations")
+        raise HTTPException(
+            status_code=403, detail="Plan does not include SMS automations"
+        )
     limits = get_plan_limits(tenant)
     if limits.get("sms_automations_max", 0) <= 0:
-        raise HTTPException(status_code=403, detail="Plan does not include SMS automations")
+        raise HTTPException(
+            status_code=403, detail="Plan does not include SMS automations"
+        )
     count = db_sms_automations_count(cid)
     if count >= limits.get("sms_automations_max", 0):
-        raise HTTPException(status_code=403, detail=f"Plan allows up to {limits.get('sms_automations_max')} automations")
+        raise HTTPException(
+            status_code=403,
+            detail=f"Plan allows up to {limits.get('sms_automations_max')} automations",
+        )
     automation_id = db_sms_automations_insert(cid, req.trigger, req.template or "")
     if not automation_id:
         raise HTTPException(status_code=500, detail="Failed to create automation")
     return {"id": automation_id, "trigger": req.trigger, "template": req.template}
 
+
 @app.patch("/api/sms-automations/{automation_id}")
-async def update_sms_automation(automation_id: int, req: SmsAutomationUpdate, _: None = Depends(require_active_subscription)):
+async def update_sms_automation(
+    automation_id: int,
+    req: SmsAutomationUpdate,
+    _: None = Depends(require_active_subscription),
+):
     cid = get_db_client_id()
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
-    ok = db_sms_automations_update(automation_id, cid, template=req.template, enabled=req.enabled)
+    ok = db_sms_automations_update(
+        automation_id, cid, template=req.template, enabled=req.enabled
+    )
     if not ok:
         raise HTTPException(status_code=404, detail="Automation not found")
     return {"ok": True}
 
+
 @app.delete("/api/sms-automations/{automation_id}")
-async def delete_sms_automation(automation_id: int, _: None = Depends(require_active_subscription)):
+async def delete_sms_automation(
+    automation_id: int, _: None = Depends(require_active_subscription)
+):
     cid = get_db_client_id()
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
@@ -5837,8 +6588,12 @@ async def delete_sms_automation(automation_id: int, _: None = Depends(require_ac
         raise HTTPException(status_code=404, detail="Automation not found")
     return {"ok": True}
 
+
 @app.get("/api/leads")
-async def get_leads(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+async def get_leads(
+    tenant: Optional[dict] = Depends(require_tenant),
+    _: None = Depends(require_active_subscription),
+):
     """Get leads for the current tenant. Growth/Pro only; Starter returns empty."""
     cid = get_db_client_id()
     if not cid or cid == "default":
@@ -5850,10 +6605,12 @@ async def get_leads(tenant: Optional[dict] = Depends(require_tenant), _: None = 
     leads = db_leads_get_all(cid, 100) if USE_DB else []
     return {"leads": leads}
 
+
 @app.get("/api/messages")
 async def get_messages(_: None = Depends(require_active_subscription)):
     lst = db_messages_get_all() if USE_DB else messages
     return {"messages": lst}
+
 
 @app.get("/api/subscription")
 async def get_subscription(tenant: Optional[dict] = Depends(require_tenant)):
@@ -5871,7 +6628,11 @@ async def get_subscription(tenant: Optional[dict] = Depends(require_tenant)):
             "month": month,
         }
     else:
-        state["usage"] = {"voice_minutes": 0, "sms_count": 0, "month": datetime.now(timezone.utc).strftime("%Y-%m")}
+        state["usage"] = {
+            "voice_minutes": 0,
+            "sms_count": 0,
+            "month": datetime.now(timezone.utc).strftime("%Y-%m"),
+        }
     if _settings_load_debug_enabled():
         cid = (tenant or {}).get("client_id") if tenant else None
         prefix = (str(cid)[:10] + "…") if cid else "none"
@@ -5883,16 +6644,21 @@ async def get_subscription(tenant: Optional[dict] = Depends(require_tenant)):
         )
     return state
 
+
 # ---------- Stripe billing ----------
 def _stripe_price_id(plan: str) -> Optional[str]:
     key = f"STRIPE_{plan.upper()}_PRICE_ID"
     return (os.getenv(key) or os.getenv("STRIPE_PRICE_ID") or "").strip() or None
 
+
 class CreateCheckoutSessionRequest(BaseModel):
     plan: Literal["starter", "growth", "pro"]
 
+
 @app.post("/api/create-checkout-session")
-async def create_checkout_session(req: CreateCheckoutSessionRequest, tenant: Optional[dict] = Depends(require_tenant)):
+async def create_checkout_session(
+    req: CreateCheckoutSessionRequest, tenant: Optional[dict] = Depends(require_tenant)
+):
     """Create a Stripe Checkout session for the given plan. Returns { url } for redirect."""
     if not STRIPE_AVAILABLE or not stripe:
         raise HTTPException(status_code=503, detail="Billing not configured")
@@ -5904,8 +6670,12 @@ async def create_checkout_session(req: CreateCheckoutSessionRequest, tenant: Opt
     stripe.api_key = secret
     price_id = _stripe_price_id(req.plan)
     if not price_id:
-        raise HTTPException(status_code=503, detail=f"Price not configured for plan: {req.plan}")
-    frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+        raise HTTPException(
+            status_code=503, detail=f"Price not configured for plan: {req.plan}"
+        )
+    frontend = (
+        (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+    )
     success_url = f"{frontend}/dashboard?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{frontend}/dashboard"
     tenant_id = tenant.get("id")
@@ -5913,14 +6683,21 @@ async def create_checkout_session(req: CreateCheckoutSessionRequest, tenant: Opt
     if not stripe_customer_id:
         try:
             cust = stripe.Customer.create(
-                metadata={"tenant_id": str(tenant_id), "client_id": tenant.get("client_id", "")},
+                metadata={
+                    "tenant_id": str(tenant_id),
+                    "client_id": tenant.get("client_id", ""),
+                },
                 email=None,
             )
             stripe_customer_id = cust.id
-            db_tenant_update_subscription(tenant_id, stripe_customer_id=stripe_customer_id)
+            db_tenant_update_subscription(
+                tenant_id, stripe_customer_id=stripe_customer_id
+            )
         except Exception as e:
             logger.error("Stripe customer create failed: %s", e)
-            raise HTTPException(status_code=500, detail="Could not create billing customer")
+            raise HTTPException(
+                status_code=500, detail="Could not create billing customer"
+            )
     try:
         session = stripe.checkout.Session.create(
             customer=stripe_customer_id,
@@ -5929,12 +6706,15 @@ async def create_checkout_session(req: CreateCheckoutSessionRequest, tenant: Opt
             success_url=success_url,
             cancel_url=cancel_url,
             metadata={"tenant_id": str(tenant_id), "plan": req.plan},
-            subscription_data={"metadata": {"tenant_id": str(tenant_id), "plan": req.plan}},
+            subscription_data={
+                "metadata": {"tenant_id": str(tenant_id), "plan": req.plan}
+            },
         )
         return {"url": session.url}
     except Exception as e:
         logger.error("Stripe checkout session failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/create-portal-session")
 async def create_portal_session(tenant: Optional[dict] = Depends(require_tenant)):
@@ -5952,19 +6732,28 @@ async def create_portal_session(tenant: Optional[dict] = Depends(require_tenant)
         stripe.api_key = secret
         try:
             cust = stripe.Customer.create(
-                metadata={"tenant_id": str(tenant.get("id")), "client_id": tenant.get("client_id", "")},
+                metadata={
+                    "tenant_id": str(tenant.get("id")),
+                    "client_id": tenant.get("client_id", ""),
+                },
                 email=None,
             )
             stripe_customer_id = cust.id
-            db_tenant_update_subscription(tenant.get("id"), stripe_customer_id=stripe_customer_id)
+            db_tenant_update_subscription(
+                tenant.get("id"), stripe_customer_id=stripe_customer_id
+            )
         except Exception as e:
             logger.error("Stripe customer create failed for portal: %s", e)
-            raise HTTPException(status_code=500, detail="Could not create billing account")
+            raise HTTPException(
+                status_code=500, detail="Could not create billing account"
+            )
     secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not secret:
         raise HTTPException(status_code=503, detail="Stripe not configured")
     stripe.api_key = secret
-    frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+    frontend = (
+        (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+    )
     return_url = f"{frontend}/dashboard"
     try:
         session = stripe.billing_portal.Session.create(
@@ -5976,6 +6765,7 @@ async def create_portal_session(tenant: Optional[dict] = Depends(require_tenant)
         logger.error("Stripe portal session failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhooks: subscription and payment events. Raw body required for signature verification."""
@@ -5984,7 +6774,9 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig = request.headers.get("stripe-signature", "")
     secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
-    event, verr = verify_stripe_event(payload, sig, webhook_secret=secret, stripe_module=stripe)
+    event, verr = verify_stripe_event(
+        payload, sig, webhook_secret=secret, stripe_module=stripe
+    )
     if verr:
         code = 503 if verr == "Webhook secret not configured" else 400
         raise HTTPException(status_code=code, detail=verr)
@@ -6000,9 +6792,23 @@ async def stripe_webhook(request: Request):
         sub_id = session.get("subscription")
         customer_id = session.get("customer")
         if tenant_id and (sub_id or customer_id):
-            db_tenant_update_subscription(tenant_id, stripe_customer_id=customer_id, stripe_subscription_id=sub_id, subscription_status="active", plan=plan)
+            db_tenant_update_subscription(
+                tenant_id,
+                stripe_customer_id=customer_id,
+                stripe_subscription_id=sub_id,
+                subscription_status="active",
+                plan=plan,
+            )
             tenant = db_tenant_get_by_id(tenant_id)
-            audit_log("stripe", "checkout.session.completed", resource_type="tenant", resource_id=tenant_id, client_id=tenant["client_id"] if tenant else None, details={"plan": plan, "subscription_id": sub_id}, request=request)
+            audit_log(
+                "stripe",
+                "checkout.session.completed",
+                resource_type="tenant",
+                resource_id=tenant_id,
+                client_id=tenant["client_id"] if tenant else None,
+                details={"plan": plan, "subscription_id": sub_id},
+                request=request,
+            )
     elif event.type == "customer.subscription.updated":
         sub = event.data.object
         sub_id = sub.get("id")
@@ -6010,28 +6816,62 @@ async def stripe_webhook(request: Request):
         status = sub.get("status")
         if tenant_id and sub_id:
             plan = (sub.get("metadata") or {}).get("plan") or "starter"
-            db_tenant_update_subscription(tenant_id, stripe_subscription_id=sub_id, subscription_status=status, plan=plan)
+            db_tenant_update_subscription(
+                tenant_id,
+                stripe_subscription_id=sub_id,
+                subscription_status=status,
+                plan=plan,
+            )
             tenant = db_tenant_get_by_id(tenant_id)
-            audit_log("stripe", "customer.subscription.updated", resource_type="tenant", resource_id=tenant_id, client_id=tenant["client_id"] if tenant else None, details={"status": status, "plan": plan}, request=request)
+            audit_log(
+                "stripe",
+                "customer.subscription.updated",
+                resource_type="tenant",
+                resource_id=tenant_id,
+                client_id=tenant["client_id"] if tenant else None,
+                details={"status": status, "plan": plan},
+                request=request,
+            )
     elif event.type == "customer.subscription.deleted":
         sub = event.data.object
         tenant_id = (sub.get("metadata") or {}).get("tenant_id")
         if tenant_id:
             tenant = db_tenant_get_by_id(tenant_id)
             db_tenant_update_subscription(tenant_id, subscription_status="canceled")
-            audit_log("stripe", "customer.subscription.deleted", resource_type="tenant", resource_id=tenant_id, client_id=tenant["client_id"] if tenant else None, details={}, request=request)
+            audit_log(
+                "stripe",
+                "customer.subscription.deleted",
+                resource_type="tenant",
+                resource_id=tenant_id,
+                client_id=tenant["client_id"] if tenant else None,
+                details={},
+                request=request,
+            )
     elif event.type == "invoice.payment_failed":
         inv = event.data.object
         sub_id = inv.get("subscription")
         if sub_id and USE_DB:
             tenant = db_tenant_get_by_stripe_subscription_id(sub_id)
             if tenant:
-                db_tenant_update_subscription(tenant["id"], subscription_status="past_due")
-                audit_log("stripe", "invoice.payment_failed", resource_type="tenant", resource_id=tenant["id"], client_id=tenant.get("client_id"), details={"subscription_id": sub_id}, request=request)
+                db_tenant_update_subscription(
+                    tenant["id"], subscription_status="past_due"
+                )
+                audit_log(
+                    "stripe",
+                    "invoice.payment_failed",
+                    resource_type="tenant",
+                    resource_id=tenant["id"],
+                    client_id=tenant.get("client_id"),
+                    details={"subscription_id": sub_id},
+                    request=request,
+                )
     return {"received": True}
 
+
 @app.get("/api/business-info")
-async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def api_get_business_info(
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     out = business_info_for_dashboard(tenant)
     if tenant:
         out["client_id"] = (tenant.get("client_id") or "").strip()
@@ -6040,7 +6880,9 @@ async def api_get_business_info(tenant: Optional[dict] = Depends(require_active_
 
 
 @app.get("/api/greeting-preview")
-async def api_greeting_preview(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def api_greeting_preview(
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """
     Return the exact phone greeting text (placeholders resolved, recording line last).
     Use in Settings to verify what callers will hear before placing a test call.
@@ -6053,6 +6895,7 @@ async def api_greeting_preview(tenant: Optional[dict] = Depends(require_active_s
     payload = build_phone_greeting_payload(info, tid or _tenant_for_call_recording())
     return payload
 
+
 # Required and recommended fields so the AI receptionist can relay accurate info (any business type)
 # Setup checklist labels must stay in sync with Settings.tsx checklist rows.
 SETUP_REQUIRED_FIELDS = [
@@ -6062,7 +6905,10 @@ SETUP_REQUIRED_FIELDS = [
     ("address", "Address"),
 ]
 
-def get_setup_status(info_override: Optional[dict] = None, *, twilio_phone: Optional[str] = None) -> dict:
+
+def get_setup_status(
+    info_override: Optional[dict] = None, *, twilio_phone: Optional[str] = None
+) -> dict:
     """Return setup completeness. Uses info_override if provided (e.g. with tenant phone merged), else get_business_info()."""
     info = info_override if info_override is not None else get_business_info()
     missing: List[str] = []
@@ -6074,7 +6920,9 @@ def get_setup_status(info_override: Optional[dict] = None, *, twilio_phone: Opti
     services = info.get("services") or []
     departments = info.get("departments") or []
     if not (services or departments):
-        warnings.append("Add services or departments so the AI knows what your business offers (e.g. appointments, estimates, emergency service)")
+        warnings.append(
+            "Add services or departments so the AI knows what your business offers (e.g. appointments, estimates, emergency service)"
+        )
     roster_ready = staff_roster_ready_for_booking(info)
     store_phone_ready = forwarding_phone_ready(info)
     voice_ready = roster_ready and store_phone_ready
@@ -6098,7 +6946,9 @@ def get_setup_status(info_override: Optional[dict] = None, *, twilio_phone: Opti
             "Your AI receptionist cannot take calls until setup is complete in Settings "
             "(team roster and store phone when both are needed)."
         )
-    staff_count = len([s for s in (info.get("staff") or []) if (s.get("name") or "").strip()])
+    staff_count = len(
+        [s for s in (info.get("staff") or []) if (s.get("name") or "").strip()]
+    )
     service_count = len(_normalize_service_entries(info.get("services") or []))
     if roster_ready and staff_count >= 2 and service_count == 0:
         warnings.append(
@@ -6142,11 +6992,15 @@ def get_setup_status(info_override: Optional[dict] = None, *, twilio_phone: Opti
         "roster_only_gap": roster_only_gap,
         "twilio_number_set": twilio_number_set,
         "webhooks_configured": webhooks_configured,
-        "onboarding_completed_at": (info.get("onboarding_completed_at") or "").strip() or None,
+        "onboarding_completed_at": (info.get("onboarding_completed_at") or "").strip()
+        or None,
     }
 
+
 @app.get("/api/setup-status")
-async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def api_setup_status(
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """Return which required/recommended business info fields are missing. Used for setup checklist."""
     info = business_info_for_dashboard(tenant)
     twilio_phone = (tenant or {}).get("twilio_phone_number") if tenant else None
@@ -6164,7 +7018,9 @@ async def api_setup_status(tenant: Optional[dict] = Depends(require_active_subsc
 
 
 @app.post("/api/onboarding/complete")
-async def api_onboarding_complete(tenant: Optional[dict] = Depends(require_active_subscription)):
+async def api_onboarding_complete(
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """Mark guided onboarding as completed for this tenant."""
     if not tenant:
         raise HTTPException(status_code=403, detail="Tenant required")
@@ -6172,11 +7028,15 @@ async def api_onboarding_complete(tenant: Optional[dict] = Depends(require_activ
     if not cid:
         raise HTTPException(status_code=400, detail="client_id missing")
     set_request_client_id(cid)
-    raw = _read_raw_client_config(cid) or _default_client_config_data(cid, tenant.get("plan") or "free")
+    raw = _read_raw_client_config(cid) or _default_client_config_data(
+        cid, tenant.get("plan") or "free"
+    )
     raw["onboarding_completed_at"] = datetime.now(timezone.utc).isoformat()
     if USE_DB:
         if not db_tenant_set_business_config(cid, raw):
-            raise HTTPException(status_code=500, detail="Failed to save onboarding state")
+            raise HTTPException(
+                status_code=500, detail="Failed to save onboarding state"
+            )
     save_raw_client_config(cid, raw)
     info = business_info_for_dashboard(tenant)
     twilio_phone = tenant.get("twilio_phone_number")
@@ -6290,7 +7150,9 @@ class StaffMember(BaseModel):
 
 
 def _valid_service_id_set(services_raw: Any) -> set[str]:
-    return {s["id"] for s in _normalize_service_entries(services_raw or []) if s.get("id")}
+    return {
+        s["id"] for s in _normalize_service_entries(services_raw or []) if s.get("id")
+    }
 
 
 def finalize_staff_records_for_storage(
@@ -6323,7 +7185,9 @@ def finalize_staff_records_for_storage(
     return out
 
 
-from staff_transfers import TransferTarget  # noqa: E402 — after StaffMember; shared with PATCH validation
+from staff_transfers import (
+    TransferTarget,
+)  # noqa: E402 — after StaffMember; shared with PATCH validation
 
 
 class BusinessInfoUpdate(BaseModel):
@@ -6346,8 +7210,13 @@ class BusinessInfoUpdate(BaseModel):
     staff: Optional[List[StaffMember]] = None
     transfer_targets: Optional[List[TransferTarget]] = None
 
+
 @app.patch("/api/business-info")
-async def api_update_business_info(update: BusinessInfoUpdate, request: Request, tenant: Optional[dict] = Depends(require_active_subscription)):
+async def api_update_business_info(
+    update: BusinessInfoUpdate,
+    request: Request,
+    tenant: Optional[dict] = Depends(require_active_subscription),
+):
     """Update business config (store info, voice, etc.). Writes to clients/<client_id>/config.json."""
     tid = tenant or {}
     cid = ((tid.get("client_id") or "").strip() or get_db_client_id()).strip()
@@ -6385,7 +7254,9 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
             data["staff"] = [
                 {
                     **s,
-                    "service_ids": [x for x in (s.get("service_ids") or []) if x in valid_svc],
+                    "service_ids": [
+                        x for x in (s.get("service_ids") or []) if x in valid_svc
+                    ],
                 }
                 for s in data["staff"]
             ]
@@ -6411,7 +7282,10 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         if not (USE_DB and tid and tid.get("business_vertical")):
             data["business_type"] = update.business_type
     if update.staff is not None:
-        from staff_transfers import STAFF_ROSTER_MAX, prune_transfer_targets_for_removed_staff
+        from staff_transfers import (
+            STAFF_ROSTER_MAX,
+            prune_transfer_targets_for_removed_staff,
+        )
 
         new_staff = finalize_staff_records_for_storage(
             update.staff,
@@ -6431,7 +7305,10 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
                 list(data["transfer_targets"]), removed_ids
             )
     if update.transfer_targets is not None:
-        from staff_transfers import TransferTarget, finalize_transfer_targets_for_storage
+        from staff_transfers import (
+            TransferTarget,
+            finalize_transfer_targets_for_storage,
+        )
 
         tenant_limits = db_tenant_get_by_client_id(cid) or tid
         transfer_max = 1
@@ -6451,7 +7328,9 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     save_raw_client_config(cid, data)
     if voice_affecting:
         invalidate_voice_cache(cid)
-        create_tracked_task(_warm_client_voice_cache_async(cid), name=f"warm_voice_cache:{cid}")
+        create_tracked_task(
+            _warm_client_voice_cache_async(cid), name=f"warm_voice_cache:{cid}"
+        )
     if _greeting_debug_enabled():
         voice_info(
             "greeting_settings_saved",
@@ -6473,8 +7352,12 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
         client_id=cid,
         details={
             "fields": changed_fields,
-            "before_sha256": _stable_sha256(json.dumps(before_subset, sort_keys=True, default=str)),
-            "after_sha256": _stable_sha256(json.dumps(after_subset, sort_keys=True, default=str)),
+            "before_sha256": _stable_sha256(
+                json.dumps(before_subset, sort_keys=True, default=str)
+            ),
+            "after_sha256": _stable_sha256(
+                json.dumps(after_subset, sort_keys=True, default=str)
+            ),
         },
         request=request,
     )
@@ -6484,6 +7367,7 @@ async def api_update_business_info(update: BusinessInfoUpdate, request: Request,
     resp_tenant.setdefault("twilio_phone_number", tid.get("twilio_phone_number") or "")
     return business_info_for_dashboard(resp_tenant)
 
+
 @app.get("/api/stats")
 async def get_stats(_: None = Depends(require_active_subscription)):
     apts = db_appointments_get_all() if USE_DB else appointments
@@ -6492,8 +7376,9 @@ async def get_stats(_: None = Depends(require_active_subscription)):
     return {
         "total_appointments": len(apts),
         "total_messages": len(msgs),
-        "pending_appointments": pending
+        "pending_appointments": pending,
     }
+
 
 def _load_call_log(days: Optional[int] = None) -> List[dict]:
     """Load call log. If days set, filter by plan (DB only). Returns list of call entries (newest first)."""
@@ -6510,6 +7395,7 @@ def _load_call_log(days: Optional[int] = None) -> List[dict]:
             return json.load(f)
     except Exception:
         return []
+
 
 def _call_log_days(tenant: Optional[dict]) -> int:
     """Return call log retention days for plan."""
@@ -6576,22 +7462,34 @@ async def get_analytics_health(
         "forward_rate": round(forwarded / total, 3),
         "error_rate": round(errors / total, 3),
         "missed_rate": round(missed / total, 3),
-        "booking_completion_rate": round(booking_signals / total, 3) if booking_signals else round(answered / total, 3),
-        "avg_duration_sec": round(sum(durations) / len(durations), 1) if durations else 0,
+        "booking_completion_rate": (
+            round(booking_signals / total, 3)
+            if booking_signals
+            else round(answered / total, 3)
+        ),
+        "avg_duration_sec": (
+            round(sum(durations) / len(durations), 1) if durations else 0
+        ),
         "by_outcome": by_outcome,
     }
 
 
 @app.get("/api/analytics/summary")
-async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+async def get_analytics_summary(
+    tenant: Optional[dict] = Depends(require_tenant),
+    _: None = Depends(require_active_subscription),
+):
     """Pro: Peak call times, outcomes, total calls. Filtered by plan (call_log_days).
-    by_day_of_week counts only the current ISO week (UTC); full history stays in DB/export."""
+    by_day_of_week counts only the current ISO week (UTC); full history stays in DB/export.
+    """
     days = _call_log_days(tenant)
     log = _load_call_log(days=days)
     week_start, week_end_excl = _analytics_iso_week_bounds_utc()
     week_period = {
         "by_day_of_week_period_start": week_start.date().isoformat(),
-        "by_day_of_week_period_end": (week_end_excl - timedelta(days=1)).date().isoformat(),
+        "by_day_of_week_period_end": (week_end_excl - timedelta(days=1))
+        .date()
+        .isoformat(),
         "by_day_of_week_timezone": "UTC",
     }
     if not log:
@@ -6630,8 +7528,14 @@ async def get_analytics_summary(tenant: Optional[dict] = Depends(require_tenant)
         **week_period,
     }
 
+
 @app.get("/api/analytics/calls")
-async def get_analytics_calls(limit: int = 50, outcome: Optional[str] = None, tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+async def get_analytics_calls(
+    limit: int = 50,
+    outcome: Optional[str] = None,
+    tenant: Optional[dict] = Depends(require_tenant),
+    _: None = Depends(require_active_subscription),
+):
     """Pro: Recent calls for dashboard. Filtered by plan (call_log_days). Optional filter by outcome."""
     days = _call_log_days(tenant)
     log = _load_call_log(days=days)
@@ -6639,36 +7543,62 @@ async def get_analytics_calls(limit: int = 50, outcome: Optional[str] = None, te
         log = [e for e in log if (e.get("outcome") or "") == outcome]
     return {"calls": log[:limit], "client_id": get_db_client_id() or None}
 
+
 @app.get("/api/analytics/export")
-async def get_analytics_export(tenant: Optional[dict] = Depends(require_tenant), _: None = Depends(require_active_subscription)):
+async def get_analytics_export(
+    tenant: Optional[dict] = Depends(require_tenant),
+    _: None = Depends(require_active_subscription),
+):
     """Export call log as CSV. Growth/Pro only."""
-    if not tenant or not get_plan_limits or not get_plan_limits(tenant).get("has_export"):
-        raise HTTPException(status_code=403, detail="Export is available on Growth and Pro plans")
+    if (
+        not tenant
+        or not get_plan_limits
+        or not get_plan_limits(tenant).get("has_export")
+    ):
+        raise HTTPException(
+            status_code=403, detail="Export is available on Growth and Pro plans"
+        )
     days = _call_log_days(tenant)
     log = _load_call_log(days=days)
     import csv
+
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow([
-        "call_sid", "from_number", "to_number", "start_iso", "end_iso", "outcome", "duration_sec", "category", "created_at",
-        "recording_sid", "recording_duration_sec", "recording_status", "call_summary",
-    ])
+    writer.writerow(
+        [
+            "call_sid",
+            "from_number",
+            "to_number",
+            "start_iso",
+            "end_iso",
+            "outcome",
+            "duration_sec",
+            "category",
+            "created_at",
+            "recording_sid",
+            "recording_duration_sec",
+            "recording_status",
+            "call_summary",
+        ]
+    )
     for e in log:
-        writer.writerow([
-            e.get("call_sid", ""),
-            e.get("from_number", ""),
-            e.get("to_number", ""),
-            e.get("start_iso", ""),
-            e.get("end_iso", ""),
-            e.get("outcome", ""),
-            e.get("duration_sec", ""),
-            e.get("category", ""),
-            e.get("created_at", ""),
-            e.get("recording_sid", ""),
-            e.get("recording_duration_sec", ""),
-            e.get("recording_status", ""),
-            e.get("call_summary", ""),
-        ])
+        writer.writerow(
+            [
+                e.get("call_sid", ""),
+                e.get("from_number", ""),
+                e.get("to_number", ""),
+                e.get("start_iso", ""),
+                e.get("end_iso", ""),
+                e.get("outcome", ""),
+                e.get("duration_sec", ""),
+                e.get("category", ""),
+                e.get("created_at", ""),
+                e.get("recording_sid", ""),
+                e.get("recording_duration_sec", ""),
+                e.get("recording_status", ""),
+                e.get("call_summary", ""),
+            ]
+        )
     return Response(
         content=buf.getvalue(),
         media_type="text/csv",
@@ -6678,6 +7608,7 @@ async def get_analytics_export(tenant: Optional[dict] = Depends(require_tenant),
 
 def _fetch_twilio_recording_bytes(recording_url: str) -> tuple:
     import httpx
+
     r = httpx.get(
         recording_url,
         auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
@@ -6698,11 +7629,15 @@ async def get_call_recording_audio(
     if not _call_recording_enabled_for_tenant(tenant):
         raise HTTPException(status_code=404, detail="Recording not available")
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        raise HTTPException(status_code=503, detail="Recording playback is not configured")
+        raise HTTPException(
+            status_code=503, detail="Recording playback is not configured"
+        )
     row = db_call_log_get_by_call_sid(tenant["client_id"], call_sid)
     if not row or not row.get("recording_url"):
         raise HTTPException(status_code=404, detail="Recording not available")
-    code, data = await asyncio.to_thread(_fetch_twilio_recording_bytes, row["recording_url"])
+    code, data = await asyncio.to_thread(
+        _fetch_twilio_recording_bytes, row["recording_url"]
+    )
     if code != 200:
         raise HTTPException(status_code=502, detail="Could not fetch recording")
     return Response(
@@ -6716,7 +7651,9 @@ async def get_call_recording_audio(
 
 
 @app.post("/api/text-to-speech")
-async def text_to_speech(request: TTSRequest, _: None = Depends(require_active_subscription)):
+async def text_to_speech(
+    request: TTSRequest, _: None = Depends(require_active_subscription)
+):
     """
     Convert text to speech using OpenAI's TTS API.
     Returns audio file as streaming response.
@@ -6730,24 +7667,23 @@ async def text_to_speech(request: TTSRequest, _: None = Depends(require_active_s
             model="tts-1-hd",  # HD model for smooth, natural, human-like quality
             voice=request.voice,
             input=add_sentence_pauses(request.text),
-            speed=tts_speed
+            speed=tts_speed,
         )
-        
+
         # Convert response to bytes
         audio_bytes = io.BytesIO(response.content)
         audio_bytes.seek(0)
-        
+
         # Return as streaming audio
         return StreamingResponse(
             audio_bytes,
             media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": "inline; filename=speech.mp3"
-            }
+            headers={"Content-Disposition": "inline; filename=speech.mp3"},
         )
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # Phone call runtime state (memory or Redis via call_session_store)
 call_store = get_call_session_store()
@@ -6807,19 +7743,26 @@ def _restore_call_context(call_sid: str) -> bool:
         return True
     return False
 
+
 # Fallback when OpenAI/TTS fails - play this so caller does not get dead air
-TTS_FALLBACK_TEXT = "We're experiencing a brief technical issue. Please try again in a moment."
+TTS_FALLBACK_TEXT = (
+    "We're experiencing a brief technical issue. Please try again in a moment."
+)
 
 
 def _get_client_id_from_call(request: Request) -> Optional[str]:
     """Resolve client_id from call_sid query param (call session)."""
     call_sid = request.query_params.get("call_sid")
     if call_sid and call_store.exists(call_sid):
-        return str((call_store.get(call_sid) or {}).get("client_id") or "").strip() or None
+        return (
+            str((call_store.get(call_sid) or {}).get("client_id") or "").strip() or None
+        )
     return None
 
 
-def _summarize_call_recording_sync(call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]) -> None:
+def _summarize_call_recording_sync(
+    call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]
+) -> None:
     """Download Twilio recording, Whisper transcribe, short GPT summary; persist call_summary."""
     if not recording_url or not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         return
@@ -6828,16 +7771,25 @@ def _summarize_call_recording_sync(call_sid: str, client_id: str, recording_url:
     except ValueError:
         cap = 1800
     if duration_sec is not None and duration_sec > cap:
-        logger.info("[Recording] Skip summary (duration %s sec > cap %s)", duration_sec, cap)
+        logger.info(
+            "[Recording] Skip summary (duration %s sec > cap %s)", duration_sec, cap
+        )
         return
     if (os.getenv("TWILIO_INTELLIGENCE_SERVICE_SID") or "").strip():
-        logger.info("[Recording] TWILIO_INTELLIGENCE_SERVICE_SID is set; Phase 1 still uses OpenAI Whisper+GPT")
+        logger.info(
+            "[Recording] TWILIO_INTELLIGENCE_SERVICE_SID is set; Phase 1 still uses OpenAI Whisper+GPT"
+        )
     try:
         import httpx
+
         with httpx.Client(timeout=120.0) as http:
             r = http.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
         if r.status_code != 200:
-            logger.error("[Recording] Download failed status=%s call_sid=%s", r.status_code, call_sid)
+            logger.error(
+                "[Recording] Download failed status=%s call_sid=%s",
+                r.status_code,
+                call_sid,
+            )
             return
         audio_data = r.content
         _ensure_openai_client()
@@ -6872,9 +7824,17 @@ def _summarize_call_recording_sync(call_sid: str, client_id: str, recording_url:
         logger.exception("[Recording] Summarize failed call_sid=%s", call_sid)
 
 
-async def _schedule_recording_summary(call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]) -> None:
+async def _schedule_recording_summary(
+    call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]
+) -> None:
     try:
-        await asyncio.to_thread(_summarize_call_recording_sync, call_sid, client_id, recording_url, duration_sec)
+        await asyncio.to_thread(
+            _summarize_call_recording_sync,
+            call_sid,
+            client_id,
+            recording_url,
+            duration_sec,
+        )
     except Exception:
         logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
 
@@ -6912,7 +7872,12 @@ async def get_greeting_audio(request: Request):
     tenant = _tenant_for_call_recording()
     preview_payload = build_phone_greeting_payload(info, tenant)
     if cached:
-        _log_greeting_debug("greeting_audio_cache_hit", preview_payload, call_sid=call_sid, cache_hit=True)
+        _log_greeting_debug(
+            "greeting_audio_cache_hit",
+            preview_payload,
+            call_sid=call_sid,
+            cache_hit=True,
+        )
         return Response(
             content=cached,
             media_type="audio/mpeg",
@@ -6924,8 +7889,15 @@ async def get_greeting_audio(request: Request):
         )
     try:
         voice = get_tts_voice()
-        _log_greeting_debug("greeting_audio_generating", preview_payload, call_sid=call_sid, cache_hit=False)
-        data = _synthesize_tts_clip(preview_payload["spoken_text"], voice=voice, speed=get_tts_speed())
+        _log_greeting_debug(
+            "greeting_audio_generating",
+            preview_payload,
+            call_sid=call_sid,
+            cache_hit=False,
+        )
+        data = _synthesize_tts_clip(
+            preview_payload["spoken_text"], voice=voice, speed=get_tts_speed()
+        )
         put_cached(PROJECT_ROOT, "greeting", cache_key, data)
         voice_info(
             "greeting_audio_generated",
@@ -6946,14 +7918,22 @@ async def get_greeting_audio(request: Request):
     except Exception as e:
         print(f"❌ Failed to generate greeting audio: {e}")
         import traceback
+
         traceback.print_exc()
         try:
             data = _synthesize_tts_clip(TTS_FALLBACK_TEXT, voice="fable", speed=1.0)
             put_cached(PROJECT_ROOT, "greeting", cache_key, data)
-            return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
+            return Response(
+                content=data,
+                media_type="audio/mpeg",
+                headers={"Content-Length": str(len(data))},
+            )
         except Exception as e2:
             print(f"❌ Fallback greeting audio failed: {e2}")
-            raise HTTPException(status_code=500, detail=f"Failed to generate greeting: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to generate greeting: {e}"
+            )
+
 
 @app.get("/api/phone/got-it-audio")
 async def get_got_it_audio(request: Request):
@@ -6999,14 +7979,21 @@ async def get_got_it_audio(request: Request):
     except Exception as e:
         print(f"❌ Failed to generate 'got it' audio: {e}")
         import traceback
+
         traceback.print_exc()
         try:
             data = _synthesize_tts_clip(TTS_FALLBACK_TEXT, voice="fable", speed=1.0)
             put_cached(PROJECT_ROOT, "got_it", cache_key, data)
-            return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
+            return Response(
+                content=data,
+                media_type="audio/mpeg",
+                headers={"Content-Length": str(len(data))},
+            )
         except Exception as e2:
             print(f"❌ Fallback 'got it' audio failed: {e2}")
-            raise HTTPException(status_code=500, detail=f"Failed to generate 'got it' audio: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to generate 'got it' audio: {e}"
+            )
 
 
 @app.get("/api/phone/one-moment-audio")
@@ -7055,10 +8042,16 @@ async def get_one_moment_audio(request: Request):
         try:
             data = _synthesize_tts_clip(TTS_FALLBACK_TEXT, voice="fable", speed=1.0)
             put_cached(PROJECT_ROOT, "one_moment", cache_key, data)
-            return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
+            return Response(
+                content=data,
+                media_type="audio/mpeg",
+                headers={"Content-Length": str(len(data))},
+            )
         except Exception as e2:
             logger.exception("one_moment_audio_fallback_failed: %s", e2)
-            raise HTTPException(status_code=500, detail=f"Failed to generate 'one moment' audio: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to generate 'one moment' audio: {e}"
+            )
 
 
 @app.post("/api/sms/incoming")
@@ -7068,11 +8061,17 @@ async def handle_incoming_sms(request: Request):
     if not TWILIO_AVAILABLE:
         sms_debug("inbound_skipped", reason="twilio_not_available")
         sms_trace("inbound_early_exit", reason="twilio_not_available", request_id=rid)
-        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            media_type="application/xml",
+        )
     if not USE_DB:
         sms_debug("inbound_skipped", reason="database_not_enabled")
         sms_trace("inbound_early_exit", reason="database_not_enabled", request_id=rid)
-        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            media_type="application/xml",
+        )
     try:
         form_data = await request.form()
         form_dict = dict(form_data)
@@ -7086,7 +8085,9 @@ async def handle_incoming_sms(request: Request):
             from_number=str(form_dict.get("From") or ""),
             to_number=str(form_dict.get("To") or ""),
             body_len=len(str(form_dict.get("Body") or "")),
-            message_sid=str(form_dict.get("MessageSid") or form_dict.get("SmsMessageSid") or ""),
+            message_sid=str(
+                form_dict.get("MessageSid") or form_dict.get("SmsMessageSid") or ""
+            ),
             num_media=str(form_dict.get("NumMedia") or ""),
         )
         if not _validate_twilio_webhook(request, form_dict):
@@ -7095,13 +8096,17 @@ async def handle_incoming_sms(request: Request):
                 path=request.url.path,
                 request_id=rid,
             )
-            sms_trace("inbound_signature_invalid", request_id=rid, signature_mode=sig_mode)
+            sms_trace(
+                "inbound_signature_invalid", request_id=rid, signature_mode=sig_mode
+            )
             return Response(content="", status_code=403, media_type="application/xml")
         sms_trace("inbound_signature_ok", request_id=rid, signature_mode=sig_mode)
         from_number = form_data.get("From", "").strip()
         to_number = form_data.get("To", "").strip()
         body = (form_data.get("Body", "") or "").strip()
-        msg_sid = (form_data.get("MessageSid") or form_data.get("SmsMessageSid") or "").strip()
+        msg_sid = (
+            form_data.get("MessageSid") or form_data.get("SmsMessageSid") or ""
+        ).strip()
         audit_log(
             "sms",
             "inbound_received",
@@ -7116,7 +8121,9 @@ async def handle_incoming_sms(request: Request):
             request=request,
         )
         if not from_number or not to_number or not body:
-            sms_info("inbound_skipped", reason="missing_fields", message_sid=msg_sid or None)
+            sms_info(
+                "inbound_skipped", reason="missing_fields", message_sid=msg_sid or None
+            )
             sms_trace(
                 "inbound_early_exit",
                 reason="missing_fields",
@@ -7126,10 +8133,18 @@ async def handle_incoming_sms(request: Request):
                 has_body=bool(body),
                 message_sid=msg_sid or None,
             )
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
         tenant = db_tenant_get_by_phone(to_number)
         if not tenant:
-            sms_info("inbound_skipped", reason="unknown_to_number", to_number=to_number, message_sid=msg_sid or None)
+            sms_info(
+                "inbound_skipped",
+                reason="unknown_to_number",
+                to_number=to_number,
+                message_sid=msg_sid or None,
+            )
             sms_trace(
                 "inbound_tenant_not_found",
                 request_id=rid,
@@ -7137,7 +8152,10 @@ async def handle_incoming_sms(request: Request):
                 message_sid=msg_sid or None,
                 hint="ensure_twilio_to_matches_tenant_twilio_phone_number",
             )
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
         set_request_client_id(tenant["client_id"])
         sms_info(
             "inbound_received",
@@ -7188,8 +8206,13 @@ async def handle_incoming_sms(request: Request):
                     from_override=to_number,
                     force=True,
                 )
-            sms_trace("inbound_compliance_handled", request_id=rid, keyword=kw, client_id=cid)
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+            sms_trace(
+                "inbound_compliance_handled", request_id=rid, keyword=kw, client_id=cid
+            )
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
         if USE_DB and db_sms_opt_out_is_blocked(from_number, tenant["client_id"]):
             sms_info(
                 "inbound_blocked_opt_out",
@@ -7202,12 +8225,27 @@ async def handle_incoming_sms(request: Request):
                 request_id=rid,
                 client_id=tenant["client_id"],
             )
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
-        staff_handled = _maybe_handle_staff_sms_approval(from_number, body, tenant, to_number)
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
+        staff_handled = _maybe_handle_staff_sms_approval(
+            from_number, body, tenant, to_number
+        )
         if staff_handled:
-            sms_trace("inbound_staff_command_handled", request_id=rid, client_id=tenant["client_id"])
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
-        from webhook_responses import SMS_SUBSCRIPTION_LAPSED_MESSAGE, check_webhook_tenant_access
+            sms_trace(
+                "inbound_staff_command_handled",
+                request_id=rid,
+                client_id=tenant["client_id"],
+            )
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
+        from webhook_responses import (
+            SMS_SUBSCRIPTION_LAPSED_MESSAGE,
+            check_webhook_tenant_access,
+        )
 
         if not check_webhook_tenant_access(tenant, channel="sms", request_id=rid):
             send_sms(
@@ -7239,11 +8277,19 @@ async def handle_incoming_sms(request: Request):
                 at_or_over_cap=total >= cap,
             )
             if total >= cap:
-                audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": cap}, request=request)
+                audit_log(
+                    "usage",
+                    "overage_exceeded",
+                    client_id=tenant["client_id"],
+                    details={"month": month, "total": total, "cap": cap},
+                    request=request,
+                )
         apt = None
         resolve_via = "none"
         if USE_DB:
-            apt, resolve_via = db_appointments_resolve_for_sms(from_number, tenant["client_id"])
+            apt, resolve_via = db_appointments_resolve_for_sms(
+                from_number, tenant["client_id"]
+            )
         sms_info(
             "inbound_appointment_resolve",
             client_id=tenant["client_id"],
@@ -7274,14 +8320,29 @@ async def handle_incoming_sms(request: Request):
                 body_len=len(body),
                 looks_like_confirm=_is_sms_confirmation(body),
             )
-            sms_debug("inbound_no_pending_appointment", body_len=len(body), from_number=from_number)
-            sms_trace("inbound_no_appointment_for_number", request_id=rid, body_len=len(body))
-        session = db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
+            sms_debug(
+                "inbound_no_pending_appointment",
+                body_len=len(body),
+                from_number=from_number,
+            )
+            sms_trace(
+                "inbound_no_appointment_for_number", request_id=rid, body_len=len(body)
+            )
+        session = (
+            db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
+        )
         messages = (session["messages"] if session else []) if session else []
         prior_turns = len(messages)
         # Persist name/email from this text and recent inbound SMS (e.g. "my name is Raj" then "Yes")
-        if apt and apt.get("status") in ("pending_customer", "pending_review", "accepted") and USE_DB and apt.get("id"):
-            from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
+        if (
+            apt
+            and apt.get("status") in ("pending_customer", "pending_review", "accepted")
+            and USE_DB
+            and apt.get("id")
+        ):
+            from sms_appointment_updates import (
+                apply_sms_appointment_detail_updates_from_bodies,
+            )
 
             prior_user_bodies = [
                 (m.get("content") or "")
@@ -7295,17 +8356,21 @@ async def handle_incoming_sms(request: Request):
                 prior_user_turns=len(prior_user_bodies),
                 current_body_len=len(body or ""),
             )
-            apt, detail_fields_updated = apply_sms_appointment_detail_updates_from_bodies(
-                prior_user_bodies + [body],
-                apt,
-                client_id=tenant["client_id"],
-                from_number=from_number,
-                db_appointments_update=db_appointments_update,
-                db_appointments_get_by_id=db_appointments_get_by_id,
-                update_caller_memory=update_caller_memory,
-                db_appointments_update_active_name_by_phone=db_appointments_update_active_name_by_phone if USE_DB else None,
-                system_info=system_info,
-                logger=logger,
+            apt, detail_fields_updated = (
+                apply_sms_appointment_detail_updates_from_bodies(
+                    prior_user_bodies + [body],
+                    apt,
+                    client_id=tenant["client_id"],
+                    from_number=from_number,
+                    db_appointments_update=db_appointments_update,
+                    db_appointments_get_by_id=db_appointments_get_by_id,
+                    update_caller_memory=update_caller_memory,
+                    db_appointments_update_active_name_by_phone=(
+                        db_appointments_update_active_name_by_phone if USE_DB else None
+                    ),
+                    system_info=system_info,
+                    logger=logger,
+                )
             )
         else:
             detail_fields_updated = []
@@ -7321,7 +8386,8 @@ async def handle_incoming_sms(request: Request):
             apt
             and detail_fields_updated
             and not _is_sms_confirmation(body)
-            and (apt.get("status") or "") in ("pending_customer", "pending_review", "accepted")
+            and (apt.get("status") or "")
+            in ("pending_customer", "pending_review", "accepted")
         ):
             summary_sms = _format_appointment_details_confirmation_sms(apt)
             send_ok = send_sms(from_number, summary_sms, from_override=to_number)
@@ -7335,7 +8401,9 @@ async def handle_incoming_sms(request: Request):
             )
             messages.append({"role": "assistant", "content": summary_sms})
             try:
-                db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+                db_sms_session_upsert(
+                    from_number, tenant["client_id"], messages, apt["id"]
+                )
             except Exception as upsert_err:
                 sms_info(
                     "inbound_session_persist_failed",
@@ -7344,13 +8412,21 @@ async def handle_incoming_sms(request: Request):
                     error_type=type(upsert_err).__name__,
                     phase="detail_summary_reply",
                 )
-                logger.warning("db_sms_session_upsert failed (detail summary): %s", upsert_err, exc_info=True)
+                logger.warning(
+                    "db_sms_session_upsert failed (detail summary): %s",
+                    upsert_err,
+                    exc_info=True,
+                )
             return Response(
                 content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 media_type="application/xml",
             )
         # If they have an appointment awaiting their confirmation (pending_customer) and they reply yes/looks good, promote to pending_review so store can Accept/Decline
-        if apt and apt.get("status") == "pending_customer" and _is_sms_confirmation(body):
+        if (
+            apt
+            and apt.get("status") == "pending_customer"
+            and _is_sms_confirmation(body)
+        ):
             sms_trace(
                 "inbound_customer_confirm_branch",
                 request_id=rid,
@@ -7376,10 +8452,14 @@ async def handle_incoming_sms(request: Request):
                     date=date,
                     time_raw=time_raw,
                     time_normalized=time_hhmm,
-                    time_was_normalized=bool(time_raw and time_hhmm and time_raw != time_hhmm),
+                    time_was_normalized=bool(
+                        time_raw and time_hhmm and time_raw != time_hhmm
+                    ),
                 )
                 staff_for = (apt_full.get("staff_id") or "").strip() or None
-                if not is_slot_available(date, time_hhmm, DEFAULT_SLOT_DURATION_MINUTES, staff_for):
+                if not is_slot_available(
+                    date, time_hhmm, DEFAULT_SLOT_DURATION_MINUTES, staff_for
+                ):
                     sorry = (
                         "Sorry — that time was just taken and we can't hold it anymore. "
                         "Text us another time that works or call the shop. Msg & data rates may apply. Reply STOP to opt out."
@@ -7393,7 +8473,9 @@ async def handle_incoming_sms(request: Request):
                     )
                     messages.append({"role": "assistant", "content": sorry})
                     try:
-                        db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+                        db_sms_session_upsert(
+                            from_number, tenant["client_id"], messages, apt["id"]
+                        )
                     except Exception as upsert_err:
                         sms_info(
                             "inbound_session_persist_failed",
@@ -7402,13 +8484,25 @@ async def handle_incoming_sms(request: Request):
                             error_type=type(upsert_err).__name__,
                             phase="pending_customer_confirm_slot_taken",
                         )
-                        logger.warning("db_sms_session_upsert failed (slot taken path): %s", upsert_err, exc_info=True)
-                    return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
-                reserve_slot(date, time_hhmm, aid, DEFAULT_SLOT_DURATION_MINUTES, staff_for)
+                        logger.warning(
+                            "db_sms_session_upsert failed (slot taken path): %s",
+                            upsert_err,
+                            exc_info=True,
+                        )
+                    return Response(
+                        content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                        media_type="application/xml",
+                    )
+                reserve_slot(
+                    date, time_hhmm, aid, DEFAULT_SLOT_DURATION_MINUTES, staff_for
+                )
                 db_appointments_update(
                     aid, status="pending_review", client_id=tenant["client_id"]
                 )
-                apt_after = db_appointments_get_by_id(aid, client_id=tenant["client_id"]) or apt_full
+                apt_after = (
+                    db_appointments_get_by_id(aid, client_id=tenant["client_id"])
+                    or apt_full
+                )
             try:
                 em_conf = (apt_after.get("email") or "").strip()
                 mem_patch: dict = {"last_pending_review_apt_id": apt.get("id")}
@@ -7433,7 +8527,8 @@ async def handle_incoming_sms(request: Request):
                 from_number=from_number,
                 name_initial=name_initial_for_log(apt_after.get("name")),
                 email_hint=email_hint_for_log(apt_after.get("email")),
-                time_normalized=_normalize_time_to_hhmm(apt_after.get("time") or "") or (apt_after.get("time") or ""),
+                time_normalized=_normalize_time_to_hhmm(apt_after.get("time") or "")
+                or (apt_after.get("time") or ""),
                 date=apt_after.get("date") or "",
             )
             reply = (
@@ -7449,7 +8544,9 @@ async def handle_incoming_sms(request: Request):
             )
             messages.append({"role": "assistant", "content": reply})
             try:
-                db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"])
+                db_sms_session_upsert(
+                    from_number, tenant["client_id"], messages, apt["id"]
+                )
             except Exception as upsert_err:
                 sms_info(
                     "inbound_session_persist_failed",
@@ -7458,8 +8555,15 @@ async def handle_incoming_sms(request: Request):
                     error_type=type(upsert_err).__name__,
                     phase="pending_customer_confirm",
                 )
-                logger.warning("db_sms_session_upsert failed (pending_customer path): %s", upsert_err, exc_info=True)
-            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+                logger.warning(
+                    "db_sms_session_upsert failed (pending_customer path): %s",
+                    upsert_err,
+                    exc_info=True,
+                )
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml",
+            )
         from conversational_sms import (
             conversational_sms_cap_fallback_body,
             reserve_conversational_sms_session,
@@ -7488,7 +8592,11 @@ async def handle_incoming_sms(request: Request):
                     from_number, client_id=tenant["client_id"], limit=5
                 )
             except Exception as context_err:
-                logger.warning("db_appointments_get_active_for_sms_context failed: %s", context_err, exc_info=True)
+                logger.warning(
+                    "db_appointments_get_active_for_sms_context failed: %s",
+                    context_err,
+                    exc_info=True,
+                )
         apt_info = ""
         if sms_context_apts:
             lines = []
@@ -7524,7 +8632,9 @@ async def handle_incoming_sms(request: Request):
                 "to the business for approval (you cannot approve it yourself)."
             )
         business_name = get_business_info().get("name", "us")
-        history_str = "\n".join([f"{m['role']}: {m['content']}" for m in messages[-10:]])
+        history_str = "\n".join(
+            [f"{m['role']}: {m['content']}" for m in messages[-10:]]
+        )
         sys_prompt = f"""You're the friendly text receptionist for {business_name}. Keep replies short (1-3 sentences), casual, like texting a friend.
 
 {apt_info}{pending_customer_note}
@@ -7562,7 +8672,10 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
             try:
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": body}],
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": body},
+                    ],
                     temperature=0.8,
                     max_tokens=150,
                 )
@@ -7583,7 +8696,9 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                     error_type=type(ai_err).__name__,
                     error=str(ai_err)[:400],
                 )
-                logger.warning("SMS OpenAI completion failed: %s", ai_err, exc_info=True)
+                logger.warning(
+                    "SMS OpenAI completion failed: %s", ai_err, exc_info=True
+                )
                 reply = ""
         if not reply:
             sms_info(
@@ -7605,7 +8720,9 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
             sms_trace(
                 "inbound_ai_fallback_reply_used",
                 request_id=rid,
-                pending_customer=bool(apt and str(apt.get("status") or "") == "pending_customer"),
+                pending_customer=bool(
+                    apt and str(apt.get("status") or "") == "pending_customer"
+                ),
             )
         send_ok = False
         if reply:
@@ -7618,7 +8735,9 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
             )
         messages.append({"role": "assistant", "content": reply})
         try:
-            db_sms_session_upsert(from_number, tenant["client_id"], messages, apt["id"] if apt else None)
+            db_sms_session_upsert(
+                from_number, tenant["client_id"], messages, apt["id"] if apt else None
+            )
             sms_trace(
                 "inbound_session_persist_ok",
                 request_id=rid,
@@ -7633,14 +8752,33 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                 error_type=type(upsert_err).__name__,
                 phase="ai_reply_path",
             )
-            logger.warning("db_sms_session_upsert failed (AI path): %s", upsert_err, exc_info=True)
+            logger.warning(
+                "db_sms_session_upsert failed (AI path): %s", upsert_err, exc_info=True
+            )
         # Lead capture: when no pending appointment and plan allows, treat as inquiry
-        if not apt and get_plan_limits and get_plan_limits(tenant).get("has_lead_capture"):
+        if (
+            not apt
+            and get_plan_limits
+            and get_plan_limits(tenant).get("has_lead_capture")
+        ):
             body_lower = (body or "").lower().strip()
-            if len(body_lower) > 5 and body_lower not in ("yes", "no", "ok", "nope", "sure", "thanks"):
+            if len(body_lower) > 5 and body_lower not in (
+                "yes",
+                "no",
+                "ok",
+                "nope",
+                "sure",
+                "thanks",
+            ):
                 lead_inserted = False
                 try:
-                    db_leads_insert(tenant["client_id"], None, from_number, body[:500] if body else "inquiry", "sms")
+                    db_leads_insert(
+                        tenant["client_id"],
+                        None,
+                        from_number,
+                        body[:500] if body else "inquiry",
+                        "sms",
+                    )
                     lead_inserted = True
                 except Exception as lead_err:
                     sms_info(
@@ -7649,7 +8787,9 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                         client_id=tenant["client_id"],
                         error_type=type(lead_err).__name__,
                     )
-                    logger.warning("db_leads_insert SMS failed: %s", lead_err, exc_info=True)
+                    logger.warning(
+                        "db_leads_insert SMS failed: %s", lead_err, exc_info=True
+                    )
                 sms_trace(
                     "inbound_lead_capture",
                     request_id=rid,
@@ -7658,7 +8798,9 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                 )
                 # SMS automation: after_inquiry - send template to customer
                 if USE_DB:
-                    automations = db_sms_automations_get_by_trigger(tenant["client_id"], "after_inquiry")
+                    automations = db_sms_automations_get_by_trigger(
+                        tenant["client_id"], "after_inquiry"
+                    )
                     sms_trace(
                         "inbound_after_inquiry_automations",
                         request_id=rid,
@@ -7675,8 +8817,14 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                             )
                             continue
                         cfg = load_client_config(tenant["client_id"])
-                        business_name = (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
-                        msg = template.replace("{business_name}", business_name).replace("{name}", business_name)
+                        business_name = (
+                            (cfg.get("business_name") or cfg.get("name") or "us")
+                            if cfg
+                            else "us"
+                        )
+                        msg = template.replace(
+                            "{business_name}", business_name
+                        ).replace("{name}", business_name)
                         try:
                             set_request_client_id(tenant["client_id"])
                             send_sms(from_number, msg[:1600], from_override=to_number)
@@ -7693,9 +8841,18 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                                 automation_id=str(auto.get("id") or ""),
                                 error_type=type(auto_err).__name__,
                             )
-                            logger.warning("after_inquiry automation send failed: %s", auto_err, exc_info=True)
-        sms_trace("inbound_pipeline_done", request_id=rid, client_id=tenant["client_id"])
-        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+                            logger.warning(
+                                "after_inquiry automation send failed: %s",
+                                auto_err,
+                                exc_info=True,
+                            )
+        sms_trace(
+            "inbound_pipeline_done", request_id=rid, client_id=tenant["client_id"]
+        )
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            media_type="application/xml",
+        )
     except Exception as e:
         sms_info(
             "inbound_webhook_unhandled_exception",
@@ -7704,13 +8861,19 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
             request_id=rid,
         )
         logger.exception("SMS webhook error: %s", e)
-        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            media_type="application/xml",
+        )
 
 
 @app.post("/api/phone/incoming")
 async def handle_incoming_call(request: Request):
     if not TWILIO_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Twilio not installed. Install with: pip install twilio")
+        raise HTTPException(
+            status_code=503,
+            detail="Twilio not installed. Install with: pip install twilio",
+        )
     """
     Twilio webhook for incoming phone calls.
     This endpoint is called when someone calls your Twilio phone number.
@@ -7733,7 +8896,7 @@ async def handle_incoming_call(request: Request):
         call_sid = form_data.get("CallSid")
         from_number = form_data.get("From")
         to_number = form_data.get("To")
-        
+
         voice_info(
             "incoming_call",
             call_sid=call_sid,
@@ -7746,7 +8909,9 @@ async def handle_incoming_call(request: Request):
         tenant_for_access = tenant
         if tenant:
             set_request_client_id(tenant["client_id"])
-            if (tenant.get("twilio_phone_number") or "").strip() == (to_number or "").strip():
+            if (tenant.get("twilio_phone_number") or "").strip() == (
+                to_number or ""
+            ).strip():
                 voice_info(
                     "tenant_resolved_by_to_number",
                     client_id=tenant["client_id"],
@@ -7755,7 +8920,10 @@ async def handle_incoming_call(request: Request):
                 )
         else:
             voice_info("tenant_not_resolved", to_number=to_number)
-        from webhook_responses import check_webhook_tenant_access, subscription_denied_voice_twiml
+        from webhook_responses import (
+            check_webhook_tenant_access,
+            subscription_denied_voice_twiml,
+        )
 
         if not check_webhook_tenant_access(
             tenant_for_access,
@@ -7774,22 +8942,38 @@ async def handle_incoming_call(request: Request):
             usage = db_usage_get(tenant["client_id"], month)
             total = (usage.get("voice_minutes") or 0) + (usage.get("sms_count") or 0)
             if total >= limits.get("minutes_cap", 999999):
-                audit_log("usage", "overage_exceeded", client_id=tenant["client_id"], details={"month": month, "total": total, "cap": limits.get("minutes_cap")}, request=request)
-        
+                audit_log(
+                    "usage",
+                    "overage_exceeded",
+                    client_id=tenant["client_id"],
+                    details={
+                        "month": month,
+                        "total": total,
+                        "cap": limits.get("minutes_cap"),
+                    },
+                    request=request,
+                )
+
         # Pro: call log start + customer memory for repeat callers
         call_log_start(call_sid, from_number, to_number)
         client_id = (tenant or {}).get("client_id") or ""
         if not client_id:
             if USE_DB:
-                raise HTTPException(status_code=403, detail="Unknown destination number")
+                raise HTTPException(
+                    status_code=403, detail="Unknown destination number"
+                )
             client_id = CLIENT_ID or "default"
         caller_memory = refresh_caller_memory_for_prompt(from_number, client_id)
-        
+
         # Create a new session for this call (store client_id for downstream handlers)
         session_id = f"phone-{call_sid}"
         set_request_client_id(client_id)
-        greeting_plan = build_phone_greeting_payload(get_business_info(), tenant_for_access)
-        _log_greeting_debug("incoming_call_greeting_plan", greeting_plan, call_sid=call_sid or "")
+        greeting_plan = build_phone_greeting_payload(
+            get_business_info(), tenant_for_access
+        )
+        _log_greeting_debug(
+            "incoming_call_greeting_plan", greeting_plan, call_sid=call_sid or ""
+        )
         voice_info(
             "incoming_call_greeting",
             call_sid=call_sid or "",
@@ -7820,7 +9004,7 @@ async def handle_incoming_call(request: Request):
                 _warm_client_voice_cache_async(client_id),
                 name=f"warm_voice_cache:{client_id}",
             )
-        
+
         base_url = _twilio_base_url(request)
         if not base_url:
             logger.error(
@@ -7841,7 +9025,13 @@ async def handle_incoming_call(request: Request):
         biz_info = get_business_info()
         if staff_roster_ready_for_booking(biz_info):
             svc_n = len(_normalize_service_entries(biz_info.get("services") or []))
-            staff_n = len([s for s in (biz_info.get("staff") or []) if (s.get("name") or "").strip()])
+            staff_n = len(
+                [
+                    s
+                    for s in (biz_info.get("staff") or [])
+                    if (s.get("name") or "").strip()
+                ]
+            )
             if staff_n >= 2 and svc_n == 0:
                 voice_info(
                     "booking_config_incomplete",
@@ -7855,18 +9045,28 @@ async def handle_incoming_call(request: Request):
                 "setup_not_ready_forward",
                 call_sid=call_sid or "",
                 client_id=client_id,
-                forward_kind="store_forwarding" if setup_transfers_to_store_after_message(biz_info) else "none",
+                forward_kind=(
+                    "store_forwarding"
+                    if setup_transfers_to_store_after_message(biz_info)
+                    else "none"
+                ),
                 roster_ready=staff_roster_ready_for_booking(biz_info),
                 store_phone_ready=forwarding_phone_ready(biz_info),
                 roster_only_gap=setup_transfers_to_store_after_message(biz_info),
             )
-            setup_twiml = twiml_setup_not_ready_handoff(base_url, biz_info, call_sid=call_sid or "")
+            setup_twiml = twiml_setup_not_ready_handoff(
+                base_url, biz_info, call_sid=call_sid or ""
+            )
             return Response(content=str(setup_twiml), media_type="application/xml")
 
         # Create TwiML response
         response = VoiceResponse()
 
-        if TWILIO_AVAILABLE and VoiceResponse and _call_recording_enabled_for_tenant(tenant_for_access):
+        if (
+            TWILIO_AVAILABLE
+            and VoiceResponse
+            and _call_recording_enabled_for_tenant(tenant_for_access)
+        ):
             cb = f"{base_url.rstrip('/')}/api/phone/recording-complete"
             start = response.start()
             start.recording(
@@ -7889,7 +9089,9 @@ async def handle_incoming_call(request: Request):
         if voice_stt_provider() == "deepgram" and not use_deepgram_stt:
             env_r = deepgram_env_block_reason()
             if env_r:
-                voice_info("deepgram_requested_but_disabled", reason=env_r, call_sid=call_sid)
+                voice_info(
+                    "deepgram_requested_but_disabled", reason=env_r, call_sid=call_sid
+                )
             else:
                 voice_info(
                     "deepgram_requested_but_disabled",
@@ -7912,7 +9114,7 @@ async def handle_incoming_call(request: Request):
             )
 
             response.play(greeting_audio_url)
-            gen = next_media_stream_generation(active_calls[call_sid])
+            gen = next_media_stream_generation(call_sid, active_calls[call_sid])
             append_connect_stream(
                 response,
                 call_sid=call_sid,
@@ -7942,7 +9144,7 @@ async def handle_incoming_call(request: Request):
         )
 
         return Response(content=str(response), media_type="application/xml")
-    
+
     except Exception as e:
         voice_warning(
             "incoming_call_failed",
@@ -7970,7 +9172,9 @@ async def handle_incoming_call(request: Request):
             return Response(content=str(response), media_type="application/xml")
         else:
             # Fallback: just say error message if no forwarding number
-            error_text = "I'm sorry, I'm having technical difficulties. Please try again later."
+            error_text = (
+                "I'm sorry, I'm having technical difficulties. Please try again later."
+            )
             error_encoded = quote(error_text)
             tts_audio_url = f"{base_url}/api/phone/tts-audio?text={error_encoded}&voice={get_tts_voice()}"
             response.play(tts_audio_url)
@@ -7987,7 +9191,9 @@ async def handle_recording_complete(request: Request):
         form_data = await request.form()
         form_dict = dict(form_data)
         if not _validate_twilio_webhook(request, form_dict):
-            return Response(content="Forbidden", status_code=403, media_type="text/plain")
+            return Response(
+                content="Forbidden", status_code=403, media_type="text/plain"
+            )
         call_sid = (form_data.get("CallSid") or "").strip()
         recording_sid = (form_data.get("RecordingSid") or "").strip() or None
         recording_url = (form_data.get("RecordingUrl") or "").strip() or None
@@ -8006,11 +9212,15 @@ async def handle_recording_complete(request: Request):
         if not client_id and USE_DB:
             client_id = db_call_log_get_client_id_by_call_sid(call_sid)
         if not client_id:
-            voice_warning("recording_complete_unresolved_call_sid", call_sid=call_sid or "")
+            voice_warning(
+                "recording_complete_unresolved_call_sid", call_sid=call_sid or ""
+            )
             return Response(content="", status_code=200, media_type="text/plain")
         set_request_client_id(client_id)
 
-        tenant_rec = db_tenant_get_by_client_id(client_id) if USE_DB and client_id else None
+        tenant_rec = (
+            db_tenant_get_by_client_id(client_id) if USE_DB and client_id else None
+        )
         if not _call_recording_enabled_for_tenant(tenant_rec):
             voice_info(
                 "recording_complete_ignored_plan",
@@ -8045,9 +9255,15 @@ async def handle_recording_complete(request: Request):
             )
 
         st = (recording_status or "").lower()
-        if st == "completed" and recording_url and _call_summary_enabled_for_tenant(tenant_rec):
+        if (
+            st == "completed"
+            and recording_url
+            and _call_summary_enabled_for_tenant(tenant_rec)
+        ):
             create_tracked_task(
-                _schedule_recording_summary(call_sid, client_id, recording_url, duration_sec),
+                _schedule_recording_summary(
+                    call_sid, client_id, recording_url, duration_sec
+                ),
                 name=f"recording_summary:{call_sid}",
             )
         return Response(content="", status_code=200, media_type="text/plain")
@@ -8059,14 +9275,19 @@ async def handle_recording_complete(request: Request):
 @app.post("/api/phone/process-speech")
 async def process_speech(request: Request):
     if not TWILIO_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Twilio not installed. Install with: pip install twilio")
+        raise HTTPException(
+            status_code=503,
+            detail="Twilio not installed. Install with: pip install twilio",
+        )
     """
     Process speech input from phone call and generate AI response.
     """
     try:
         form_data = await request.form()
         if not _validate_twilio_webhook(request, dict(form_data)):
-            return Response(content="Forbidden", status_code=403, media_type="text/plain")
+            return Response(
+                content="Forbidden", status_code=403, media_type="text/plain"
+            )
         call_sid = form_data.get("CallSid")
         speech_result = form_data.get("SpeechResult", "")
         confidence = form_data.get("Confidence", "0")
@@ -8090,15 +9311,19 @@ async def process_speech(request: Request):
             base_url,
         )
         if outcome.mode == "replace_call_twiml" and outcome.replacement_twiml:
-            return Response(content=outcome.replacement_twiml, media_type="application/xml")
+            return Response(
+                content=outcome.replacement_twiml, media_type="application/xml"
+            )
 
         response = VoiceResponse()
         got_it_audio_url = f"{base_url}/api/phone/got-it-audio?call_sid={call_sid}"
         response.play(got_it_audio_url)
-        response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+        response.redirect(
+            f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+        )
 
         return Response(content=str(response), media_type="application/xml")
-    
+
     except Exception as e:
         voice_warning(
             "process_speech_failed",
@@ -8106,7 +9331,7 @@ async def process_speech(request: Request):
             error_type=type(e).__name__,
         )
         logger.exception("process_speech_failed")
-        
+
         # On error, offer to forward to a real person
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
@@ -8145,6 +9370,7 @@ async def process_speech(request: Request):
             response.hangup()
             return Response(content=str(response), media_type="application/xml")
 
+
 @app.post("/api/phone/status")
 async def handle_call_status(request: Request):
     """
@@ -8153,17 +9379,19 @@ async def handle_call_status(request: Request):
     try:
         form_data = await request.form()
         if not _validate_twilio_webhook(request, dict(form_data)):
-            return Response(content="Forbidden", status_code=403, media_type="text/plain")
+            return Response(
+                content="Forbidden", status_code=403, media_type="text/plain"
+            )
         call_sid = form_data.get("CallSid")
         call_status = form_data.get("CallStatus")
-        
+
         voice_call_phase(
             "call_status",
             call_sid=call_sid or "",
             status=call_status or "",
         )
         _restore_call_context(call_sid or "")
-        
+
         # Clean up when call ends + Pro: persist call log and customer memory
         if call_status in ["completed", "failed", "busy", "no-answer", "canceled"]:
             # Read Twilio Duration and set in call_log_entries before call_log_end
@@ -8197,7 +9425,11 @@ async def handle_call_status(request: Request):
                 if not outcome and appointment_created:
                     outcome = "answered_by_ai"
                     call_data["outcome"] = outcome
-                elif not outcome and call_data.get("booking_intent") and not appointment_created:
+                elif (
+                    not outcome
+                    and call_data.get("booking_intent")
+                    and not appointment_created
+                ):
                     outcome = "no_booking"
                     call_data["outcome"] = outcome
                 if outcome:
@@ -8216,33 +9448,65 @@ async def handle_call_status(request: Request):
                 )
             elif call_sid in call_log_entries:
                 # Call was logged but not in active_calls (e.g. quick hangup)
-                call_log_set_outcome(call_sid, "missed" if call_status == "completed" else call_status)
+                call_log_set_outcome(
+                    call_sid, "missed" if call_status == "completed" else call_status
+                )
                 call_log_end(call_sid)
                 cleanup_call_runtime_state(call_sid or "")
             # Lead capture: when call ended without booking and plan allows
-            if USE_DB and client_id_before and client_id_before != "default" and from_number_before and get_plan_limits:
+            if (
+                USE_DB
+                and client_id_before
+                and client_id_before != "default"
+                and from_number_before
+                and get_plan_limits
+            ):
                 try:
                     tenant = db_tenant_get_by_client_id(client_id_before)
-                    if tenant and get_plan_limits(tenant).get("has_lead_capture") and not appointment_created:
-                        db_leads_insert(client_id_before, None, from_number_before, "inquiry", "call")
+                    if (
+                        tenant
+                        and get_plan_limits(tenant).get("has_lead_capture")
+                        and not appointment_created
+                    ):
+                        db_leads_insert(
+                            client_id_before,
+                            None,
+                            from_number_before,
+                            "inquiry",
+                            "call",
+                        )
                 except Exception as e:
-                    logger.error("lead_capture_failed", extra={"client_id": client_id_before, "error": str(e)})
+                    logger.error(
+                        "lead_capture_failed",
+                        extra={"client_id": client_id_before, "error": str(e)},
+                    )
             # Record voice usage for billing (graceful degradation: log on failure, do not raise)
             if USE_DB and client_id_before and client_id_before != "default":
                 try:
                     minutes = max(0, math.ceil(duration_sec / 60))
                     month = datetime.now(timezone.utc).strftime("%Y-%m")
                     if not db_usage_increment_voice(client_id_before, month, minutes):
-                        logger.error("usage_increment_failed", extra={"client_id": client_id_before, "month": month, "error": "db_usage_increment_voice returned False"})
+                        logger.error(
+                            "usage_increment_failed",
+                            extra={
+                                "client_id": client_id_before,
+                                "month": month,
+                                "error": "db_usage_increment_voice returned False",
+                            },
+                        )
                 except Exception as e:
-                    logger.error("usage_increment_failed", extra={"client_id": client_id_before, "error": str(e)})
-        
+                    logger.error(
+                        "usage_increment_failed",
+                        extra={"client_id": client_id_before, "error": str(e)},
+                    )
+
         return Response(content="OK", media_type="text/plain")
-    
+
     except Exception as e:
         voice_warning("call_status_handler_failed", error_type=type(e).__name__)
         logger.exception("call_status_handler_failed")
         return Response(content="OK", media_type="text/plain")
+
 
 @app.websocket("/api/phone/media")
 async def phone_media_websocket(websocket: WebSocket):
@@ -8265,6 +9529,7 @@ async def handle_media_stream(request: Request):
         "websocket_path": "/api/phone/media",
     }
 
+
 @app.post("/api/phone/no-speech")
 async def handle_no_speech(request: Request):
     """
@@ -8276,7 +9541,9 @@ async def handle_no_speech(request: Request):
     try:
         form_data = await request.form()
         if not _validate_twilio_webhook(request, dict(form_data)):
-            return Response(content="Forbidden", status_code=403, media_type="text/plain")
+            return Response(
+                content="Forbidden", status_code=403, media_type="text/plain"
+            )
         call_sid = (form_data.get("CallSid") or "").strip()
         _restore_call_context(call_sid or "")
         base_url = _twilio_base_url(request)
@@ -8294,7 +9561,9 @@ async def handle_no_speech(request: Request):
                 status=st,
             )
             response = VoiceResponse()
-            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            response.redirect(
+                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+            )
             return Response(content=str(response), media_type="application/xml")
 
         last_utterance = float(call_data.get("last_utterance_at") or 0)
@@ -8306,7 +9575,9 @@ async def handle_no_speech(request: Request):
                 status="recent_speech",
             )
             response = VoiceResponse()
-            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            response.redirect(
+                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+            )
             return Response(content=str(response), media_type="application/xml")
 
         if forwarding_phone:
@@ -8321,7 +9592,9 @@ async def handle_no_speech(request: Request):
                 active_calls[call_sid]["outcome"] = "forwarded"
             if call_sid:
                 call_log_set_outcome(call_sid, "forwarded")
-            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+            response = forward_call_to_business(
+                forwarding_phone, base_url, detected_lang
+            )
         else:
             voice_respond_branch(
                 "no_speech_goodbye",
@@ -8356,11 +9629,13 @@ async def respond_with_audio(request: Request):
     """
     if not TWILIO_AVAILABLE:
         raise HTTPException(status_code=503, detail="Twilio not installed")
-    
+
     try:
         form_data = await request.form()
         if not _validate_twilio_webhook(request, dict(form_data)):
-            return Response(content="Forbidden", status_code=403, media_type="text/plain")
+            return Response(
+                content="Forbidden", status_code=403, media_type="text/plain"
+            )
         call_sid = form_data.get("CallSid")
         _restore_call_context(call_sid or "")
         # base_url needed for forward_call_to_business in all branches
@@ -8376,16 +9651,20 @@ async def respond_with_audio(request: Request):
                 has_active_call=bool(call_sid and call_sid in active_calls),
             )
             response = VoiceResponse()
-            filler_audio_url = f"{base_url}/api/phone/one-moment-audio?call_sid={call_sid}"
+            filler_audio_url = (
+                f"{base_url}/api/phone/one-moment-audio?call_sid={call_sid}"
+            )
             response.play(filler_audio_url)
             response.pause(length=1)
-            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            response.redirect(
+                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+            )
             return Response(content=str(response), media_type="application/xml")
-        
+
         status_data = response_status[call_sid]
         status = status_data.get("status", "pending")
         response = VoiceResponse()
-        
+
         if status == "ready":
             call_data = active_calls.get(call_sid, {})
             voice_respond_branch(
@@ -8405,7 +9684,9 @@ async def respond_with_audio(request: Request):
                     twilio_lang_code = get_twilio_language_code(detected_lang)
                     still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
 
-                    if uses_non_latin_script(detected_lang) and not _conversation_prefers_english_stt(call_data):
+                    if uses_non_latin_script(
+                        detected_lang
+                    ) and not _conversation_prefers_english_stt(call_data):
                         response.record(
                             action=f"{base_url}/api/phone/process-recording",
                             method="POST",
@@ -8413,9 +9694,14 @@ async def respond_with_audio(request: Request):
                             finish_on_key="#",
                             recording_status_callback=f"{base_url}/api/phone/recording-status",
                         )
-                        response.say("Please speak now, then press pound when done.", language="en-US")
+                        response.say(
+                            "Please speak now, then press pound when done.",
+                            language="en-US",
+                        )
                     else:
-                        from voice.twiml_stt import append_post_ai_listen_with_still_there
+                        from voice.twiml_stt import (
+                            append_post_ai_listen_with_still_there,
+                        )
 
                         append_post_ai_listen_with_still_there(
                             response,
@@ -8435,13 +9721,13 @@ async def respond_with_audio(request: Request):
                     )
                     response = VoiceResponse()
                     response.hangup()
-                
+
                 # Clean up status
                 if call_sid in response_status:
                     del response_status[call_sid]
-                
+
                 return Response(content=str(response), media_type="application/xml")
-        
+
         elif status == "forward":
             # Forward to business phone
             forwarding_phone = status_data.get("forwarding_phone")
@@ -8449,17 +9735,23 @@ async def respond_with_audio(request: Request):
                 voice_forward(
                     "respond_status_forward",
                     call_sid=call_sid or "",
-                    client_id=str(active_calls.get(call_sid, {}).get("client_id") or ""),
+                    client_id=str(
+                        active_calls.get(call_sid, {}).get("client_id") or ""
+                    ),
                     forward_kind="fallback_or_staff",
                     has_fallback_configured=True,
                 )
-                detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
-                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+                detected_lang = active_calls.get(call_sid, {}).get(
+                    "detected_language", "English"
+                )
+                response = forward_call_to_business(
+                    forwarding_phone, base_url, detected_lang
+                )
                 # Clean up status
                 if call_sid in response_status:
                     del response_status[call_sid]
                 return Response(content=str(response), media_type="application/xml")
-        
+
         elif status == "error":
             # Error occurred - forward to business phone if available
             forwarding_phone = get_business_info().get("forwarding_phone")
@@ -8467,12 +9759,18 @@ async def respond_with_audio(request: Request):
                 voice_forward(
                     "respond_status_error_forward",
                     call_sid=call_sid or "",
-                    client_id=str(active_calls.get(call_sid, {}).get("client_id") or ""),
+                    client_id=str(
+                        active_calls.get(call_sid, {}).get("client_id") or ""
+                    ),
                     forward_kind="fallback",
                     has_fallback_configured=True,
                 )
-                detected_lang = active_calls.get(call_sid, {}).get("detected_language", "English")
-                response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+                detected_lang = active_calls.get(call_sid, {}).get(
+                    "detected_language", "English"
+                )
+                response = forward_call_to_business(
+                    forwarding_phone, base_url, detected_lang
+                )
                 # Clean up status
                 if call_sid in response_status:
                     del response_status[call_sid]
@@ -8484,13 +9782,16 @@ async def respond_with_audio(request: Request):
                     status="error",
                 )
                 # Fallback: return error message if no forwarding number
-                response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+                response.say(
+                    "I'm sorry, I'm having technical difficulties. Please try again later.",
+                    voice="alice",
+                )
                 response.hangup()
                 # Clean up status
                 if call_sid in response_status:
                     del response_status[call_sid]
                 return Response(content=str(response), media_type="application/xml")
-        
+
         else:
             voice_respond_branch(
                 "poll_pending",
@@ -8505,12 +9806,15 @@ async def respond_with_audio(request: Request):
             filler_audio_url = f"{base_url}/api/phone/tts-audio?text={filler_encoded}&voice={get_tts_voice()}"
             response.play(filler_audio_url)
             response.pause(length=1)
-            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method='POST')
+            response.redirect(
+                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+            )
             return Response(content=str(response), media_type="application/xml")
-    
+
     except Exception as e:
         logger.exception("Error in respond endpoint: %s", e)
         import traceback
+
         traceback.print_exc()
         response = VoiceResponse()
         base_url = _twilio_base_url(request)
@@ -8520,7 +9824,9 @@ async def respond_with_audio(request: Request):
             voice_forward(
                 "respond_endpoint_exception_forward",
                 call_sid=str(call_sid or ""),
-                client_id=str(active_calls.get(call_sid or "", {}).get("client_id") or ""),
+                client_id=str(
+                    active_calls.get(call_sid or "", {}).get("client_id") or ""
+                ),
                 forward_kind="fallback",
                 has_fallback_configured=True,
                 error_type=type(e).__name__,
@@ -8528,7 +9834,9 @@ async def respond_with_audio(request: Request):
             # Try to get call data for language
             call_data = active_calls.get(call_sid, {})
             detected_lang = call_data.get("detected_language", "English")
-            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+            response = forward_call_to_business(
+                forwarding_phone, base_url, detected_lang
+            )
             # Clean up status
             if call_sid in response_status:
                 del response_status[call_sid]
@@ -8541,9 +9849,13 @@ async def respond_with_audio(request: Request):
                 error_type=type(e).__name__,
             )
             # Fallback: return error message if no forwarding number
-            response.say("I'm sorry, I'm having technical difficulties. Please try again later.", voice='alice')
+            response.say(
+                "I'm sorry, I'm having technical difficulties. Please try again later.",
+                voice="alice",
+            )
             response.hangup()
             return Response(content=str(response), media_type="application/xml")
+
 
 @app.get("/api/phone/tts-audio-hd")
 async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
@@ -8557,25 +9869,28 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
             model="tts-1-hd",  # HD model for ultra-smooth, natural speech
             voice=voice,
             input=add_sentence_pauses(text),
-            speed=get_tts_speed()
+            speed=get_tts_speed(),
         )
-        
+
         # Convert response to bytes
         audio_bytes = io.BytesIO(response.content)
         audio_bytes.seek(0)
-        
+
         # Return as streaming audio
         return StreamingResponse(
             audio_bytes,
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "inline; filename=speech.mp3",
-                "Cache-Control": "no-cache"
-            }
+                "Cache-Control": "no-cache",
+            },
         )
     except Exception as e:
         print(f"Error generating HD TTS audio: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate HD TTS audio: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate HD TTS audio: {str(e)}"
+        )
+
 
 @app.get("/api/phone/tts-audio")
 async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
@@ -8590,23 +9905,23 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             model="tts-1",  # Faster generation, still high quality
             voice=voice,
             input=add_sentence_pauses(text),
-            speed=get_tts_speed()
+            speed=get_tts_speed(),
         )
-        
+
         # Convert response to bytes
         audio_bytes = io.BytesIO(response.content)
         audio_bytes.seek(0)
-        
+
         # Return as streaming audio
         return StreamingResponse(
             audio_bytes,
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "inline; filename=speech.mp3",
-                "Cache-Control": "no-cache"
-            }
+                "Cache-Control": "no-cache",
+            },
         )
-    
+
     except Exception as e:
         print(f"TTS audio generation error: {e}")
         try:
@@ -8630,6 +9945,7 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             print(f"TTS fallback also failed: {e2}")
             raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/phone/process-recording")
 async def process_recording(request: Request):
     """
@@ -8638,33 +9954,40 @@ async def process_recording(request: Request):
     """
     if not TWILIO_AVAILABLE:
         raise HTTPException(status_code=503, detail="Twilio not installed")
-    
+
     try:
         form_data = await request.form()
         if not _validate_twilio_webhook(request, dict(form_data)):
-            return Response(content="Forbidden", status_code=403, media_type="text/plain")
+            return Response(
+                content="Forbidden", status_code=403, media_type="text/plain"
+            )
         call_sid = form_data.get("CallSid")
         recording_url = form_data.get("RecordingUrl", "")
         _restore_call_context(call_sid or "")
-        
+
         logger.info("recording_received call_sid=%s", call_sid or "")
-        
+
         if not call_sid or call_sid not in active_calls:
             response = VoiceResponse()
-            response.say("I'm sorry, I lost track of our conversation. Please call back.", voice='alice')
+            response.say(
+                "I'm sorry, I lost track of our conversation. Please call back.",
+                voice="alice",
+            )
             return Response(content=str(response), media_type="application/xml")
-        
+
         if not recording_url:
             logger.warning("recording_missing_url call_sid=%s", call_sid or "")
             response = VoiceResponse()
-            response.say("I didn't receive the recording. Please try again.", voice='alice')
+            response.say(
+                "I didn't receive the recording. Please try again.", voice="alice"
+            )
             bu = _twilio_base_url(request)
             if bu:
-                response.redirect(f"{bu}/api/phone/process-speech", method='POST')
+                response.redirect(f"{bu}/api/phone/process-speech", method="POST")
             return Response(content=str(response), media_type="application/xml")
-        
+
         call_data = active_calls[call_sid]
-        
+
         # Download the recording from Twilio using httpx
         # httpx is already available in the environment
         try:
@@ -8672,11 +9995,9 @@ async def process_recording(request: Request):
         except ImportError:
             # Fallback if httpx not available (shouldn't happen)
             raise HTTPException(status_code=500, detail="httpx library not available")
-        
+
         recording_response = httpx.get(
-            recording_url,
-            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-            timeout=30.0
+            recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=30.0
         )
         if recording_response.status_code != 200:
             logger.warning(
@@ -8685,33 +10006,42 @@ async def process_recording(request: Request):
                 recording_response.status_code,
             )
             response = VoiceResponse()
-            response.say("I had trouble processing the recording. Please try again.", voice='alice')
+            response.say(
+                "I had trouble processing the recording. Please try again.",
+                voice="alice",
+            )
             bu = _twilio_base_url(request)
             if bu:
-                response.redirect(f"{bu}/api/phone/process-speech", method='POST')
+                response.redirect(f"{bu}/api/phone/process-speech", method="POST")
             return Response(content=str(response), media_type="application/xml")
-        
+
         # Transcribe with Whisper
         audio_data = recording_response.content
         temp_file = io.BytesIO(audio_data)
         temp_file.name = "recording.wav"
-        
+
         logger.info("recording_transcribe_start call_sid=%s", call_sid or "")
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
-            file=temp_file
+            file=temp_file,
             # language parameter omitted to allow auto-detection
         )
-        
+
         speech_result = transcript.text
-        logger.info("recording_transcribe_ok call_sid=%s transcript_len=%s", call_sid or "", len(speech_result or ""))
+        logger.info(
+            "recording_transcribe_ok call_sid=%s transcript_len=%s",
+            call_sid or "",
+            len(speech_result or ""),
+        )
 
         base_url = _twilio_base_url(request)
         rec_key = (form_data.get("RecordingSid") or recording_url or "").strip()
         if rec_key and call_data.get("_last_processed_recording") == rec_key:
             voice_info("process_recording_duplicate_skipped", call_sid=call_sid or "")
             response = VoiceResponse()
-            response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+            response.redirect(
+                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+            )
             return Response(content=str(response), media_type="application/xml")
         if rec_key:
             call_data["_last_processed_recording"] = rec_key
@@ -8728,13 +10058,17 @@ async def process_recording(request: Request):
             base_url,
         )
         if outcome.mode == "replace_call_twiml" and outcome.replacement_twiml:
-            return Response(content=outcome.replacement_twiml, media_type="application/xml")
+            return Response(
+                content=outcome.replacement_twiml, media_type="application/xml"
+            )
 
         response = VoiceResponse()
         response.play(f"{base_url}/api/phone/got-it-audio?call_sid={call_sid}")
-        response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+        response.redirect(
+            f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
+        )
         return Response(content=str(response), media_type="application/xml")
-    
+
     except Exception as e:
         voice_warning(
             "process_recording_failed",
@@ -8758,13 +10092,19 @@ async def process_recording(request: Request):
             # Try to get call data for language
             call_data = active_calls.get(call_sid, {})
             detected_lang = call_data.get("detected_language", "English")
-            response = forward_call_to_business(forwarding_phone, base_url, detected_lang)
+            response = forward_call_to_business(
+                forwarding_phone, base_url, detected_lang
+            )
             return Response(content=str(response), media_type="application/xml")
         else:
             # Fallback: ask to try again if no forwarding number
-            response.say("I'm sorry, I had trouble processing that. Please try again.", voice='alice')
-            response.redirect(f"{base_url}/api/phone/process-speech", method='POST')
+            response.say(
+                "I'm sorry, I had trouble processing that. Please try again.",
+                voice="alice",
+            )
+            response.redirect(f"{base_url}/api/phone/process-speech", method="POST")
             return Response(content=str(response), media_type="application/xml")
+
 
 @app.post("/api/phone/recording-status")
 async def recording_status(request: Request):
@@ -8775,6 +10115,7 @@ async def recording_status(request: Request):
         return Response(content="Forbidden", status_code=403, media_type="text/plain")
     logger.info("recording_status_update status=%s", form_data.get("RecordingStatus"))
     return Response(content="OK", media_type="text/plain")
+
 
 @app.post("/api/phone/transcribe")
 async def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
@@ -8787,22 +10128,23 @@ async def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
             raise HTTPException(status_code=403, detail="Forbidden")
         # Decode base64 audio
         audio_bytes = base64.b64decode(audio_data)
-        
+
         # Save to temporary file
         temp_file = io.BytesIO(audio_bytes)
         temp_file.name = "audio.webm"
-        
+
         # Transcribe using OpenAI Whisper - auto-detect language for multi-language support
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
-            file=temp_file
+            file=temp_file,
             # language parameter omitted to allow auto-detection of any language
         )
-        
+
         return {"transcript": transcript.text}
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/phone/calls")
 async def get_active_calls(_: str = Depends(require_admin)):
@@ -8820,13 +10162,14 @@ async def get_active_calls(_: str = Depends(require_admin)):
         ],
     }
 
+
 if __name__ == "__main__":
     import uvicorn
-    print("\n" + "="*50)
+
+    print("\n" + "=" * 50)
     print("Starting Call Surge Backend Server")
-    print("="*50)
+    print("=" * 50)
     print(f"Server will run on: http://0.0.0.0:8000")
     print(f"Local access: http://localhost:8000")
-    print("="*50 + "\n")
+    print("=" * 50 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
-

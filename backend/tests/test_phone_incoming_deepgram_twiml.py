@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def deepgram_phone_client(monkeypatch):
+    from voice.call_session_store import MemoryCallSessionStore, reset_call_session_store_for_tests
+
+    reset_call_session_store_for_tests(MemoryCallSessionStore())
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://voice.example.test")
     monkeypatch.setenv("CALL_RECORDING_ENABLED", "false")
@@ -41,3 +44,21 @@ def test_incoming_twiml_deepgram_connect_stream(deepgram_phone_client):
     # got-it + /respond only after caller speech (REST update), not in initial TwiML
     assert "got-it-audio" not in body
     assert "/api/phone/respond" not in body
+
+
+def test_incoming_twiml_persists_media_stream_gen(deepgram_phone_client):
+    """Redis path: stream generation must be in store before Twilio opens media WS."""
+    import main
+
+    sid = "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    resp = deepgram_phone_client.post(
+        "/api/phone/incoming",
+        data={
+            "CallSid": sid,
+            "From": "+15551110001",
+            "To": "+15552220002",
+        },
+    )
+    assert resp.status_code == 200
+    row = main.call_store.get(sid) or {}
+    assert int(row.get("media_stream_gen") or 0) >= 2

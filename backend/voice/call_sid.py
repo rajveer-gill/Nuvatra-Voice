@@ -13,7 +13,9 @@ SAMPLE_CALL_SID = "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 def normalize_call_sid(call_sid: str | None) -> str:
     """Return stripped CallSid or empty string if invalid."""
-    sid = (call_sid or "").strip()
+    if not isinstance(call_sid, str):
+        return ""
+    sid = call_sid.strip()
     if not sid or not _CALL_SID_RE.fullmatch(sid):
         return ""
     return sid

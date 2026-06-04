@@ -65,6 +65,9 @@ class CallSessionStore(ABC):
     def incr_media_stream_gen(self, call_sid: str) -> int: ...
 
     @abstractmethod
+    def get_media_stream_max_gen(self, call_sid: str) -> int: ...
+
+    @abstractmethod
     def get_response_status(self, call_sid: str) -> Optional[dict[str, Any]]: ...
 
     @abstractmethod
@@ -125,6 +128,13 @@ class MemoryCallSessionStore(CallSessionStore):
         g = int(session.get("media_stream_gen") or 0) + 1
         session["media_stream_gen"] = g
         return g
+
+    def get_media_stream_max_gen(self, call_sid: str) -> int:
+        sid = normalize_call_sid(call_sid)
+        if not sid:
+            return 0
+        session = self.sessions.get(sid)
+        return int((session or {}).get("media_stream_gen") or 0)
 
     def get_response_status(self, call_sid: str) -> Optional[dict[str, Any]]:
         sid = normalize_call_sid(call_sid)
@@ -263,6 +273,9 @@ class RedisCallSessionStore(CallSessionStore):
     def _lock_key(self, call_sid: str) -> str:
         return f"{self._session_key(call_sid)}:ulock"
 
+    def _mgen_key(self, call_sid: str) -> str:
+        return f"{self._session_key(call_sid)}:mgen"
+
     def _touch(self, key: str) -> None:
         self._redis.expire(key, SESSION_TTL_SEC)
 
@@ -299,7 +312,12 @@ class RedisCallSessionStore(CallSessionStore):
         sid = normalize_call_sid(call_sid)
         if not sid:
             return
-        self._redis.delete(self._session_key(sid), self._resp_key(sid), self._lock_key(sid))
+        self._redis.delete(
+            self._session_key(sid),
+            self._resp_key(sid),
+            self._lock_key(sid),
+            self._mgen_key(sid),
+        )
 
     def list_call_sids(self) -> list[str]:
         out: list[str] = []
@@ -318,15 +336,29 @@ class RedisCallSessionStore(CallSessionStore):
 
     def incr_media_stream_gen(self, call_sid: str) -> int:
         sid = normalize_call_sid(call_sid)
+        if not sid or not self.exists(sid):
+            return 0
+        mgen_key = self._mgen_key(sid)
+        g = int(self._redis.incr(mgen_key))
+        self._redis.expire(mgen_key, SESSION_TTL_SEC)
+        session = self.get(sid)
+        if session is not None:
+            session["media_stream_gen"] = g
+            self.save(sid, session)
+        return g
+
+    def get_media_stream_max_gen(self, call_sid: str) -> int:
+        sid = normalize_call_sid(call_sid)
         if not sid:
             return 0
+        raw = self._redis.get(self._mgen_key(sid))
+        if raw is not None:
+            try:
+                return max(0, int(raw))
+            except (TypeError, ValueError):
+                pass
         session = self.get(sid)
-        if not session:
-            return 0
-        g = int(session.get("media_stream_gen") or 0) + 1
-        session["media_stream_gen"] = g
-        self.save(sid, session)
-        return g
+        return int((session or {}).get("media_stream_gen") or 0)
 
     def get_response_status(self, call_sid: str) -> Optional[dict[str, Any]]:
         sid = normalize_call_sid(call_sid)
@@ -411,6 +443,14 @@ def get_call_session_store() -> CallSessionStore:
 
 
 def reset_call_session_store_for_tests(store: Optional[CallSessionStore] = None) -> None:
-    """Test helper to inject or reset the global store."""
+    """Test helper to inject or reset the global store and rebind main.py aliases."""
     global _store
     _store = store if store is not None else MemoryCallSessionStore()
+    try:
+        import main as m
+
+        m.call_store = _store
+        m.active_calls = _store.sessions
+        m.response_status = _store.response_status
+    except ImportError:
+        pass

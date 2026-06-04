@@ -51,6 +51,14 @@ def test_memory_incr_media_stream_gen():
     store.create(SID_A, {"media_stream_gen": 0})
     assert store.incr_media_stream_gen(SID_A) == 1
     assert store.get(SID_A)["media_stream_gen"] == 1
+    assert store.get_media_stream_max_gen(SID_A) == 1
+
+
+def test_memory_incr_rejects_non_string_call_sid():
+    store = MemoryCallSessionStore()
+    store.create(SID_A, {})
+    assert store.incr_media_stream_gen("not-a-valid-sid") == 0
+    assert store.incr_media_stream_gen({"bad": "dict"}) == 0  # type: ignore[arg-type]
 
 
 def test_memory_proxy_dict_compat():

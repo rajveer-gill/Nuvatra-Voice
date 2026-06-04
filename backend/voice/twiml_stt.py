@@ -10,7 +10,9 @@ from __future__ import annotations
 from typing import Any, Optional
 from urllib.parse import quote
 
-from observability import voice_trace
+from observability import voice_trace, voice_warning
+from voice.call_sid import normalize_call_sid
+from voice.call_session_store import get_call_session_store
 from voice.media_token import mint_media_stream_token
 from voice.stt_config import http_to_ws_base
 
@@ -29,10 +31,23 @@ PROCESS_SPEECH_PATH = "/api/phone/process-speech"
 NO_SPEECH_PATH = "/api/phone/no-speech"
 
 
-def next_media_stream_generation(call_state: dict[str, Any]) -> int:
-    """Monotonic generation per call; bound into stream tokens to block replay."""
-    g = int(call_state.get("media_stream_gen") or 0) + 1
-    call_state["media_stream_gen"] = g
+def next_media_stream_generation(call_sid: str, call_state: dict[str, Any] | None = None) -> int:
+    """
+    Monotonic generation per call; bound into stream tokens to block replay.
+
+    Uses CallSessionStore.incr_media_stream_gen (atomic on Redis) so generation
+    is persisted before Twilio opens the Media Stream WebSocket.
+    """
+    sid = normalize_call_sid(call_sid)
+    if not sid:
+        voice_warning("media_stream_gen_invalid_call_sid")
+        return 0
+    g = get_call_session_store().incr_media_stream_gen(sid)
+    if g < 1:
+        voice_warning("media_stream_gen_incr_failed", call_sid=sid)
+        return 0
+    if call_state is not None:
+        call_state["media_stream_gen"] = g
     return g
 
 
@@ -42,20 +57,31 @@ def append_connect_stream(
     call_sid: str,
     base_url: str,
     stream_generation: int,
-) -> None:
-    """Append <Connect><Stream> with signed token (includes stream generation)."""
+) -> bool:
+    """Append <Connect><Stream> with signed token. Returns False if stream omitted (fail-closed)."""
     if not _TWILIO_OK or Connect is None or Stream is None:
-        return
+        return False
+    sid = normalize_call_sid(call_sid)
+    if not sid or stream_generation < 1:
+        voice_warning(
+            "connect_stream_skipped",
+            call_sid=sid or str(call_sid)[:8],
+            stream_generation=stream_generation,
+        )
+        return False
     bu = base_url.rstrip("/")
     wss_base = http_to_ws_base(bu)
     stream_url = f"{wss_base}/api/phone/media"
-    token = mint_media_stream_token(call_sid, stream_generation=stream_generation)
+    token = mint_media_stream_token(sid, stream_generation=stream_generation)
+    if not token:
+        voice_warning("connect_stream_skipped_no_token", call_sid=sid)
+        return False
     connect = Connect()
     stream = Stream(url=stream_url)
-    if token:
-        stream.parameter(name="token", value=token)
+    stream.parameter(name="token", value=token)
     connect.append(stream)
     response.append(connect)
+    return True
 
 
 def got_it_respond_twiml(call_sid: str, base_url: str) -> str:
@@ -120,7 +146,7 @@ def append_deepgram_silence_followup_after_stream(
     if not _TWILIO_OK:
         return
     response.play(still_there_play_url)
-    gen2 = next_media_stream_generation(call_state)
+    gen2 = next_media_stream_generation(call_sid, call_state)
     append_connect_stream(
         response, call_sid=call_sid, base_url=base_url, stream_generation=gen2
     )
@@ -150,12 +176,12 @@ def append_post_ai_listen_with_still_there(
     Gather: native Twilio behavior (speech in gather skips subsequent verbs).
     """
     if use_deepgram:
-        gen = next_media_stream_generation(call_state)
+        gen = next_media_stream_generation(call_sid, call_state)
         append_connect_stream(
             response, call_sid=call_sid, base_url=base_url, stream_generation=gen
         )
         response.play(still_there_play_url)
-        gen2 = next_media_stream_generation(call_state)
+        gen2 = next_media_stream_generation(call_sid, call_state)
         append_connect_stream(
             response, call_sid=call_sid, base_url=base_url, stream_generation=gen2
         )
@@ -208,7 +234,7 @@ def empty_retry_twiml(
             voice="alice",
         )
     if use_deepgram and call_sid:
-        gen = next_media_stream_generation(call_state)
+        gen = next_media_stream_generation(call_sid, call_state)
         append_connect_stream(vr, call_sid=call_sid, base_url=bu, stream_generation=gen)
         # Silence falls through to goodbye below; speech uses REST update in media_ws.
     else:

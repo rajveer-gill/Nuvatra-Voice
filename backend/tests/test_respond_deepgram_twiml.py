@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def deepgram_respond_client(monkeypatch):
+    from voice.call_session_store import MemoryCallSessionStore, reset_call_session_store_for_tests
+
+    reset_call_session_store_for_tests(MemoryCallSessionStore())
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://voice.example.test")
     monkeypatch.setenv("MEDIA_STREAM_SIGNING_SECRET", "unit-test-media-hmac")
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
