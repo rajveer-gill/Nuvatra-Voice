@@ -5,7 +5,9 @@ from main import (
     _apply_booking_customer_name,
     _caller_indicated_service_choice,
     _caller_indicated_stylist_choice,
+    _extract_booking_line_from_conversation,
     _format_appointment_details_confirmation_sms,
+    _should_attempt_voice_booking_extraction,
     _strip_booking_directive_for_voice,
     _validate_booking_requirements,
     _voice_booking_nudge_message,
@@ -241,7 +243,65 @@ def test_voice_booking_nudge_stylist_at_two_turns(monkeypatch):
 
 def test_ai_implies_committed_booking_detects_false_confirm():
     assert _ai_implies_committed_booking("You're all set for Tuesday at 2!")
+    assert _ai_implies_committed_booking(
+        "Great choice, Raj! I have you scheduled for a Long Cut with Jake tomorrow at 3:00 PM. See you then!"
+    )
     assert not _ai_implies_committed_booking("Which stylist would you like?")
+
+
+def test_should_attempt_voice_booking_extraction_on_scheduled_wording(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "j1", "name": "Jake"}],
+            "services": [{"id": "s1", "name": "Long Cut"}],
+        },
+    )
+    history = [
+        {"role": "user", "content": "I want to book a haircut"},
+        {"role": "user", "content": "With Jake tomorrow at 3"},
+        {"role": "user", "content": "Long cut please"},
+    ]
+    ai = "Great, I have you scheduled for a Long Cut with Jake tomorrow at 3 PM. See you then!"
+    assert _should_attempt_voice_booking_extraction(history, ai) is True
+
+
+def test_extract_booking_line_from_conversation(monkeypatch):
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured["messages"] = kwargs.get("messages")
+        class Msg:
+            content = "BOOKING: Raj|||2026-06-05|15:00|Long Cut|Jake"
+
+        class Choice:
+            message = Msg()
+
+        class Resp:
+            choices = [Choice()]
+
+        return Resp()
+
+    monkeypatch.setattr("main.client.chat.completions.create", fake_create)
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "j1", "name": "Jake"}],
+            "services": [{"id": "s1", "name": "Long Cut"}],
+        },
+    )
+    got = _extract_booking_line_from_conversation(
+        [
+            {"role": "user", "content": "Book with Jake tomorrow at 3"},
+            {"role": "assistant", "content": "Long cut?"},
+            {"role": "user", "content": "Yes long cut, I'm Raj"},
+        ],
+        caller_memory={"name": "Raj"},
+    )
+    assert got is not None
+    assert got["name"] == "Raj"
+    assert got["date"] == "2026-06-05"
+    assert got["staff"] == "Jake"
 
 
 def test_apply_booking_customer_name_replaces_stylist_with_memory(monkeypatch):

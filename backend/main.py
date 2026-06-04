@@ -3314,17 +3314,120 @@ def _ai_implies_committed_booking(ai_text: str) -> bool:
         for p in (
             "you're all set",
             "you are all set",
+            "all set for",
             "you're booked",
             "you are booked",
             "i've booked",
             "i have booked",
+            "have you scheduled",
+            "you're scheduled",
+            "you are scheduled",
+            "i have you scheduled",
+            "we have you scheduled",
+            "got you scheduled",
+            "got you down",
             "appointment is confirmed",
             "you're confirmed",
             "you are confirmed",
             "booking is confirmed",
-            "all set for",
+            "see you then",
+            "see you tomorrow",
+            "see you at",
+            "we'll see you",
+            "we will see you",
         )
     )
+
+
+def _should_attempt_voice_booking_extraction(
+    conversation_history: Optional[list], ai_text: str
+) -> bool:
+    """Retry BOOKING: extraction when the model spoke like it booked but omitted the marker."""
+    if not _conversation_suggests_booking(conversation_history):
+        return False
+    if not staff_roster_ready_for_booking(get_business_info()):
+        return False
+    turns = _count_booking_user_turns(conversation_history)
+    if turns < 3:
+        return False
+    if _ai_implies_committed_booking(ai_text or ""):
+        return True
+    t = (ai_text or "").lower()
+    if any(
+        p in t
+        for p in (
+            "scheduled",
+            "see you",
+            "tomorrow at",
+            "today at",
+            " at 3",
+            " at 2",
+            " at 1",
+            " at 4",
+            " at 5",
+        )
+    ):
+        return True
+    return turns >= 4
+
+
+def _extract_booking_line_from_conversation(
+    conversation_history: list,
+    *,
+    caller_memory: Optional[dict] = None,
+) -> Optional[dict]:
+    """Second GPT pass: emit BOOKING: line only from agreed transcript details."""
+    biz = get_business_info()
+    today = datetime.now(timezone.utc).date()
+    today_str = today.isoformat()
+    tomorrow_str = (today + timedelta(days=1)).isoformat()
+    staff_names = [
+        (s.get("name") or "").strip()
+        for s in (biz.get("staff") or [])
+        if (s.get("name") or "").strip()
+    ]
+    service_names = [
+        (s.get("name") or "").strip()
+        for s in _normalize_service_entries(biz.get("services") or [])
+        if (s.get("name") or "").strip()
+    ]
+    mem_name = ((caller_memory or {}).get("name") or "").strip()
+    transcript = "\n".join(
+        f"{(m.get('role') or '').strip().upper()}: {(m.get('content') or '').strip()}"
+        for m in (conversation_history or [])[-14:]
+        if (m.get("content") or "").strip()
+    )
+    if not transcript.strip():
+        return None
+    sys = (
+        "Extract appointment details from this phone transcript. "
+        f"Today is {today_str}, tomorrow is {tomorrow_str}. "
+        "If caller name, date, and time are all clearly agreed, reply with EXACTLY one line:\n"
+        "BOOKING: name|phone|email|date|time|reason|staff\n"
+        "Leave phone and email empty. reason=exact service from menu if known. "
+        "staff=stylist name if chosen.\n"
+        f"Staff: {', '.join(staff_names) or 'none'}. "
+        f"Services: {', '.join(service_names) or 'any'}.\n"
+        f"Caller name on file: {mem_name or 'unknown'}.\n"
+        "If name, date, or time is missing or ambiguous, reply with exactly: NONE"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user", "content": transcript},
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.warning("voice_booking_extraction_failed: %s", e)
+        return None
+    if not raw or raw.upper().startswith("NONE"):
+        return None
+    return parse_booking(raw)
 
 
 def parse_booking(ai_text: str) -> Optional[dict]:
@@ -3794,8 +3897,23 @@ async def generate_response_async(
 
         ai_text = ai_response.choices[0].message.content
         voice_debug("gpt_reply", call_sid=call_sid, reply_preview=(ai_text or "")[:80])
-        # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         booking = parse_booking(ai_text)
+        if not booking and _should_attempt_voice_booking_extraction(
+            call_data.get("conversation_history"), ai_text or ""
+        ):
+            extracted = await asyncio.to_thread(
+                _extract_booking_line_from_conversation,
+                call_data.get("conversation_history") or [],
+                caller_memory=call_data.get("caller_memory"),
+            )
+            if extracted:
+                booking = extracted
+                voice_info(
+                    "voice_booking_extracted_retry",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                )
+        # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         if booking:
             fail_msg = None
             if not staff_roster_ready_for_booking():
@@ -4035,7 +4153,7 @@ async def generate_response_async(
             )
             ai_text = (
                 "I'm still putting your visit together—I haven't locked in the time yet. "
-                "Let me confirm the details with you first."
+                "Let me confirm the details with you first, then I'll text you to confirm."
             )
 
         # Never send BOOKING: machine line to TTS or conversation history
