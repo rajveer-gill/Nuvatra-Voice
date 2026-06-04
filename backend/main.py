@@ -2471,31 +2471,66 @@ def call_log_end(call_sid: str):
 DEFAULT_SLOT_DURATION_MINUTES = 30
 
 
+def _service_duration_minutes_for_reason(
+    reason: Optional[str], info: Optional[dict] = None
+) -> Optional[int]:
+    """Return configured service duration when reason matches the menu; else None."""
+    raw = (reason or "").strip()
+    if not raw or raw == "—":
+        return None
+    biz = info or get_business_info()
+    canonical, _ = _normalize_service_choice_for_booking(raw, biz)
+    search = (canonical or raw).strip().lower()
+    if not search:
+        return None
+    for svc in _normalize_service_entries(biz.get("services") or []):
+        nm = (svc.get("name") or "").strip().lower()
+        if not nm:
+            continue
+        if search == nm or search in nm or nm in search:
+            try:
+                return max(
+                    5,
+                    min(
+                        int(svc.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES),
+                        480,
+                    ),
+                )
+            except (TypeError, ValueError):
+                return DEFAULT_SLOT_DURATION_MINUTES
+    return None
+
+
+def _booking_duration_minutes(
+    booking: dict, info: Optional[dict] = None
+) -> int:
+    dm = _service_duration_minutes_for_reason(booking.get("reason"), info)
+    return dm if dm is not None else DEFAULT_SLOT_DURATION_MINUTES
+
+
+def _appointment_duration_minutes(
+    apt: dict, info: Optional[dict] = None
+) -> int:
+    dm = _service_duration_minutes_for_reason(apt.get("reason"), info)
+    return dm if dm is not None else DEFAULT_SLOT_DURATION_MINUTES
+
+
 def _duration_minutes_for_appointment(
     apt: dict,
     slots_by_appointment_id: dict[int, int],
     services: Optional[List[dict]] = None,
 ) -> int:
-    """Resolve block length for calendar display (booked_slots, then service menu, else default)."""
+    """Resolve block length for calendar display (service menu, then booked_slots, else default)."""
+    info = {"services": services} if services is not None else None
+    svc_dm = _service_duration_minutes_for_reason(apt.get("reason"), info)
+    if svc_dm is not None:
+        return svc_dm
     try:
         aid = int(apt.get("id") or 0)
     except (TypeError, ValueError):
         aid = 0
     if aid and aid in slots_by_appointment_id:
         return max(5, min(int(slots_by_appointment_id[aid]), 480))
-    reason = (apt.get("reason") or "").strip().lower()
-    for svc in services or []:
-        if not isinstance(svc, dict):
-            continue
-        name = (svc.get("name") or "").strip().lower()
-        if not name:
-            continue
-        try:
-            dm = int(svc.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES)
-        except (TypeError, ValueError):
-            dm = DEFAULT_SLOT_DURATION_MINUTES
-        if reason == name or name in reason:
-            return max(5, min(dm, 480))
     return DEFAULT_SLOT_DURATION_MINUTES
 
 
@@ -2638,7 +2673,7 @@ def _get_all_booked_slots_merged() -> List[dict]:
                             "date": a["date"],
                             "time": a["time"],
                             "appointment_id": a.get("id", 0),
-                            "duration_minutes": DEFAULT_SLOT_DURATION_MINUTES,
+                            "duration_minutes": _appointment_duration_minutes(a),
                             "staff_id": a.get("staff_id"),
                         }
                     )
@@ -3690,6 +3725,7 @@ def _create_appointment_from_booking(
     canonical_service, _ = _normalize_service_choice_for_booking(booking.get("reason"))
     if canonical_service:
         booking["reason"] = canonical_service
+    duration_min = _booking_duration_minutes(booking)
     _supersede_pending_customer_drafts_for_slot(
         date,
         time,
@@ -3697,10 +3733,10 @@ def _create_appointment_from_booking(
         client_id=cid_for_slot,
         phone=(booking.get("phone") or "").strip(),
     )
-    if not is_slot_available(date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key):
+    if not is_slot_available(date, time, duration_min, staff_key):
         _invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
         blockers = _slot_blocking_details(
-            date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key
+            date, time, duration_min, staff_key
         )
         system_info(
             "booking_create_failed_slot_taken",
@@ -3733,7 +3769,7 @@ def _create_appointment_from_booking(
         appointment_data["created_at"] = datetime.now().isoformat()
         appointments.append(appointment_data)
     if reserve_slot_immediately:
-        reserve_slot(date, time, apt_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key)
+        reserve_slot(date, time, apt_id, duration_min, staff_key)
     appointment_data["id"] = apt_id
     appointment_data.setdefault("created_at", datetime.now().isoformat())
     system_info(
@@ -6391,9 +6427,12 @@ async def create_appointment(
         date = (appointment.date or "").strip()
         time = (appointment.time or "").strip()
         staff_key = _optional_staff_id_validated(appointment.staff_id)
+        duration_min = _appointment_duration_minutes(
+            {"reason": appointment.reason or ""}
+        )
         if date and time:
             if not is_slot_available(
-                date, time, DEFAULT_SLOT_DURATION_MINUTES, staff_key
+                date, time, duration_min, staff_key
             ):
                 raise HTTPException(
                     status_code=409, detail="That time slot is already booked."
@@ -6420,7 +6459,7 @@ async def create_appointment(
             appointments.append(appointment_data)
         if date and time:
             reserve_slot(
-                date, time, appointment_id, DEFAULT_SLOT_DURATION_MINUTES, staff_key
+                date, time, appointment_id, duration_min, staff_key
             )
         appointment_data["id"] = appointment_id
         appointment_data.setdefault("created_at", datetime.now().isoformat())
@@ -8779,8 +8818,9 @@ async def handle_incoming_sms(request: Request):
                     ),
                 )
                 staff_for = (apt_full.get("staff_id") or "").strip() or None
+                confirm_duration = _appointment_duration_minutes(apt_full)
                 if not is_slot_available(
-                    date, time_hhmm, DEFAULT_SLOT_DURATION_MINUTES, staff_for
+                    date, time_hhmm, confirm_duration, staff_for
                 ):
                     sorry = (
                         "Sorry — that time was just taken and we can't hold it anymore. "
@@ -8816,7 +8856,7 @@ async def handle_incoming_sms(request: Request):
                         media_type="application/xml",
                     )
                 reserve_slot(
-                    date, time_hhmm, aid, DEFAULT_SLOT_DURATION_MINUTES, staff_for
+                    date, time_hhmm, aid, confirm_duration, staff_for
                 )
                 db_appointments_update(
                     aid, status="pending_review", client_id=tenant["client_id"]
