@@ -77,7 +77,7 @@ except ImportError:
     stripe = None
     STRIPE_AVAILABLE = False
 
-from prompts.receptionist import build_system_prompt
+from prompts.receptionist import appointment_focus_guidance, build_system_prompt
 from voice.call_session_store import MemoryCallSessionStore, get_call_session_store
 from settings import get_settings
 from security.webhooks import (
@@ -8737,7 +8737,12 @@ async def handle_incoming_sms(request: Request):
         history_str = "\n".join(
             [f"{m['role']}: {m['content']}" for m in messages[-10:]]
         )
+        booking_focus = appointment_focus_guidance(
+            business_name, include_booked_slots=True, channel="sms"
+        )
         sys_prompt = f"""You're the friendly text receptionist for {business_name}. Keep replies short (1-3 sentences), casual, like texting a friend.
+
+{booking_focus}
 
 {apt_info}{pending_customer_note}
 
@@ -8746,7 +8751,7 @@ They just texted: "{body}"
 Previous conversation:
 {history_str}
 
-Respond naturally. If they confirm it's correct, say we'll text when the business confirms. If they want changes (date, time, name, etc.), acknowledge and say we'll update it—don't make up new details. For other questions (hours, location, services), answer from your knowledge. Be warm and helpful."""
+Respond naturally. If they confirm it's correct, say we'll text when the business confirms. If they want changes (date, time, name, etc.), acknowledge and say we'll update it—don't make up new details. Be warm and helpful."""
 
         openai_configured = bool((os.getenv("OPENAI_API_KEY") or "").strip())
         sms_trace(

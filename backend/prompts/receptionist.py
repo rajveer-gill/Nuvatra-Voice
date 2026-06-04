@@ -8,7 +8,49 @@ injected by the caller (typically main.py) so this module stays free of DB/Twili
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
+
+
+def appointment_focus_guidance(
+    business_name: str,
+    *,
+    include_booked_slots: bool = True,
+    channel: Literal["voice", "sms"] = "voice",
+) -> str:
+    """
+    Shared instructions: prioritize booking; brief off-topic answers then redirect.
+    Used in voice system prompt and inbound SMS receptionist prompt.
+    """
+    biz = (business_name or "us").strip() or "us"
+    if channel == "sms":
+        if include_booked_slots:
+            return (
+                f"PRIMARY GOAL: Help them book an appointment at {biz}. "
+                "Steer every conversation toward scheduling when you can—ask for date, time, service, and name. "
+                "Answer business questions briefly (hours, location, services). "
+                "If they text about unrelated topics (sports, trivia, jokes, random chat): one short line at most, "
+                f"then redirect—e.g. \"Ha! I'm mostly here to help you book at {biz}—want to set up a time?\" "
+                "Stay warm; never be rude. If they only want info, answer and offer to book."
+            )
+        return (
+            f"PRIMARY GOAL: Help with questions about {biz} and connect them to the right next step. "
+            "If they might want a visit, offer to take their details or point them to the team."
+        )
+    if include_booked_slots:
+        return (
+            f"PRIMARY GOAL: Your main job is helping callers book an appointment at {biz}. "
+            "Move every turn toward scheduling when possible—name, date, time, stylist when applicable, and service. "
+            "Answer business-related questions briefly (hours, location, services, policies, staff). "
+            "If they ask something unrelated to the business or booking (trivia, sports, jokes, chit-chat): "
+            "at most one short sentence, then politely steer back—e.g. "
+            f"\"I'm not much help with that, but I can get you booked at {biz}—would you like an appointment?\" "
+            "Do not hold long off-topic conversations. Stay warm; never refuse rudely. "
+            "If they clearly want something else (speak to someone, leave a message), help with that, then offer to book if appropriate."
+        )
+    return (
+        f"PRIMARY GOAL: Help callers with questions about {biz} and connect them to the right next step "
+        "(transfer, message, or general info). If they might want a visit, offer to take their details or connect them with the team."
+    )
 
 
 def _format_price_for_prompt(price: object) -> str:
@@ -330,7 +372,12 @@ def build_system_prompt(
             "Keep responses brief (1-2 short sentences) and clear."
         )
 
+    focus_block = appointment_focus_guidance(
+        name, include_booked_slots=include_booked_slots, channel="voice"
+    )
     base_prompt = f"""{header}
+
+{focus_block}
 
 You can help with:
 {help_section}{staff_block}{memory_block}{slots_block}"""

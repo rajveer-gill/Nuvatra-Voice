@@ -2,7 +2,11 @@
 
 import pytest
 
-from prompts.receptionist import build_system_prompt, format_service_catalog_for_prompt
+from prompts.receptionist import (
+    appointment_focus_guidance,
+    build_system_prompt,
+    format_service_catalog_for_prompt,
+)
 
 
 @pytest.fixture
@@ -149,6 +153,23 @@ def test_service_catalog_prompt_uses_natural_voice_guidance():
     assert "sound like a real receptionist" in block
     assert "($30.0" not in block
     assert "30 min)" not in block
+
+
+def test_prompt_orients_caller_toward_booking(minimal_business):
+    p = build_system_prompt(
+        business_info=minimal_business,
+        include_booked_slots=True,
+        booked_slots_prompt_text="",
+    )
+    assert "PRIMARY GOAL" in p
+    assert "book an appointment" in p.lower()
+    assert "unrelated" in p.lower() or "off-topic" in p.lower() or "trivia" in p.lower()
+
+
+def test_appointment_focus_guidance_sms_off_topic_redirect():
+    g = appointment_focus_guidance("Test Spa", include_booked_slots=True, channel="sms")
+    assert "book an appointment" in g.lower()
+    assert "trivia" in g.lower() or "unrelated" in g.lower()
 
 
 def test_prompt_services_not_robotic_price_list():
