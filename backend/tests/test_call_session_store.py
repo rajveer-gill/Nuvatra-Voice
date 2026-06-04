@@ -54,6 +54,18 @@ def test_memory_incr_media_stream_gen():
     assert store.get_media_stream_max_gen(SID_A) == 1
 
 
+def test_merge_session_persists_fields():
+    store = MemoryCallSessionStore()
+    store.create(SID_A, {"client_id": "t1"})
+    assert store.merge_session(SID_A, {"twilio_public_base_url": "https://api.example.com"})
+    row = store.get(SID_A) or {}
+    assert row.get("twilio_public_base_url") == "https://api.example.com"
+    store.incr_media_stream_gen(SID_A)
+    row2 = store.get(SID_A) or {}
+    assert row2.get("twilio_public_base_url") == "https://api.example.com"
+    assert row2.get("media_stream_gen") == 1
+
+
 def test_memory_incr_rejects_non_string_call_sid():
     store = MemoryCallSessionStore()
     store.create(SID_A, {})

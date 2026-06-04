@@ -65,6 +65,9 @@ class CallSessionStore(ABC):
     def incr_media_stream_gen(self, call_sid: str) -> int: ...
 
     @abstractmethod
+    def merge_session(self, call_sid: str, updates: dict[str, Any]) -> bool: ...
+
+    @abstractmethod
     def get_media_stream_max_gen(self, call_sid: str) -> int: ...
 
     @abstractmethod
@@ -111,6 +114,16 @@ class MemoryCallSessionStore(CallSessionStore):
         sid = normalize_call_sid(call_sid)
         _reject_invalid_call_sid(sid)
         self.sessions[sid] = data
+
+    def merge_session(self, call_sid: str, updates: dict[str, Any]) -> bool:
+        sid = normalize_call_sid(call_sid)
+        if not sid or not updates:
+            return False
+        session = self.sessions.get(sid)
+        if session is None:
+            return False
+        session.update(updates)
+        return True
 
     def delete(self, call_sid: str) -> None:
         sid = normalize_call_sid(call_sid)
@@ -201,6 +214,9 @@ class _SessionsProxy:
             return default
         self._store.delete(call_sid)
         return data
+
+    def merge_session(self, call_sid: str, updates: dict[str, Any]) -> bool:
+        return self._store.merge_session(call_sid, updates)
 
     def items(self):
         for sid in self._store.list_call_sids():
@@ -307,6 +323,17 @@ class RedisCallSessionStore(CallSessionStore):
 
     def save(self, call_sid: str, data: dict[str, Any]) -> None:
         self.create(call_sid, data)
+
+    def merge_session(self, call_sid: str, updates: dict[str, Any]) -> bool:
+        sid = normalize_call_sid(call_sid)
+        if not sid or not updates:
+            return False
+        session = self.get(sid)
+        if session is None:
+            return False
+        session.update(updates)
+        self.save(sid, session)
+        return True
 
     def delete(self, call_sid: str) -> None:
         sid = normalize_call_sid(call_sid)

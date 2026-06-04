@@ -8989,21 +8989,6 @@ async def handle_incoming_call(request: Request):
             from_number=from_number,
             to_number=to_number,
         )
-        active_calls[call_sid] = {
-            "session_id": session_id,
-            "from_number": from_number,
-            "to_number": to_number,
-            "client_id": client_id,
-            "conversation_history": [],
-            "detected_language": None,  # Will be detected from first speech input
-            "started_at": datetime.now().isoformat(),
-            "caller_memory": caller_memory,
-        }
-        if client_id:
-            create_tracked_task(
-                _warm_client_voice_cache_async(client_id),
-                name=f"warm_voice_cache:{client_id}",
-            )
 
         base_url = _twilio_base_url(request)
         if not base_url:
@@ -9020,7 +9005,22 @@ async def handle_incoming_call(request: Request):
             fail_twiml.hangup()
             return Response(content=str(fail_twiml), media_type="application/xml")
 
-        active_calls[call_sid]["twilio_public_base_url"] = base_url
+        active_calls[call_sid] = {
+            "session_id": session_id,
+            "from_number": from_number,
+            "to_number": to_number,
+            "client_id": client_id,
+            "conversation_history": [],
+            "detected_language": None,  # Will be detected from first speech input
+            "started_at": datetime.now().isoformat(),
+            "caller_memory": caller_memory,
+            "twilio_public_base_url": base_url,
+        }
+        if client_id:
+            create_tracked_task(
+                _warm_client_voice_cache_async(client_id),
+                name=f"warm_voice_cache:{client_id}",
+            )
 
         biz_info = get_business_info()
         if staff_roster_ready_for_booking(biz_info):
@@ -9131,6 +9131,15 @@ async def handle_incoming_call(request: Request):
                 base_url=base_url,
                 still_there_play_url=still_there_url,
                 call_state=active_calls[call_sid],
+            )
+            _persist_call_session(call_sid)
+            voice_debug(
+                "incoming_deepgram_twiml_ready",
+                call_sid=call_sid,
+                media_stream_gen=call_store.get_media_stream_max_gen(call_sid),
+                has_public_base_url=bool(
+                    (call_store.get(call_sid) or {}).get("twilio_public_base_url")
+                ),
             )
             return Response(content=str(response), media_type="application/xml")
 

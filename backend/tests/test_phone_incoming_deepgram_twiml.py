@@ -62,3 +62,4 @@ def test_incoming_twiml_persists_media_stream_gen(deepgram_phone_client):
     assert resp.status_code == 200
     row = main.call_store.get(sid) or {}
     assert int(row.get("media_stream_gen") or 0) >= 2
+    assert (row.get("twilio_public_base_url") or "").startswith("https://")

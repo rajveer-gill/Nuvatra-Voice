@@ -23,6 +23,26 @@ from voice.utterance import apply_caller_utterance
 _log = logging.getLogger("nuvatra")
 
 
+def _resolve_stream_base_url(row: dict[str, Any], call_sid: str) -> tuple[str, str]:
+    """
+    Resolve HTTPS base URL for REST updates during a media stream.
+    Returns (base_url, source) where source is session|env|none (for logs only).
+    """
+    session_base = (row.get("twilio_public_base_url") or "").strip()
+    if session_base:
+        return session_base, "session"
+    try:
+        import main as m
+
+        env_base = (m._public_base_url() or "").strip()
+        if env_base:
+            voice_info("media_ws_base_url_env_fallback", call_sid=call_sid)
+            return env_base, "env"
+    except Exception:
+        pass
+    return "", "none"
+
+
 class _UtteranceCollector:
     """Accumulate Deepgram finals + last interim; commit once after debounce."""
 
@@ -208,6 +228,21 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                 if max_gen < 1:
                     max_gen = int(row.get("media_stream_gen") or 0)
                 tok_gen = token_stream_generation(token)
+                session_has_base = bool((row.get("twilio_public_base_url") or "").strip())
+                voice_info(
+                    "media_ws_handshake",
+                    call_sid=call_sid,
+                    max_gen=max_gen,
+                    token_gen=tok_gen,
+                    has_token=bool(token),
+                    session_has_base_url=session_has_base,
+                    session_exists=bool(row),
+                )
+                voice_debug(
+                    "media_ws_handshake_detail",
+                    call_sid=call_sid,
+                    session_keys=sorted(row.keys()) if row else [],
+                )
                 if not call_sid or not token or not max_gen:
                     voice_info(
                         "media_ws_close",
@@ -229,12 +264,25 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                     )
                     await websocket.close(code=4401)
                     return
-                base_url = (row.get("twilio_public_base_url") or "").strip()
+                base_url, base_source = _resolve_stream_base_url(row, call_sid)
                 if not base_url:
-                    voice_info("media_ws_close", reason="missing_base_url", call_sid=call_sid)
+                    voice_info(
+                        "media_ws_close",
+                        reason="missing_base_url",
+                        call_sid=call_sid,
+                        session_has_base_url=session_has_base,
+                    )
                     await websocket.close(code=4400)
                     return
-                voice_info("twilio_stream_start", call_sid=call_sid)
+                if base_source == "env" and not session_has_base:
+                    m.call_store.merge_session(
+                        call_sid, {"twilio_public_base_url": base_url}
+                    )
+                voice_info(
+                    "twilio_stream_start",
+                    call_sid=call_sid,
+                    base_url_source=base_source,
+                )
                 stream_deadline = time.monotonic() + max_sec
                 try:
                     dg_ws = await connect_deepgram_listen()
