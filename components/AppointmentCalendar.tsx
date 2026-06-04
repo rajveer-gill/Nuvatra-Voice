@@ -225,7 +225,7 @@ export default function AppointmentCalendar({
           <span className="text-base font-semibold text-white">Schedule</span>
           {loading && <Loader2 className="h-4 w-4 animate-spin text-cyan-400" aria-label="Loading" />}
         </div>
-        {staffList.length > 1 ? (
+        {staffList.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2">
             <Filter className="h-4 w-4 text-zinc-500" aria-hidden />
             <label htmlFor="cal-staff-filter" className="text-sm text-zinc-400">

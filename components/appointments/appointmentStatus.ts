@@ -34,3 +34,15 @@ export function canCancelAccepted(status: string): boolean {
 export function needsResponse(status: string): boolean {
   return status === 'pending' || status === 'pending_review' || status === 'pending_customer'
 }
+
+/** Cancelled / declined rows are hidden from list and calendar views. */
+export function isHiddenAppointmentStatus(status: string): boolean {
+  return status === 'cancelled' || status === 'rejected'
+}
+
+export function appointmentDateTimeSortKey(date: string, time?: string | null): string {
+  const d = (date || '').trim()
+  const raw = (time || '00:00').trim()
+  const hhmm = raw.length >= 5 ? raw.slice(0, 5) : raw.padStart(5, '0')
+  return `${d}T${hhmm}`
+}

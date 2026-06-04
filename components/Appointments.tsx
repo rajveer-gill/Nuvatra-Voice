@@ -16,7 +16,7 @@ import {
 import { useApiClient } from '@/lib/api'
 import AppointmentCalendar from '@/components/AppointmentCalendar'
 import { AppointmentCard, apiDetail } from '@/components/appointments/AppointmentCard'
-import { needsResponse } from '@/components/appointments/appointmentStatus'
+import { needsResponse, isHiddenAppointmentStatus, appointmentDateTimeSortKey } from '@/components/appointments/appointmentStatus'
 import type { Appointment } from '@/components/appointments/types'
 import { staggerContainer } from '@/components/motion/variants'
 
@@ -28,6 +28,7 @@ export default function Appointments() {
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [staffFilter, setStaffFilter] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [showForm, setShowForm] = useState(false)
@@ -105,28 +106,34 @@ export default function Appointments() {
 
   const staffNameById = Object.fromEntries(staffOptions.map((s) => [s.id, s.name]))
 
-  const filtered = appointments
+  const visibleAppointments = useMemo(
+    () => appointments.filter((a) => !isHiddenAppointmentStatus(a.status)),
+    [appointments]
+  )
+
+  const filtered = visibleAppointments
     .filter((a) => {
+      if (staffFilter && (a.staff_id || '') !== staffFilter) return false
       if (statusFilter === 'needs_response' && !needsResponse(a.status)) return false
       if (statusFilter === 'accepted' && !['accepted', 'confirmed', 'completed'].includes(a.status))
         return false
-      if (statusFilter === 'declined' && !['rejected', 'cancelled'].includes(a.status)) return false
       if (dateFrom && a.date < dateFrom) return false
       if (dateTo && a.date > dateTo) return false
       return true
     })
-    .sort((a, b) => {
-      const d = (x: Appointment) => `${x.date}T${x.time || '00:00'}`
-      return d(a).localeCompare(d(b))
-    })
+    .sort((a, b) =>
+      appointmentDateTimeSortKey(a.date, a.time).localeCompare(
+        appointmentDateTimeSortKey(b.date, b.time)
+      )
+    )
 
   const stats = useMemo(() => {
-    const needs = appointments.filter((a) => needsResponse(a.status)).length
-    const accepted = appointments.filter((a) =>
+    const needs = visibleAppointments.filter((a) => needsResponse(a.status)).length
+    const accepted = visibleAppointments.filter((a) =>
       ['accepted', 'confirmed', 'completed'].includes(a.status)
     ).length
-    return { total: appointments.length, needs, accepted }
-  }, [appointments])
+    return { total: visibleAppointments.length, needs, accepted }
+  }, [visibleAppointments])
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -412,8 +419,22 @@ export default function Appointments() {
                 <option value="all">All statuses</option>
                 <option value="needs_response">Needs response</option>
                 <option value="accepted">Accepted</option>
-                <option value="declined">Declined</option>
               </select>
+              {staffOptions.length > 0 ? (
+                <select
+                  value={staffFilter}
+                  onChange={(e) => setStaffFilter(e.target.value)}
+                  className="rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+                  aria-label="Filter by stylist"
+                >
+                  <option value="">All stylists</option>
+                  {staffOptions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               <input
                 type="date"
                 value={dateFrom}
