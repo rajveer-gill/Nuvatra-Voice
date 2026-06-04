@@ -24,7 +24,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 logger = logging.getLogger("nuvatra")
 import os
 from dotenv import load_dotenv
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 import hmac
 import secrets
 import math
@@ -2553,6 +2553,12 @@ def _staff_slot_key(sid: Optional[str]) -> str:
     return s if s else "__unassigned__"
 
 
+def _staff_label_for_slot_key(staff_key: str, id_to_name: dict[str, str]) -> str:
+    if staff_key == "__unassigned__":
+        return "Unassigned"
+    return id_to_name.get(staff_key, staff_key)
+
+
 # Appointment must be in one of these statuses for a booked_slots row (or merged row) to block the calendar.
 # pending_customer: voice/SMS draft — slot is not held until customer SMS-confirm (reserve_slot then).
 # rejected / missing appointment: orphan booked_slots rows must not block forever.
@@ -2990,7 +2996,7 @@ def _invalidate_booked_slots_cache() -> None:
 
 
 def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False) -> str:
-    """Build a short line for the system prompt: already booked slots for today + days_ahead."""
+    """Build booked-slot lines for the system prompt (per-stylist when multi-staff)."""
     from datetime import timedelta
 
     now = datetime.now(timezone.utc)
@@ -3006,7 +3012,6 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
             )
             return text
         del _booked_slots_cache[cache_key]
-    # Single merge + group by date (was: 90x get_booked_slots = 90x DB fetches)
     all_slots = _get_all_booked_slots_merged()
     system_debug(
         "booked_slots_prompt_built",
@@ -3014,44 +3019,125 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
         skip_cache=skip_cache,
         total_slots=len(all_slots),
     )
-    by_date: dict = {}
-    for s in all_slots:
-        dt = s.get("date")
-        if not dt:
-            continue
-        if dt not in by_date:
-            by_date[dt] = []
-        t = s.get("time", "")
-        if t:
-            by_date[dt].append(t)
+    info = get_business_info()
+    roster = [
+        ((s.get("id") or "").strip(), (s.get("name") or "").strip())
+        for s in (info.get("staff") or [])
+        if (s.get("name") or "").strip()
+    ]
+    multi_staff = len(roster) >= 2
+    id_to_name = {sid: name for sid, name in roster if sid}
     today = now.date()
-    # Common business-hour times to suggest when some slots are taken (so we never suggest a taken time)
     default_times = [f"{h:02d}:00" for h in range(9, 18)]  # 09:00–17:00
-    parts = []
-    suggest_parts = []
-    for d in range(days_ahead):
-        day = today + timedelta(days=d)
-        date_str = day.isoformat()
-        times = by_date.get(date_str) or []
-        if times:
-            # Show times in AM/PM for the AI to speak (e.g. "1:00 PM" not "13:00")
-            times_display = [_hhmm_to_ampm(t) for t in sorted(times)]
-            parts.append(f"{date_str} at {', '.join(times_display)}")
-            # Explicit list of times the AI may suggest (exclude taken); normalize for comparison
-            taken_set = {_normalize_time_to_hhmm(t.strip()) for t in times if t}
-            taken_set = {t for t in taken_set if t}
-            safe = [t for t in default_times if t not in taken_set]
-            if safe:
-                safe_display = [_hhmm_to_ampm(t) for t in safe]
+    parts: List[str] = []
+    suggest_parts: List[str] = []
+
+    dates_with_bookings: set[str] = set()
+    for s in all_slots:
+        dt = (s.get("date") or "").strip()
+        if dt:
+            dates_with_bookings.add(dt)
+
+    if multi_staff:
+        by_stylist_booked: dict[str, List[str]] = {}
+        by_date_staff: dict[tuple[str, str], List[str]] = {}
+        for s in all_slots:
+            dt = (s.get("date") or "").strip()
+            t = (s.get("time") or "").strip()
+            if not dt or not t:
+                continue
+            sk = _staff_slot_key(s.get("staff_id"))
+            by_date_staff.setdefault((dt, sk), []).append(t)
+        for (dt, sk), times in sorted(by_date_staff.items()):
+            label = _staff_label_for_slot_key(sk, id_to_name)
+            times_display = [_hhmm_to_ampm(x) for x in sorted(set(times))]
+            by_stylist_booked.setdefault(label, []).append(
+                f"{dt} at {', '.join(times_display)}"
+            )
+        if by_stylist_booked:
+            booked_lines = [
+                f"{label}: {'; '.join(lines)}"
+                for label, lines in sorted(by_stylist_booked.items())
+            ]
+            parts.append(
+                "Booked slots by stylist (each calendar is separate—do not merge across people): "
+                + " | ".join(booked_lines)
+            )
+        roster_with_ids = [(sid, name) for sid, name in roster if sid]
+        for d in range(days_ahead):
+            day = today + timedelta(days=d)
+            date_str = day.isoformat()
+            if date_str not in dates_with_bookings:
+                continue
+            for sid, name in roster_with_ids:
+                times = by_date_staff.get((date_str, sid), [])
+                taken_set = {
+                    t
+                    for t in (
+                        _normalize_time_to_hhmm(x.strip()) for x in times if x
+                    )
+                    if t
+                }
+                if not taken_set:
+                    suggest_parts.append(
+                        f"For {name} on {date_str} no times are booked for {name}—"
+                        f"standard hours 9 AM–5 PM are available with {name}."
+                    )
+                    continue
+                safe = [t for t in default_times if t not in taken_set]
                 taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]
-                suggest_parts.append(
-                    f"For {date_str} ONLY suggest these times (they are free): {', '.join(safe_display)}. Never suggest {', '.join(taken_display)}—already taken."
-                )
-    text = (
-        ("Booked slots (do not double-book): " + "; ".join(parts) + ". ")
-        if parts
-        else ""
-    )
+                if safe:
+                    safe_display = [_hhmm_to_ampm(t) for t in safe]
+                    suggest_parts.append(
+                        f"For {name} on {date_str} ONLY suggest these times (free for {name}): "
+                        f"{', '.join(safe_display)}. Never suggest {', '.join(taken_display)} for {name}—"
+                        f"already taken for {name}."
+                    )
+                else:
+                    suggest_parts.append(
+                        f"For {name} on {date_str} standard hours appear fully booked for {name} "
+                        f"({', '.join(taken_display)}). Offer another day or another stylist—not "
+                        f"that the whole salon is closed."
+                    )
+    else:
+        by_date: dict[str, List[str]] = {}
+        for s in all_slots:
+            dt = (s.get("date") or "").strip()
+            if not dt:
+                continue
+            t = (s.get("time") or "").strip()
+            if t:
+                by_date.setdefault(dt, []).append(t)
+        for d in range(days_ahead):
+            day = today + timedelta(days=d)
+            date_str = day.isoformat()
+            times = by_date.get(date_str) or []
+            if times:
+                times_display = [_hhmm_to_ampm(t) for t in sorted(times)]
+                parts.append(f"{date_str} at {', '.join(times_display)}")
+                taken_set = {
+                    t
+                    for t in (
+                        _normalize_time_to_hhmm(x.strip()) for x in times if x
+                    )
+                    if t
+                }
+                safe = [t for t in default_times if t not in taken_set]
+                if safe:
+                    safe_display = [_hhmm_to_ampm(t) for t in safe]
+                    taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]
+                    suggest_parts.append(
+                        f"For {date_str} ONLY suggest these times (they are free): "
+                        f"{', '.join(safe_display)}. Never suggest {', '.join(taken_display)}—already taken."
+                    )
+
+    if parts:
+        if multi_staff:
+            text = " ".join(parts) + ". "
+        else:
+            text = "Booked slots (do not double-book): " + "; ".join(parts) + ". "
+    else:
+        text = ""
     if suggest_parts:
         text += " " + " ".join(suggest_parts)
     expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
@@ -3425,6 +3511,16 @@ def _validate_booking_requirements(
     service_name, service_required = _normalize_service_choice_for_booking(
         booking.get("reason"), biz
     )
+    booking_date = (booking.get("date") or "").strip()
+    if booking_date:
+        try:
+            from business_hours import is_past_closing_for_date, same_day_after_hours_message
+
+            target = date.fromisoformat(booking_date)
+            if is_past_closing_for_date(biz, target):
+                return False, same_day_after_hours_message(biz), staff_id, None
+        except ValueError:
+            pass
     if service_required and not service_name:
         service_choices = ", ".join(
             (s.get("name") or "").strip()
@@ -4254,13 +4350,19 @@ def get_system_prompt(
     booked_text = None
     if include_booked_slots:
         booked_text = get_booked_slots_prompt_text(skip_cache=skip_slots_cache)
-    return build_system_prompt(
+    prompt = build_system_prompt(
         business_info=info,
         detected_language=detected_language,
         caller_memory=caller_memory,
         include_booked_slots=include_booked_slots,
         booked_slots_prompt_text=booked_text,
     )
+    from business_hours import after_hours_prompt_block
+
+    after_hours = after_hours_prompt_block(info)
+    if after_hours:
+        prompt = f"{prompt}\n\n{after_hours}"
+    return prompt
 
 
 @app.get("/")

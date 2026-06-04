@@ -283,3 +283,37 @@ def test_format_confirmation_sms_shows_customer_and_stylist(monkeypatch):
     assert "Customer: Sarah" in msg
     assert "Stylist: Tom" in msg
     assert "Name:" not in msg
+
+
+def test_validate_booking_rejects_same_day_after_hours(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    biz = {
+        "name": "Test Salon",
+        "hours": "Monday-Friday: 9 AM - 5 PM",
+        "timezone": "America/Los_Angeles",
+        "services": [{"id": "s1", "name": "Haircut"}],
+        "staff": [{"id": "j1", "name": "Jake"}],
+    }
+    monkeypatch.setattr("main.get_business_info", lambda: biz)
+    fixed = datetime(2026, 6, 4, 18, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+    monkeypatch.setattr(
+        "business_hours.business_local_now", lambda info, now=None: fixed
+    )
+    ok, msg, _, _ = _validate_booking_requirements(
+        {
+            "name": "Alex",
+            "date": "2026-06-04",
+            "time": "15:00",
+            "reason": "Haircut",
+            "staff": "Jake",
+        },
+        conversation_history=[
+            {"role": "user", "content": "Book with Jake today at 3"},
+        ],
+    )
+    assert ok is False
+    assert msg
+    assert "closed for today" in msg.lower()
+

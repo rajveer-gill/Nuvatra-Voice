@@ -294,13 +294,24 @@ def build_system_prompt(
     slots_block = ""
     if include_booked_slots:
         slots_text = booked_slots_prompt_text or ""
+        roster_names = [(s.get("name") or "").strip() for s in staff if (s.get("name") or "").strip()]
+        multi_staff = len(roster_names) >= 2
         if slots_text.strip():
-            slots_block = (
-                f"\n- {slots_text}\n"
-                "- CRITICAL: Times listed above (with AM/PM) are TAKEN. When the prompt says "
-                "'ONLY suggest these times' for a date, suggest ONLY those times—never suggest a time "
-                "that is 'already taken' for that date. If the list is empty, all times are available."
-            )
+            if multi_staff:
+                slots_critical = (
+                    "- CRITICAL: Booked times above are PER STYLIST—each person has their own calendar. "
+                    "Another stylist being busy does NOT mean your chosen stylist is fully booked. "
+                    "Only say a stylist is 'fully booked' on a day when that specific stylist has no free times "
+                    "in their list below. When the prompt says 'ONLY suggest these times for [Name]', use that list "
+                    "only for that person—never merge bookings across stylists."
+                )
+            else:
+                slots_critical = (
+                    "- CRITICAL: Times listed above (with AM/PM) are TAKEN. When the prompt says "
+                    "'ONLY suggest these times' for a date, suggest ONLY those times—never suggest a time "
+                    "that is 'already taken' for that date. If the list is empty, all times are available."
+                )
+            slots_block = f"\n- {slots_text}\n{slots_critical}"
         else:
             slots_block = (
                 "\n- Booked slots: none. CRITICAL: There are no booked slots, so ALL times are available. "
@@ -310,14 +321,13 @@ def build_system_prompt(
         today_utc = datetime.now(timezone.utc).date()
         today_str = today_utc.isoformat()
         tomorrow_str = (today_utc + timedelta(days=1)).isoformat()
-        roster_names = [(s.get("name") or "").strip() for s in staff if (s.get("name") or "").strip()]
-        multi_staff = len(roster_names) >= 2
         staff_booking_rules = ""
         if multi_staff:
             staff_booking_rules = (
                 f"- STYLIST: Multiple team members on the roster ({', '.join(roster_names)}). "
                 "Before BOOKING, you MUST ask which stylist they prefer (or if anyone is fine). "
-                "Put the exact name in the 7th BOOKING field when they choose; leave staff empty only if they have no preference.\n"
+                "Put the exact name in the 7th BOOKING field when they choose; leave staff empty only if they have no preference. "
+                "Availability is per stylist—never say someone is fully booked because another stylist is busy.\n"
             )
         elif len(roster_names) == 1:
             staff_booking_rules = (
@@ -343,6 +353,7 @@ def build_system_prompt(
             )
         slots_block += f"""
 - TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
+- AFTER HOURS: If the prompt includes an AFTER HOURS note, the shop is already closed for today—do not book same-day appointments; tell the caller we're closed for today and ask for another day.
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date, time, service, and stylist when applicable. Do NOT ask for email—we confirm by text/SMS only.
