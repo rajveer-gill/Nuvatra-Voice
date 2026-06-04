@@ -278,7 +278,7 @@ _openai_pre_warm_disabled = False
 
 
 async def pre_warm_openai():
-    """Pre-warm OpenAI client. Greeting/got-it clips are pre-generated on settings save and incoming calls."""
+    """Pre-warm OpenAI client. Greeting/got-it clips pre-generate on startup, settings save, and incoming calls."""
     global _openai_pre_warm_disabled
     if _openai_pre_warm_disabled:
         return
@@ -327,10 +327,18 @@ async def lifespan(app: FastAPI):
     db_task = create_tracked_task(
         asyncio.to_thread(_init_db_background), name="init_db_background"
     )
+
+    async def _voice_cache_after_db():
+        await db_task
+        await _startup_prewarm_voice_caches()
+
+    voice_cache_task = create_tracked_task(
+        _voice_cache_after_db(), name="startup_voice_cache_prewarm"
+    )
     warm_task = create_tracked_task(pre_warm_openai(), name="pre_warm_openai")
     keep_warm_task = create_tracked_task(keep_client_warm(), name="keep_client_warm")
     yield
-    for t in (db_task, warm_task, keep_warm_task):
+    for t in (db_task, voice_cache_task, warm_task, keep_warm_task):
         t.cancel()
         try:
             await t
@@ -1258,56 +1266,75 @@ def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
     return resp.content
 
 
-def warm_client_voice_cache(client_id: str) -> None:
-    """Pre-generate greeting, got-it, and one-moment clips for a tenant."""
+def _ensure_greeting_audio_cached(client_id: str) -> bool:
+    """Ensure greeting clip exists in cache; synthesize on miss. Returns True when cached."""
+    from voice.tts_cache import get_cached, put_cached
+
+    cid = (client_id or "").strip()
+    if not cid or cid == "default":
+        return False
+    set_request_client_id(cid)
+    greeting_key = _greeting_audio_cache_key(cid)
+    if get_cached(PROJECT_ROOT, "greeting", greeting_key):
+        return True
+    info = get_business_info()
+    tenant = _tenant_for_call_recording()
+    payload = build_phone_greeting_payload(info, tenant)
+    voice = (payload.get("voice") or get_tts_voice() or "fable").strip()
+    speed = get_tts_speed()
+    data = _synthesize_tts_clip(payload["spoken_text"], voice=voice, speed=speed)
+    put_cached(PROJECT_ROOT, "greeting", greeting_key, data)
+    voice_info(
+        "greeting_audio_prewarmed",
+        client_id_prefix=cid[:12],
+        voice=voice,
+        bytes=len(data),
+    )
+    return True
+
+
+def _warm_auxiliary_voice_cache(client_id: str) -> None:
+    """Pre-generate got-it and one-moment clips (non-blocking for call answer)."""
     from voice.tts_cache import get_cached, put_cached
 
     cid = (client_id or "").strip()
     if not cid or cid == "default":
         return
     set_request_client_id(cid)
+    got_it_key = _got_it_cache_key(cid)
+    if not get_cached(PROJECT_ROOT, "got_it", got_it_key):
+        voice = got_it_key[2]
+        speed = got_it_key[3]
+        data = _synthesize_tts_clip(GOT_IT_PHRASE, voice=voice, speed=speed)
+        put_cached(PROJECT_ROOT, "got_it", got_it_key, data)
+        voice_info(
+            "got_it_audio_prewarmed",
+            client_id_prefix=cid[:12],
+            voice=voice,
+            bytes=len(data),
+        )
+    one_moment_key = _one_moment_cache_key(cid)
+    if not get_cached(PROJECT_ROOT, "one_moment", one_moment_key):
+        voice = one_moment_key[2]
+        speed = one_moment_key[3]
+        data = _synthesize_tts_clip(ONE_MOMENT_PHRASE, voice=voice, speed=speed)
+        put_cached(PROJECT_ROOT, "one_moment", one_moment_key, data)
+        voice_info(
+            "one_moment_audio_prewarmed",
+            client_id_prefix=cid[:12],
+            voice=voice,
+            bytes=len(data),
+        )
+
+
+def warm_client_voice_cache(client_id: str) -> None:
+    """Pre-generate greeting, got-it, and one-moment clips for a tenant."""
+    cid = (client_id or "").strip()
+    if not cid or cid == "default":
+        return
     try:
-        greeting_key = _greeting_audio_cache_key(cid)
-        if not get_cached(PROJECT_ROOT, "greeting", greeting_key):
-            info = get_business_info()
-            tenant = _tenant_for_call_recording()
-            payload = build_phone_greeting_payload(info, tenant)
-            voice = (payload.get("voice") or get_tts_voice() or "fable").strip()
-            speed = get_tts_speed()
-            data = _synthesize_tts_clip(
-                payload["spoken_text"], voice=voice, speed=speed
-            )
-            put_cached(PROJECT_ROOT, "greeting", greeting_key, data)
-            voice_info(
-                "greeting_audio_prewarmed",
-                client_id_prefix=cid[:12],
-                voice=voice,
-                bytes=len(data),
-            )
-        got_it_key = _got_it_cache_key(cid)
-        if not get_cached(PROJECT_ROOT, "got_it", got_it_key):
-            voice = got_it_key[2]
-            speed = got_it_key[3]
-            data = _synthesize_tts_clip(GOT_IT_PHRASE, voice=voice, speed=speed)
-            put_cached(PROJECT_ROOT, "got_it", got_it_key, data)
-            voice_info(
-                "got_it_audio_prewarmed",
-                client_id_prefix=cid[:12],
-                voice=voice,
-                bytes=len(data),
-            )
-        one_moment_key = _one_moment_cache_key(cid)
-        if not get_cached(PROJECT_ROOT, "one_moment", one_moment_key):
-            voice = one_moment_key[2]
-            speed = one_moment_key[3]
-            data = _synthesize_tts_clip(ONE_MOMENT_PHRASE, voice=voice, speed=speed)
-            put_cached(PROJECT_ROOT, "one_moment", one_moment_key, data)
-            voice_info(
-                "one_moment_audio_prewarmed",
-                client_id_prefix=cid[:12],
-                voice=voice,
-                bytes=len(data),
-            )
+        _ensure_greeting_audio_cached(cid)
+        _warm_auxiliary_voice_cache(cid)
     except Exception as e:
         voice_warning(
             "voice_cache_prewarm_failed",
@@ -1319,8 +1346,45 @@ def warm_client_voice_cache(client_id: str) -> None:
         )
 
 
+def _warm_all_tenant_voice_caches() -> None:
+    """Prewarm voice clips for every tenant with a Twilio number (startup / after deploy)."""
+    if USE_DB:
+        try:
+            tenants = db_tenant_list_all()
+        except Exception as e:
+            logger.warning("voice_cache_startup_prewarm list failed: %s", e)
+            return
+        for tenant in tenants:
+            cid = (tenant.get("client_id") or "").strip()
+            phone = (tenant.get("twilio_phone_number") or "").strip()
+            if not cid or not phone:
+                continue
+            try:
+                warm_client_voice_cache(cid)
+            except Exception as e:
+                logger.warning(
+                    "voice_cache_startup_prewarm failed client_id=%s: %s", cid, e
+                )
+        return
+    cid = (CLIENT_ID or "").strip()
+    if cid and cid != "default":
+        warm_client_voice_cache(cid)
+
+
 async def _warm_client_voice_cache_async(client_id: str) -> None:
     await asyncio.to_thread(warm_client_voice_cache, client_id)
+
+
+async def _warm_auxiliary_voice_cache_async(client_id: str) -> None:
+    await asyncio.to_thread(_warm_auxiliary_voice_cache, client_id)
+
+
+async def _startup_prewarm_voice_caches() -> None:
+    """After DB init, prewarm greeting/got-it/one-moment for provisioned tenants."""
+    try:
+        await asyncio.to_thread(_warm_all_tenant_voice_caches)
+    except Exception as e:
+        logger.warning("startup voice cache prewarm failed: %s", e)
 
 
 def _format_greeting_template(raw: str, info: dict) -> str:
@@ -9054,12 +9118,6 @@ async def handle_incoming_call(request: Request):
             "caller_memory": caller_memory,
             "twilio_public_base_url": base_url,
         }
-        if client_id:
-            create_tracked_task(
-                _warm_client_voice_cache_async(client_id),
-                name=f"warm_voice_cache:{client_id}",
-            )
-
         biz_info = get_business_info()
         if staff_roster_ready_for_booking(biz_info):
             svc_n = len(_normalize_service_entries(biz_info.get("services") or []))
@@ -9096,6 +9154,28 @@ async def handle_incoming_call(request: Request):
                 base_url, biz_info, call_sid=call_sid or ""
             )
             return Response(content=str(setup_twiml), media_type="application/xml")
+
+        if client_id:
+            try:
+                await asyncio.to_thread(_ensure_greeting_audio_cached, client_id)
+            except Exception as e:
+                voice_warning(
+                    "greeting_cache_ensure_failed",
+                    call_sid=call_sid or "",
+                    client_id_prefix=client_id[:12],
+                    error_type=type(e).__name__,
+                )
+                logger.warning(
+                    "ensure greeting cache failed call_sid=%s client_id=%s: %s",
+                    call_sid,
+                    client_id,
+                    e,
+                    exc_info=True,
+                )
+            create_tracked_task(
+                _warm_auxiliary_voice_cache_async(client_id),
+                name=f"warm_voice_cache_aux:{client_id}",
+            )
 
         # Create TwiML response
         response = VoiceResponse()
