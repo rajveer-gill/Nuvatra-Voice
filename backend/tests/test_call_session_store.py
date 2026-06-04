@@ -6,6 +6,7 @@ from voice.call_session_store import (
     MemoryCallSessionStore,
     RedisCallSessionStore,
     UtteranceLockError,
+    _ResponseStatusProxy,
     reset_call_session_store_for_tests,
 )
 
@@ -81,6 +82,32 @@ def test_memory_proxy_dict_compat():
     assert store.response_status[SID_B]["status"] == "ready"
     store.cleanup_call(SID_B)
     assert SID_B not in store.sessions
+
+
+def test_redis_response_status_proxy_delitem():
+    """Redis response_status proxy must support del (respond_with_audio cleanup)."""
+    inner = MemoryCallSessionStore()
+
+    class _Wrap:
+        def __init__(self, mem: MemoryCallSessionStore):
+            self._mem = mem
+
+        def get_response_status(self, call_sid: str):
+            return self._mem.get_response_status(call_sid)
+
+        def set_response_status(self, call_sid: str, status: dict):
+            self._mem.set_response_status(call_sid, status)
+
+        def pop_response_status(self, call_sid: str):
+            return self._mem.pop_response_status(call_sid)
+
+    proxy = _ResponseStatusProxy(_Wrap(inner))  # type: ignore[arg-type]
+    inner.set_response_status(SID_A, {"status": "ready"})
+    assert SID_A in proxy
+    del proxy[SID_A]
+    assert SID_A not in proxy
+    with pytest.raises(KeyError):
+        del proxy[SID_A]
 
 
 @pytest.mark.asyncio

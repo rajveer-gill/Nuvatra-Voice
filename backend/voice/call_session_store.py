@@ -252,6 +252,11 @@ class _ResponseStatusProxy:
         data = self._store.pop_response_status(call_sid)
         return data if data is not None else default
 
+    def __delitem__(self, call_sid: str) -> None:
+        sid = normalize_call_sid(call_sid)
+        if not sid or self._store.pop_response_status(sid) is None:
+            raise KeyError(call_sid)
+
 
 def create_redis_client(redis_url: str):
     """Create a Redis client with timeouts; enforce TLS cert verify for rediss://."""
