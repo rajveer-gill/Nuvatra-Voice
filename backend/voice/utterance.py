@@ -51,7 +51,21 @@ async def apply_caller_utterance(
             )
     except UtteranceLockError:
         voice_warning("utterance_lock_contention", call_sid=call_sid)
-        return UtteranceResult(mode="tail_play_respond")
+        import main as m
+
+        if call_sid and m.response_status.get(call_sid):
+            bu = base_url.rstrip("/")
+            poll = m.VoiceResponse()
+            poll.redirect(f"{bu}/api/phone/respond?CallSid={call_sid}", method="POST")
+            return UtteranceResult(
+                mode="replace_call_twiml", replacement_twiml=str(poll)
+            )
+        from voice.twiml_stt import got_it_respond_twiml
+
+        return UtteranceResult(
+            mode="replace_call_twiml",
+            replacement_twiml=got_it_respond_twiml(call_sid, base_url),
+        )
 
 
 async def _apply_caller_utterance_locked(

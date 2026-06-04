@@ -218,6 +218,12 @@ class _SessionsProxy:
     def merge_session(self, call_sid: str, updates: dict[str, Any]) -> bool:
         return self._store.merge_session(call_sid, updates)
 
+    def __delitem__(self, call_sid: str) -> None:
+        sid = normalize_call_sid(call_sid)
+        if not sid or not self._store.exists(sid):
+            raise KeyError(call_sid)
+        self._store.delete(sid)
+
     def items(self):
         for sid in self._store.list_call_sids():
             data = self._store.get(sid)
@@ -463,12 +469,22 @@ def get_call_session_store() -> CallSessionStore:
     backend = (os.getenv("VOICE_STATE_BACKEND") or "").strip().lower()
     redis_url = (os.getenv("REDIS_URL") or "").strip()
     if backend == "redis" or (backend != "memory" and redis_url):
+        if not redis_url:
+            raise RuntimeError(
+                "VOICE_STATE_BACKEND=redis requires REDIS_URL; refusing in-memory voice fallback"
+            )
         try:
             _store = RedisCallSessionStore(redis_url)
             _log.info("voice_call_session_store=redis")
             return _store
         except Exception as e:
-            _log.warning("redis_call_session_store_failed fallback=memory err=%s", type(e).__name__)
+            _log.error(
+                "redis_call_session_store_failed err=%s — refusing silent memory fallback",
+                type(e).__name__,
+            )
+            raise RuntimeError(
+                "Redis call session store unavailable; set REDIS_URL or VOICE_STATE_BACKEND=memory for dev"
+            ) from e
     _store = MemoryCallSessionStore()
     _log.info("voice_call_session_store=memory")
     return _store

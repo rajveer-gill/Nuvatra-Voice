@@ -110,6 +110,44 @@ def test_redis_response_status_proxy_delitem():
         del proxy[SID_A]
 
 
+def test_redis_sessions_proxy_delitem():
+    """Sessions proxy must support del for cleanup paths."""
+    inner = MemoryCallSessionStore()
+    inner.create(SID_A, {"client_id": "t1"})
+
+    class _Wrap:
+        def __init__(self, mem: MemoryCallSessionStore):
+            self._mem = mem
+
+        def exists(self, call_sid: str) -> bool:
+            return self._mem.exists(call_sid)
+
+        def get(self, call_sid: str):
+            return self._mem.get(call_sid)
+
+        def save(self, call_sid: str, data: dict) -> None:
+            self._mem.save(call_sid, data)
+
+        def create(self, call_sid: str, data: dict) -> None:
+            self._mem.create(call_sid, data)
+
+        def delete(self, call_sid: str) -> None:
+            self._mem.delete(call_sid)
+
+        def merge_session(self, call_sid: str, updates: dict) -> bool:
+            return self._mem.merge_session(call_sid, updates)
+
+        def list_call_sids(self) -> list[str]:
+            return self._mem.list_call_sids()
+
+    from voice.call_session_store import _SessionsProxy
+
+    proxy = _SessionsProxy(_Wrap(inner))  # type: ignore[arg-type]
+    assert SID_A in proxy
+    del proxy[SID_A]
+    assert SID_A not in proxy
+
+
 @pytest.mark.asyncio
 async def test_memory_utterance_lock_invalid_sid_raises():
     store = MemoryCallSessionStore()

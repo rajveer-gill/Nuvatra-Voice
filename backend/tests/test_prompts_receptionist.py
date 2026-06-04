@@ -123,6 +123,8 @@ def test_prompt_multi_staff_requires_stylist_question():
     p = build_system_prompt(business_info=biz, include_booked_slots=True, booked_slots_prompt_text="")
     assert "Multiple team members" in p
     assert "MUST ask which stylist" in p
+    assert "BEFORE asking which service" in p
+    assert "ask stylist preference first" in p
 
 
 def test_prompt_empty_slots_branch(minimal_business):

@@ -216,9 +216,27 @@ def test_voice_booking_nudge_prioritizes_stylist_before_service(monkeypatch):
     ]
     nudge = _voice_booking_nudge_message(history)
     assert nudge is not None
-    assert "stylist preference" in nudge
-    assert "service (ask which from the menu)" in nudge
-    assert nudge.index("stylist preference") < nudge.index("service (ask which from the menu)")
+    assert "stylist" in nudge.lower()
+    assert "Do NOT ask which service yet" in nudge
+    assert "service (ask which from the menu)" not in nudge
+
+
+def test_voice_booking_nudge_stylist_at_two_turns(monkeypatch):
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
+            "services": [{"id": "svc1", "name": "Short Cut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    history = [
+        {"role": "user", "content": "I'd like an appointment tomorrow at 3"},
+        {"role": "assistant", "content": "Sure"},
+        {"role": "user", "content": "Raj"},
+    ]
+    nudge = _voice_booking_nudge_message(history)
+    assert nudge is not None
+    assert "stylist" in nudge.lower()
 
 
 def test_ai_implies_committed_booking_detects_false_confirm():

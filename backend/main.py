@@ -3118,29 +3118,35 @@ def _count_booking_user_turns(conversation_history: Optional[list]) -> int:
 def _voice_booking_nudge_message(
     conversation_history: list, info: Optional[dict] = None
 ) -> Optional[str]:
-    """Inject after several booking turns if GPT has not emitted BOOKING: yet."""
+    """Inject during booking if GPT has not emitted BOOKING: yet."""
     biz = info or get_business_info()
     if not _conversation_suggests_booking(conversation_history):
         return None
     turns = _count_booking_user_turns(conversation_history)
-    if turns < 3:
-        return None
     user_text = _conversation_user_text(conversation_history)
-    missing: List[str] = []
+
     if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(
         user_text, biz
     ):
-        missing.append("stylist preference (or 'anyone is fine')")
+        if turns >= 2:
+            return (
+                f"BOOKING REMINDER: This caller wants an appointment ({turns} user turns). "
+                "You have NOT confirmed a stylist yet. Ask ONE short question: which stylist "
+                "they prefer (or anyone is fine). Do NOT ask which service yet—after they choose "
+                "a stylist, offer only that person's services from the roster."
+            )
+        return None
+
+    if turns < 3:
+        return None
+
     services = _normalize_service_entries(biz.get("services") or [])
     if services and not _caller_indicated_service_choice(user_text, biz):
-        missing.append("service (ask which from the menu)")
-    if missing:
-        need = " and ".join(missing)
         return (
             f"BOOKING REMINDER: This caller wants an appointment after {turns} turns. "
-            f"You still need: {need}. Ask ONE short question for the next missing item. "
-            "When name, date, time, service (if configured), and stylist (if multiple on roster) are confirmed, "
-            "you MUST output BOOKING: on this turn. Never tell the caller they are booked until BOOKING is output."
+            "Ask ONE short question: which service from the menu (only services their stylist provides). "
+            "When name, date, time, service, and stylist are confirmed, you MUST output BOOKING: on this turn. "
+            "Never tell the caller they are booked until BOOKING is output."
         )
     return (
         f"BOOKING REMINDER: After {turns} turns you have enough details. "
@@ -3323,17 +3329,19 @@ def _validate_booking_requirements(
                 staff_name = (s.get("name") or "").strip()
                 break
     if staff_rows and not staff_id:
-        choices = ", ".join(
-            (s.get("name") or "").strip()
-            for s in staff_rows[:5]
-            if (s.get("name") or "").strip()
-        )
-        msg = (
-            "Absolutely — which stylist would you like to see?"
-            + (f" We currently have {choices}." if choices else "")
-            + " You can also say anyone if you have no preference."
-        )
-        return False, msg, None, None
+        no_pref = any(p in user_text.lower() for p in _STYLIST_NO_PREF_PHRASES)
+        if not (_caller_indicated_stylist_choice(user_text, biz) and no_pref):
+            choices = ", ".join(
+                (s.get("name") or "").strip()
+                for s in staff_rows[:5]
+                if (s.get("name") or "").strip()
+            )
+            msg = (
+                "Absolutely — which stylist would you like to see?"
+                + (f" We currently have {choices}." if choices else "")
+                + " You can also say anyone if you have no preference."
+            )
+            return False, msg, None, None
     if (
         staff_id
         and _staff_choice_required(biz)
@@ -3640,9 +3648,11 @@ async def generate_response_async(
                     from_num = call_data.get("from_number") or ""
                     to_num = call_data.get("to_number") or ""
                     cid_raw = call_data.get("client_id") or ""
+                    from observability import name_initial_for_log
+
                     system_info(
                         "voice_booking_line_parsed",
-                        name=booking.get("name"),
+                        name_initial=name_initial_for_log(booking.get("name")),
                         date=booking.get("date"),
                         time=booking.get("time"),
                         from_number=from_num or None,
@@ -3796,9 +3806,14 @@ async def generate_response_async(
                                     increment_count=False,
                                     data_patch=dp if dp else None,
                                 )
-                                if call_sid in active_calls:
-                                    active_calls[call_sid]["caller_memory"] = (
-                                        get_caller_memory(fn_mem)
+                                if call_sid:
+                                    _merge_call_session(
+                                        call_sid,
+                                        {
+                                            "caller_memory": get_caller_memory(
+                                                fn_mem
+                                            )
+                                        },
                                     )
                             except Exception:
                                 pass
@@ -3871,6 +3886,7 @@ async def generate_response_async(
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
         call_data["conversation_history"].append(ai_message)
+        _persist_call_session(call_sid, call_data)
 
         # Pro: Staff transfer - AI may respond with TRANSFER_TO: Name
         transfer_name = parse_transfer_to(ai_text)
@@ -3958,7 +3974,7 @@ async def generate_response_async(
             "status": "ready",
             "audio_url": fallback_tts_url,
             "ai_text": TTS_FALLBACK_TEXT,
-            "error": str(e),
+            "error": type(e).__name__,
         }
         voice_info(
             "gpt_response_fallback_tts",
@@ -7698,9 +7714,26 @@ def _persist_call_session(call_sid: str, data: Optional[dict] = None) -> None:
     """Write session back to Redis after in-place mutations (no-op for memory store)."""
     if isinstance(call_store, MemoryCallSessionStore):
         return
-    payload = data if data is not None else call_store.get(call_sid)
+    sid = (call_sid or "").strip()
+    if not sid or not call_store.exists(sid):
+        return
+    payload = data if data is not None else call_store.get(sid)
     if payload is not None:
-        call_store.save(call_sid, payload)
+        call_store.save(sid, payload)
+
+
+def _merge_call_session(call_sid: str, updates: dict[str, Any]) -> None:
+    """Persist partial session updates (safe on Redis and memory)."""
+    if not call_sid or not updates:
+        return
+    call_store.merge_session(call_sid, updates)
+
+
+def _call_sid_from_form(form_data: Any) -> str:
+    """Normalize Twilio CallSid from webhook form body; empty string if invalid."""
+    from voice.call_sid import normalize_call_sid
+
+    return normalize_call_sid(str(form_data.get("CallSid") or "").strip())
 
 
 if isinstance(call_store, MemoryCallSessionStore):
@@ -9558,7 +9591,7 @@ async def handle_no_speech(request: Request):
             return Response(
                 content="Forbidden", status_code=403, media_type="text/plain"
             )
-        call_sid = (form_data.get("CallSid") or "").strip()
+        call_sid = _call_sid_from_form(form_data)
         _restore_call_context(call_sid or "")
         base_url = _twilio_base_url(request)
         call_data = active_calls.get(call_sid, {}) if call_sid else {}
@@ -9610,8 +9643,8 @@ async def handle_no_speech(request: Request):
                 forward_kind="fallback",
                 has_fallback_configured=True,
             )
-            if call_sid and call_sid in active_calls:
-                active_calls[call_sid]["outcome"] = "forwarded"
+            if call_sid:
+                _merge_call_session(call_sid, {"outcome": "forwarded"})
             if call_sid:
                 call_log_set_outcome(call_sid, "forwarded")
             response = forward_call_to_business(
@@ -9658,7 +9691,7 @@ async def respond_with_audio(request: Request):
             return Response(
                 content="Forbidden", status_code=403, media_type="text/plain"
             )
-        call_sid = form_data.get("CallSid")
+        call_sid = _call_sid_from_form(form_data)
         _restore_call_context(call_sid or "")
         # base_url needed for forward_call_to_business in all branches
         base_url = _twilio_base_url(request)
@@ -9988,7 +10021,7 @@ async def process_recording(request: Request):
             return Response(
                 content="Forbidden", status_code=403, media_type="text/plain"
             )
-        call_sid = form_data.get("CallSid")
+        call_sid = _call_sid_from_form(form_data)
         recording_url = form_data.get("RecordingUrl", "")
         _restore_call_context(call_sid or "")
 
@@ -10013,7 +10046,7 @@ async def process_recording(request: Request):
                 response.redirect(f"{bu}/api/phone/process-speech", method="POST")
             return Response(content=str(response), media_type="application/xml")
 
-        call_data = active_calls[call_sid]
+        call_data = active_calls.get(call_sid, {})
 
         # Download the recording from Twilio using httpx
         # httpx is already available in the environment
@@ -10071,10 +10104,10 @@ async def process_recording(request: Request):
             )
             return Response(content=str(response), media_type="application/xml")
         if rec_key:
-            call_data["_last_processed_recording"] = rec_key
-
-        if _text_looks_latin(speech_result):
-            call_data["detected_language"] = "English"
+            rec_updates: dict[str, Any] = {"_last_processed_recording": rec_key}
+            if _text_looks_latin(speech_result):
+                rec_updates["detected_language"] = "English"
+            _merge_call_session(call_sid, rec_updates)
 
         from voice.utterance import apply_caller_utterance
 
