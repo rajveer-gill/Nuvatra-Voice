@@ -3522,6 +3522,11 @@ def get_twilio_language_code(language_name: str) -> str:
     Returns Twilio language code (e.g., 'es-ES', 'en-US', 'hi-IN').
     Defaults to 'en-US' if language not supported.
     """
+    lang = language_name
+    if lang is None or (isinstance(lang, str) and not lang.strip()):
+        lang = "English"
+    elif not isinstance(lang, str):
+        lang = str(lang)
     language_map = {
         "English": "en-US",
         "Spanish": "es-ES",
@@ -3554,12 +3559,12 @@ def get_twilio_language_code(language_name: str) -> str:
     }
 
     # Try exact match first
-    if language_name in language_map:
-        return language_map[language_name]
+    if lang in language_map:
+        return language_map[lang]
 
     # Try case-insensitive match
     for key, code in language_map.items():
-        if key.lower() == language_name.lower():
+        if key.lower() == lang.lower():
             return code
 
     # Default to English if not found
@@ -3961,7 +3966,7 @@ async def generate_response_async(
             client_id_prefix=str(call_data.get("client_id") or "")[:12],
         )
     finally:
-        _persist_call_session(call_sid)
+        _persist_call_session(call_sid, call_data)
 
 
 def should_forward_to_human(
@@ -7689,13 +7694,13 @@ async def text_to_speech(
 call_store = get_call_session_store()
 
 
-def _persist_call_session(call_sid: str) -> None:
+def _persist_call_session(call_sid: str, data: Optional[dict] = None) -> None:
     """Write session back to Redis after in-place mutations (no-op for memory store)."""
     if isinstance(call_store, MemoryCallSessionStore):
         return
-    data = call_store.get(call_sid)
-    if data is not None:
-        call_store.save(call_sid, data)
+    payload = data if data is not None else call_store.get(call_sid)
+    if payload is not None:
+        call_store.save(call_sid, payload)
 
 
 if isinstance(call_store, MemoryCallSessionStore):
@@ -9011,7 +9016,7 @@ async def handle_incoming_call(request: Request):
             "to_number": to_number,
             "client_id": client_id,
             "conversation_history": [],
-            "detected_language": None,  # Will be detected from first speech input
+            "detected_language": "English",
             "started_at": datetime.now().isoformat(),
             "caller_memory": caller_memory,
             "twilio_public_base_url": base_url,
@@ -9557,7 +9562,7 @@ async def handle_no_speech(request: Request):
         _restore_call_context(call_sid or "")
         base_url = _twilio_base_url(request)
         call_data = active_calls.get(call_sid, {}) if call_sid else {}
-        detected_lang = call_data.get("detected_language", "English")
+        detected_lang = call_data.get("detected_language") or "English"
         forwarding_phone = (get_business_info().get("forwarding_phone") or "").strip()
 
         # Race: caller spoke (Deepgram REST update) while TwiML still had a queued no-speech redirect.
@@ -9689,7 +9694,7 @@ async def respond_with_audio(request: Request):
                 response.play(audio_url)
                 try:
                     # After playing, set up next input gathering
-                    detected_lang = call_data.get("detected_language", "English")
+                    detected_lang = call_data.get("detected_language") or "English"
                     twilio_lang_code = get_twilio_language_code(detected_lang)
                     still_there_url = f"{base_url}/api/phone/tts-audio?text={quote('Still there?')}&voice={get_tts_voice()}"
 
@@ -9727,6 +9732,7 @@ async def respond_with_audio(request: Request):
                         call_sid=call_sid or "",
                         client_id=str(call_data.get("client_id") or "")[:12],
                         error_type=type(e).__name__,
+                        error_detail=str(e)[:200],
                     )
                     response = VoiceResponse()
                     response.hangup()
@@ -9751,8 +9757,8 @@ async def respond_with_audio(request: Request):
                     has_fallback_configured=True,
                 )
                 detected_lang = active_calls.get(call_sid, {}).get(
-                    "detected_language", "English"
-                )
+                    "detected_language"
+                ) or "English"
                 response = forward_call_to_business(
                     forwarding_phone, base_url, detected_lang
                 )
@@ -9775,8 +9781,8 @@ async def respond_with_audio(request: Request):
                     has_fallback_configured=True,
                 )
                 detected_lang = active_calls.get(call_sid, {}).get(
-                    "detected_language", "English"
-                )
+                    "detected_language"
+                ) or "English"
                 response = forward_call_to_business(
                     forwarding_phone, base_url, detected_lang
                 )
@@ -9842,7 +9848,7 @@ async def respond_with_audio(request: Request):
             )
             # Try to get call data for language
             call_data = active_calls.get(call_sid, {})
-            detected_lang = call_data.get("detected_language", "English")
+            detected_lang = call_data.get("detected_language") or "English"
             response = forward_call_to_business(
                 forwarding_phone, base_url, detected_lang
             )
@@ -10100,7 +10106,7 @@ async def process_recording(request: Request):
             )
             # Try to get call data for language
             call_data = active_calls.get(call_sid, {})
-            detected_lang = call_data.get("detected_language", "English")
+            detected_lang = call_data.get("detected_language") or "English"
             response = forward_call_to_business(
                 forwarding_phone, base_url, detected_lang
             )

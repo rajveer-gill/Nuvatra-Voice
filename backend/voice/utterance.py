@@ -97,7 +97,7 @@ async def _apply_caller_utterance_locked(
                 call_sid=call_sid,
                 attempt=n,
             )
-            m._persist_call_session(call_sid)
+            m._persist_call_session(call_sid, call_data)
             return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(goodbye_twiml))
         use_deepgram = deepgram_stt_active(
             twilio_available=bool(m.TWILIO_AVAILABLE),
@@ -110,7 +110,7 @@ async def _apply_caller_utterance_locked(
             call_sid=call_sid,
             call_state=call_data,
         )
-        m._persist_call_session(call_sid)
+        m._persist_call_session(call_sid, call_data)
         return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
 
     current_detected_lang = m.detect_language(speech_result)
@@ -146,7 +146,7 @@ async def _apply_caller_utterance_locked(
                 finish_on_key="#",
                 recording_status_callback=f"{base_url}/api/phone/recording-status",
             )
-            m._persist_call_session(call_sid)
+            m._persist_call_session(call_sid, call_data)
             return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(record_twiml))
 
     if m._text_looks_latin(speech_result):
@@ -198,7 +198,7 @@ async def _apply_caller_utterance_locked(
             call_data["outcome"] = "forwarded"
             m.call_log_set_outcome(call_sid, "forwarded")
             xml = str(m.forward_call_to_business(forwarding_phone, base_url, detected_lang))
-            m._persist_call_session(call_sid)
+            m._persist_call_session(call_sid, call_data)
             return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
 
     m.response_status[call_sid] = {
@@ -206,7 +206,7 @@ async def _apply_caller_utterance_locked(
         "audio_url": None,
         "ai_text": None,
     }
-    m._persist_call_session(call_sid)
+    m._persist_call_session(call_sid, call_data)
     m.create_tracked_task(
         m.generate_response_async(call_sid, call_data, detected_lang, base_url),
         name=f"generate_response:{call_sid}",

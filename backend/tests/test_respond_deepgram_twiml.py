@@ -49,3 +49,31 @@ def test_respond_ready_twiml_uses_deepgram_streams_not_gather(deepgram_respond_c
     assert body.count("<Connect>") >= 2
     assert "Still there" not in body or "tts-audio" in body
     assert "<Gather" not in body
+
+
+def test_respond_ready_twiml_handles_null_detected_language(deepgram_respond_client, monkeypatch):
+    """Redis sessions may still have detected_language: null from older creates."""
+    import main
+
+    call_sid = "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    main.active_calls[call_sid] = {
+        "client_id": "default",
+        "conversation_history": [],
+        "detected_language": None,
+        "twilio_public_base_url": "https://voice.example.test",
+        "media_stream_gen": 2,
+    }
+    main.response_status[call_sid] = {
+        "status": "ready",
+        "audio_url": "https://voice.example.test/api/phone/tts-audio?text=hi",
+    }
+    monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
+    monkeypatch.setattr(main, "get_business_info", lambda: {"forwarding_phone": ""})
+
+    resp = deepgram_respond_client.post(
+        "/api/phone/respond",
+        data={"CallSid": call_sid},
+    )
+    assert resp.status_code == 200
+    assert "<Connect>" in resp.text
+    assert "<Hangup" not in resp.text
