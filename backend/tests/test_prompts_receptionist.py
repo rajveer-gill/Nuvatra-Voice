@@ -2,7 +2,7 @@
 
 import pytest
 
-from prompts.receptionist import build_system_prompt
+from prompts.receptionist import build_system_prompt, format_service_catalog_for_prompt
 
 
 @pytest.fixture
@@ -135,3 +135,32 @@ def test_prompt_empty_slots_branch(minimal_business):
     )
     assert "Booked slots: none" in p
     assert "ALL times are available" in p
+
+
+def test_service_catalog_prompt_uses_natural_voice_guidance():
+    block = format_service_catalog_for_prompt(
+        [
+            {"name": "Short Cut", "price": 30, "duration_minutes": 30},
+            {"name": "Long Cut", "price": 50, "duration_minutes": 60},
+        ]
+    )
+    assert '"Short Cut"' in block
+    assert "VOICE:" in block
+    assert "sound like a real receptionist" in block
+    assert "($30.0" not in block
+    assert "30 min)" not in block
+
+
+def test_prompt_services_not_robotic_price_list():
+    biz = {
+        "name": "Test Salon",
+        "services": [
+            {"id": "s1", "name": "Short Cut", "price": 30, "duration_minutes": 30},
+            {"id": "s2", "name": "Long Cut", "price": 50, "duration_minutes": 60},
+        ],
+        "staff": [{"name": "Jamie"}],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=False)
+    assert "Services menu" in p
+    assert "VOICE:" in p
+    assert "Short Cut ($30.0, 30 min)" not in p

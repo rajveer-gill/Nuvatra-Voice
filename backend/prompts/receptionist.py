@@ -11,6 +11,71 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 
+def _format_price_for_prompt(price: object) -> str:
+    try:
+        p = float(price)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if p <= 0:
+        return ""
+    if p == int(p):
+        return f"${int(p)}"
+    return f"${p:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_duration_for_prompt(minutes: object) -> str:
+    try:
+        m = int(minutes)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if m <= 0:
+        return ""
+    if m == 60:
+        return "about 1 hour"
+    if m % 60 == 0:
+        h = m // 60
+        return f"about {h} hours"
+    if m == 30:
+        return "about 30 min"
+    return f"about {m} min"
+
+
+def format_service_catalog_for_prompt(catalog: List[dict]) -> str:
+    """
+    Service menu for the system prompt: exact names for BOOKING plus voice guidance.
+
+    Internal metadata uses compact labels; spoken replies must sound conversational.
+    """
+    if not catalog:
+        return ""
+    lines: List[str] = []
+    for entry in catalog:
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+        meta: List[str] = []
+        price = _format_price_for_prompt(entry.get("price"))
+        duration = _format_duration_for_prompt(entry.get("duration_minutes"))
+        if price:
+            meta.append(price)
+        if duration:
+            meta.append(duration)
+        suffix = f" — {', '.join(meta)}" if meta else ""
+        lines.append(f'  • "{name}"{suffix}')
+    if not lines:
+        return ""
+    names_only = ", ".join(f'"{(e.get("name") or "").strip()}"' for e in catalog if (e.get("name") or "").strip())
+    return (
+        "- Services menu (BOOKING reason field must use an exact name from this list):\n"
+        + "\n".join(lines)
+        + "\n- VOICE: When describing services to the caller, sound like a real receptionist—not a spreadsheet. "
+        "List service names in plain language (e.g. we offer short cuts and long cuts). "
+        f"Valid names: {names_only}. "
+        "Only mention price or length if they ask; then say it naturally (e.g. around thirty dollars, about half an hour). "
+        "Never read internal labels, parentheses, decimals like 30.0, or phrasing like dollar-sign thirty comma thirty min."
+    )
+
+
 def build_system_prompt(
     *,
     business_info: dict,
@@ -51,16 +116,12 @@ def build_system_prompt(
                     "duration_minutes": s.get("duration_minutes", ""),
                 }
             )
-        services_list = ", ".join(
-            f"{e['name']} (${e.get('price', 0)}, {e.get('duration_minutes', '')} min)"
-            for e in service_catalog
-        )
     else:
         for x in services_raw:
             nm = str(x).strip()
             if nm:
                 service_catalog.append({"id": "", "name": nm, "price": 0, "duration_minutes": ""})
-        services_list = ", ".join(e["name"] for e in service_catalog)
+    services_prompt_block = format_service_catalog_for_prompt(service_catalog)
     has_configured_services = bool(service_catalog)
     service_id_to_name = {e["id"]: e["name"] for e in service_catalog if e.get("id")}
     specials_raw = business_info.get("specials") or []
@@ -89,8 +150,8 @@ def build_system_prompt(
         help_lines.append(f"- Hours: {hours}")
     if address:
         help_lines.append(f"- Location: {address}")
-    if services_list:
-        help_lines.append(f"- Services: {services_list}")
+    if services_prompt_block:
+        help_lines.append(services_prompt_block)
     if specials_list:
         help_lines.append(f"- Specials / promotions: {specials_list}")
     if reservation_info:
@@ -227,7 +288,7 @@ def build_system_prompt(
                 "When multiple stylists are on the roster, you MUST ask which stylist they prefer (or anyone is fine) BEFORE asking which service. "
                 "After they pick a stylist, offer ONLY that person's services from the staff/service list—not the full menu. "
                 "Before BOOKING you MUST ask which service they want unless they already clearly named one from that stylist's list. "
-                "Put the exact service name in the reason field.\n"
+                "Put the exact service name in the reason field. When speaking, follow the VOICE rules under Services menu above.\n"
                 f"{staff_booking_rules}"
                 "- When they have confirmed name, date, time, and service (service name in reason), and stylist preference when applicable, and the slot is available, "
             )
