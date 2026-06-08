@@ -27,6 +27,11 @@ from observability import usage_warning
 from subscription_access import get_tenant_subscription_state
 
 
+def _settings_load_debug_enabled() -> bool:
+    """Set SETTINGS_LOAD_DEBUG=1 on Render to log Settings API diagnostics (keys/types only, no PII)."""
+    return os.getenv("SETTINGS_LOAD_DEBUG", "").strip().lower() in ("1", "true", "yes")
+
+
 def audit_log(
     actor_type: str,
     action: str,

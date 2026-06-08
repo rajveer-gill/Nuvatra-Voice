@@ -41,8 +41,8 @@ def test_post_sms_automation_growth_accepts_valid(client, monkeypatch):
     growth_tenant = {"plan": "growth", "client_id": "test-spa", "id": "123"}
 
     with patch("main.db_tenant_get_by_client_id", return_value=growth_tenant), \
-         patch("main.db_sms_automations_count", return_value=0), \
-         patch("main.db_sms_automations_insert", return_value=1), \
+         patch("database.db_sms_automations_count", return_value=0), \
+         patch("database.db_sms_automations_insert", return_value=1), \
          patch("main.require_tenant", return_value=growth_tenant):
         resp = client.post(
             "/api/sms-automations",

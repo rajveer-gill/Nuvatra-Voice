@@ -189,9 +189,6 @@ def _twilio_base_url(request: Request) -> str:
     return ""
 
 
-def _settings_load_debug_enabled() -> bool:
-    """Set SETTINGS_LOAD_DEBUG=1 on Render to log Settings API diagnostics (keys/types only, no PII)."""
-    return os.getenv("SETTINGS_LOAD_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
 def _admin_access_debug_enabled() -> bool:
@@ -670,9 +667,11 @@ if os.getenv("DEBUG_CORS", "").strip() == "1":
 # Domain routers (strangler-fig migration out of main.py — see routers/).
 from routers import health as health_router
 from routers import leads as leads_router
+from routers import sms_automations as sms_automations_router
 
 app.include_router(health_router.router)
 app.include_router(leads_router.router)
+app.include_router(sms_automations_router.router)
 
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
@@ -911,7 +910,9 @@ from deps import (  # noqa: E402
     _ensure_db_ready,
     _clerk_fetch_user_link,
     _clerk_patch_user_tenant_metadata,
+    _settings_load_debug_enabled,
 )
+from models import SmsAutomationCreate, SmsAutomationUpdate  # noqa: E402,F401
 
 
 def _init_db_background():
@@ -6801,106 +6802,6 @@ async def create_message(
         raise _server_error("create message failed", e)
 
 
-class SmsAutomationCreate(BaseModel):
-    trigger: Literal["after_inquiry", "post_call"]
-    template: str
-
-
-class SmsAutomationUpdate(BaseModel):
-    template: Optional[str] = None
-    enabled: Optional[bool] = None
-
-
-@app.get("/api/sms-automations")
-async def get_sms_automations(
-    tenant: Optional[dict] = Depends(require_active_subscription),
-):
-    """List SMS automations. Growth/Pro only."""
-    cid = get_db_client_id()
-    if not cid or cid == "default":
-        if _settings_load_debug_enabled():
-            logger.info(
-                "settings_load_debug GET /api/sms-automations early_empty cid_default=%s",
-                not cid or cid == "default",
-            )
-        return {"automations": []}
-    if get_plan_limits:
-        limits = get_plan_limits(tenant) if tenant else {}
-        if limits.get("sms_automations_max", 0) <= 0:
-            if _settings_load_debug_enabled():
-                logger.info(
-                    "settings_load_debug GET /api/sms-automations plan_has_no_automations_slot"
-                )
-            return {"automations": []}
-    automations = db_sms_automations_get_all(cid)
-    if _settings_load_debug_enabled():
-        logger.info(
-            "settings_load_debug GET /api/sms-automations client_id_prefix=%s count=%s",
-            (str(cid)[:10] + "…") if cid else "none",
-            len(automations) if isinstance(automations, list) else "na",
-        )
-    return {"automations": automations}
-
-
-@app.post("/api/sms-automations")
-async def create_sms_automation(
-    req: SmsAutomationCreate,
-    tenant: Optional[dict] = Depends(require_tenant),
-    _: None = Depends(require_active_subscription),
-):
-    """Create SMS automation. Growth: max 2, Pro: unlimited."""
-    cid = get_db_client_id()
-    if not cid or cid == "default":
-        raise HTTPException(status_code=400, detail="No client context")
-    if not tenant or not get_plan_limits:
-        raise HTTPException(
-            status_code=403, detail="Plan does not include SMS automations"
-        )
-    limits = get_plan_limits(tenant)
-    if limits.get("sms_automations_max", 0) <= 0:
-        raise HTTPException(
-            status_code=403, detail="Plan does not include SMS automations"
-        )
-    count = db_sms_automations_count(cid)
-    if count >= limits.get("sms_automations_max", 0):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Plan allows up to {limits.get('sms_automations_max')} automations",
-        )
-    automation_id = db_sms_automations_insert(cid, req.trigger, req.template or "")
-    if not automation_id:
-        raise HTTPException(status_code=500, detail="Failed to create automation")
-    return {"id": automation_id, "trigger": req.trigger, "template": req.template}
-
-
-@app.patch("/api/sms-automations/{automation_id}")
-async def update_sms_automation(
-    automation_id: int,
-    req: SmsAutomationUpdate,
-    _: None = Depends(require_active_subscription),
-):
-    cid = get_db_client_id()
-    if not cid or cid == "default":
-        raise HTTPException(status_code=400, detail="No client context")
-    ok = db_sms_automations_update(
-        automation_id, cid, template=req.template, enabled=req.enabled
-    )
-    if not ok:
-        raise HTTPException(status_code=404, detail="Automation not found")
-    return {"ok": True}
-
-
-@app.delete("/api/sms-automations/{automation_id}")
-async def delete_sms_automation(
-    automation_id: int, _: None = Depends(require_active_subscription)
-):
-    cid = get_db_client_id()
-    if not cid or cid == "default":
-        raise HTTPException(status_code=400, detail="No client context")
-    ok = db_sms_automations_delete(automation_id, cid)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Automation not found")
-    return {"ok": True}
 
 
 @app.get("/api/messages")
