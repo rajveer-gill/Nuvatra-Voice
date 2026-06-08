@@ -8,6 +8,7 @@ import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
+import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
 
 type TenantAccessStatus = 'active' | 'pending_invite' | 'none' | 'active_pending_mismatch'
 
@@ -682,6 +683,8 @@ export default function AdminPage() {
               Redis security checklist: <code className="text-zinc-400">docs/REDIS-SECURITY.md</code> in the repo.
             </p>
           </section>
+
+          <ProvisioningPanel />
 
           <motion.form
             onSubmit={handleSubmit}
