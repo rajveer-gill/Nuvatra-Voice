@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
+import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
 import { STATUS_CLASSES, STATUS_LABELS } from '@/components/appointments/appointmentStatus'
 
@@ -188,43 +189,49 @@ export default function Dashboard() {
       )}
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white rounded-lg shadow-md p-6">
+      <RevealStagger className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <RevealItem className="bg-white rounded-lg shadow-md p-6 transition-transform duration-200 hover:-translate-y-1 hover:shadow-lg">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-gray-600 text-sm font-medium">Total Appointments</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">{stats.total_appointments}</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">
+                <AnimatedNumber value={stats.total_appointments} />
+              </p>
             </div>
             <div className="bg-blue-100 p-3 rounded-full">
               <Calendar className="w-6 h-6 text-blue-600" />
             </div>
           </div>
-        </div>
+        </RevealItem>
 
-        <div className="bg-white rounded-lg shadow-md p-6">
+        <RevealItem className="bg-white rounded-lg shadow-md p-6 transition-transform duration-200 hover:-translate-y-1 hover:shadow-lg">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-gray-600 text-sm font-medium">Total Messages</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">{stats.total_messages}</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">
+                <AnimatedNumber value={stats.total_messages} />
+              </p>
             </div>
             <div className="bg-green-100 p-3 rounded-full">
               <MessageSquare className="w-6 h-6 text-green-600" />
             </div>
           </div>
-        </div>
+        </RevealItem>
 
-        <div className="bg-white rounded-lg shadow-md p-6">
+        <RevealItem className="bg-white rounded-lg shadow-md p-6 transition-transform duration-200 hover:-translate-y-1 hover:shadow-lg">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-gray-600 text-sm font-medium">Pending Appointments</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">{stats.pending_appointments}</p>
+              <p className="text-3xl font-bold text-gray-900 mt-2">
+                <AnimatedNumber value={stats.pending_appointments} />
+              </p>
             </div>
             <div className="bg-yellow-100 p-3 rounded-full">
               <TrendingUp className="w-6 h-6 text-yellow-600" />
             </div>
           </div>
-        </div>
-      </div>
+        </RevealItem>
+      </RevealStagger>
 
       {callHealth != null && (
         <div className="bg-white rounded-lg shadow-md p-6">
