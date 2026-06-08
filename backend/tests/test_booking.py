@@ -266,6 +266,61 @@ def test_should_attempt_voice_booking_extraction_on_scheduled_wording(monkeypatc
     assert _should_attempt_voice_booking_extraction(history, ai) is True
 
 
+def test_validate_booking_does_not_repeat_service_when_user_answered(monkeypatch):
+    biz = {
+        "staff": [{"id": "j1", "name": "Jake"}],
+        "services": [{"id": "s1", "name": "Long Cut", "price": 45, "duration_minutes": 45}],
+    }
+    monkeypatch.setattr("main.get_business_info", lambda: biz)
+    history = [
+        {"role": "user", "content": "Book with Jake tomorrow at 3"},
+        {"role": "assistant", "content": "Which service would you like with Jake? Short Cut or Long Cut."},
+        {"role": "user", "content": "long cut"},
+    ]
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {
+            "staff": "Jake",
+            "reason": "Long Cut",
+            "name": "Raj",
+            "date": "2026-06-09",
+            "time": "15:00",
+        },
+        conversation_history=history,
+    )
+    assert ok
+    assert msg is None
+    assert staff_id == "j1"
+    assert service == "Long Cut"
+
+
+def test_extract_booking_rejects_misaligned_time(monkeypatch):
+    def fake_create(**kwargs):
+        class Msg:
+            content = "BOOKING: Raj|||2026-06-09|Jake|Long Cut|"
+
+        class Choice:
+            message = Msg()
+
+        class Resp:
+            choices = [Choice()]
+
+        return Resp()
+
+    monkeypatch.setattr("main.client.chat.completions.create", fake_create)
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "j1", "name": "Jake"}],
+            "services": [{"id": "s1", "name": "Long Cut"}],
+        },
+    )
+    got = _extract_booking_line_from_conversation(
+        [{"role": "user", "content": "Jake tomorrow at 3 long cut"}],
+        caller_memory={"name": "Raj"},
+    )
+    assert got is None
+
+
 def test_extract_booking_line_from_conversation(monkeypatch):
     captured = {}
 
