@@ -38,8 +38,26 @@ Any step error → task `status=failed`, `error` recorded, **other tenants conti
 1. ✅ `twilio_provision.purchase_number` + tests — **done** (commit 0bc9f95).
 2. **Extract Clerk linking out of main** — `_clerk_link_email_to_tenant` and the
    `_clerk_*` helpers it needs currently live in main.py; a service can't import main.
-   Move them to a `clerk_service.py` (or into `deps`), re-export from main (same
-   discipline as sms_service/config_service). **Prerequisite for step 4 of the machine.**
+   Move them to a `clerk_service.py`, re-export from main (same discipline as
+   sms_service/config_service). **Prerequisite for step 4 of the machine.**
+
+   The cluster is `main.py` ~4078–4420 (10 functions: `_clerk_api_json_list`,
+   `_clerk_revoke_active_sessions`, `_clerk_user_ids_from_api`,
+   `_clerk_user_ids_from_tenant_members`, `_clerk_user_ids_for_email`,
+   `_clerk_relink_users_to_tenant`, `_clerk_invite_error_message`,
+   `_clerk_clear_tenant_access`, `_clerk_relink_user_to_tenant`,
+   `_clerk_link_email_to_tenant`). Module-qualify on extraction:
+   - `_clerk_fetch_user_link`, `_clerk_patch_user_tenant_metadata` → `deps.*` (already moved there in 1b)
+   - `db_tenant_*` (invite_upsert/delete, member_assign_owner, all_member_clerk_ids) → `database.*`
+   - `runtime.USE_DB`
+   **Gotcha — also-needed main helpers** (the tail of `_clerk_link_email_to_tenant`):
+   `_admin_access_log`, `_admin_access_debug_enabled`, `_admin_tenant_access_debug_snapshot`.
+   Cleanest handling: move `_admin_access_debug_enabled` (tiny env flag) to `deps`
+   alongside `_settings_load_debug_enabled`; move `_admin_access_log` to `deps`/observability;
+   and either move `_admin_tenant_access_debug_snapshot` too or have the admin *route*
+   (not the service) attach the debug snapshot. Tests to retarget:
+   `test_clerk_link_multiple_users` patches `main._clerk_user_ids_for_email` /
+   `main._clerk_relink_user_to_tenant` → repoint to `clerk_service.*`.
 3. **DB schema + persistence** in database.py: `provisioning_jobs` (id, created_by,
    total, status, timestamps) and `provisioning_tasks` (id, job_id, client_id, name,
    email, area_code, plan, status, phone_e164, steps_done JSONB, error, attempts,
