@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import os
-import time
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -15,6 +15,22 @@ import config_service
 import database
 import runtime
 import sms_service
+
+# Bounded concurrency for fan-out SMS sends so reminder runs stay well under the
+# cron HTTP timeout as the tenant count grows.
+_REMINDER_SEND_CONCURRENCY = 8
+
+
+def _send_reminder_with_ctx(cid: str, phone: str, body: str, from_num: str) -> bool:
+    """Run one reminder send in a worker thread: bind tenant context for usage
+    metering, then release the pooled DB connection (no request middleware here)."""
+    database.set_request_client_id(cid)
+    try:
+        return bool(sms_service.send_sms(phone, body, from_override=from_num))
+    except Exception:
+        return False
+    finally:
+        database.db_release_thread_connection()
 
 try:
     from plans import get_plan_limits
@@ -68,11 +84,12 @@ async def cron_appointment_reminders(request: Request):
     except Exception:
         tz = timezone.utc
     tomorrow_local = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
-    reminders_sent = 0
-    errors = 0
     skipped = 0
     tenants_processed = 0
     tenants = database.db_tenant_list_all()
+    # Phase 1: walk tenants/appointments, mark reminders (idempotency guard), and
+    # collect the sends. Config is loaded once per tenant, not per appointment.
+    sends: List[tuple] = []
     for t in tenants:
         limits = get_plan_limits(t) if get_plan_limits else {}
         if not limits.get("has_reminders"):
@@ -83,42 +100,35 @@ async def cron_appointment_reminders(request: Request):
         if not cid or not twilio_num:
             continue
         appointments = database.db_appointments_get_accepted_for_date(cid, tomorrow_local)
+        if not appointments:
+            continue
+        cfg = config_service.load_client_config(cid)
+        business_name = (
+            (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
+        )
         for apt in appointments:
-            apt_id = apt.get("id")
             phone = apt.get("phone")
             if not phone:
                 skipped += 1
                 continue
-            if not database.db_appointments_mark_reminder_sent(apt_id, cid):
+            if not database.db_appointments_mark_reminder_sent(apt.get("id"), cid):
                 skipped += 1
                 continue
-            cfg = config_service.load_client_config(cid)
-            business_name = (
-                (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
-            )
             time_str = apt.get("time", "")
             body = f"Reminder: You have an appointment tomorrow at {time_str} at {business_name}. Reply YES to confirm or if you need to reschedule."
-            ok = False
-            for attempt in range(3):
-                try:
-                    database.set_request_client_id(cid)
-                    if sms_service.send_sms(phone, body, from_override=twilio_num):
-                        ok = True
-                        reminders_sent += 1
-                        break
-                except Exception as e:
-                    logger.error(
-                        "reminder_sms_failed",
-                        extra={
-                            "client_id": cid,
-                            "appointment_id": apt_id,
-                            "error": str(e),
-                        },
-                    )
-                    if attempt < 2:
-                        time.sleep(2**attempt)
-            if not ok:
-                errors += 1
+            sends.append((cid, phone, body, twilio_num))
+
+    # Phase 2: dispatch sends with bounded concurrency (threads; send_sms retries
+    # internally). Keeps wall-clock ~= (sends / concurrency) × latency at any tenant count.
+    sem = asyncio.Semaphore(_REMINDER_SEND_CONCURRENCY)
+
+    async def _dispatch(args) -> bool:
+        async with sem:
+            return await asyncio.to_thread(_send_reminder_with_ctx, *args)
+
+    outcomes = await asyncio.gather(*[_dispatch(s) for s in sends], return_exceptions=True)
+    reminders_sent = sum(1 for r in outcomes if r is True)
+    errors = len(sends) - reminders_sent
     result = {
         "ok": True,
         "reminders_sent": reminders_sent,

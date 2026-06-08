@@ -1116,28 +1116,45 @@ def warm_client_voice_cache(client_id: str) -> None:
 
 
 def _warm_all_tenant_voice_caches() -> None:
-    """Prewarm voice clips for every tenant with a Twilio number (startup / after deploy)."""
-    if runtime.USE_DB:
-        try:
-            tenants = db_tenant_list_all()
-        except Exception as e:
-            logger.warning("voice_cache_startup_prewarm list failed: %s", e)
-            return
-        for tenant in tenants:
-            cid = (tenant.get("client_id") or "").strip()
-            phone = (tenant.get("twilio_phone_number") or "").strip()
-            if not cid or not phone:
-                continue
-            try:
-                warm_client_voice_cache(cid)
-            except Exception as e:
-                logger.warning(
-                    "voice_cache_startup_prewarm failed client_id=%s: %s", cid, e
-                )
+    """Prewarm voice clips at startup.
+
+    Single-tenant/dev: warm the one configured client (cheap). Multi-tenant:
+    sweeping every tenant at boot is O(tenants × 3 TTS calls) and does not scale
+    (minutes of OpenAI calls at 60+ tenants, blocking nothing but burning quota
+    and a worker). It is therefore LAZY by default — greeting/got-it/one-moment
+    clips synthesize on the first call and are re-warmed on config save. Set
+    VOICE_PREWARM_ALL_TENANTS=1 to opt into the full boot sweep for small fleets.
+    """
+    if not runtime.USE_DB:
+        cid = (CLIENT_ID or "").strip()
+        if cid and cid != "default":
+            warm_client_voice_cache(cid)
         return
-    cid = (CLIENT_ID or "").strip()
-    if cid and cid != "default":
-        warm_client_voice_cache(cid)
+    if (os.getenv("VOICE_PREWARM_ALL_TENANTS") or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        logger.info(
+            "voice_cache_startup_prewarm skipped (lazy; set VOICE_PREWARM_ALL_TENANTS=1 to enable)"
+        )
+        return
+    try:
+        tenants = db_tenant_list_all()
+    except Exception as e:
+        logger.warning("voice_cache_startup_prewarm list failed: %s", e)
+        return
+    for tenant in tenants:
+        cid = (tenant.get("client_id") or "").strip()
+        phone = (tenant.get("twilio_phone_number") or "").strip()
+        if not cid or not phone:
+            continue
+        try:
+            warm_client_voice_cache(cid)
+        except Exception as e:
+            logger.warning(
+                "voice_cache_startup_prewarm failed client_id=%s: %s", cid, e
+            )
 
 
 async def _warm_client_voice_cache_async(client_id: str) -> None:

@@ -6,8 +6,12 @@ from main import app
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
+    # Isolate on-disk config writes (PATCH /api/business-info) to a tmp dir so the
+    # real clients/<CLIENT_ID>/config.json is never touched. See test_business_config_storage.py.
+    monkeypatch.setattr("config_service.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("main.PROJECT_ROOT", tmp_path)
     return TestClient(app)
 
 
