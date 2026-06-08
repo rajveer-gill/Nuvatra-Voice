@@ -87,18 +87,50 @@ def db_release_thread_connection() -> None:
             _log.warning("db_pool_putconn_failed: %s", e)
     _thread_local.conn = None
 
-def db_ping() -> bool:
-    """Return True if DB is reachable (for health check)."""
-    conn = _get_conn()
-    if not conn:
-        return False
+def _discard_thread_connection() -> None:
+    """Drop the thread-local connection from the pool without reusing it.
+
+    Needed because psycopg2's `conn.closed` only reflects client-side closure —
+    a connection the server silently dropped (idle timeout, restart) still reads
+    as open and fails on first use. We discard it so the next _get_conn() borrows
+    a fresh one.
+    """
+    conn = getattr(_thread_local, "conn", None)
+    _thread_local.conn = None
+    if conn is None:
+        return
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        cur.close()
-        return True
+        pool = _ensure_pool()
+        if pool:
+            pool.putconn(conn, close=True)
+        else:
+            conn.close()
     except Exception:
-        return False
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def db_ping() -> bool:
+    """Return True if DB is reachable (for health check).
+
+    Retries once with a fresh connection so a stale pooled connection (Render
+    Starter Postgres closes idle connections) doesn't produce a false 503 and
+    flap the instance. A genuine outage still fails both attempts -> False.
+    """
+    for _ in range(2):
+        conn = _get_conn()
+        if not conn:
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            return True
+        except Exception:
+            _discard_thread_connection()
+    return False
 
 def init_db() -> bool:
     """Initialize database: create tables if not exist. Returns True if DB is used."""
