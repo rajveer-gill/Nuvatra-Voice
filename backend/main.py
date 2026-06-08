@@ -191,17 +191,6 @@ def _twilio_base_url(request: Request) -> str:
 
 
 
-def _admin_access_debug_enabled() -> bool:
-    """ADMIN_ACCESS_DEBUG=1 — INFO logs for invite/relink; extra fields on admin debug API responses."""
-    return os.getenv("ADMIN_ACCESS_DEBUG", "").strip().lower() in ("1", "true", "yes")
-
-
-def _admin_access_log(event: str, **fields) -> None:
-    if not _admin_access_debug_enabled():
-        return
-    parts = [f"{k}={v!r}" for k, v in fields.items() if v is not None]
-    print(f"[ADMIN_ACCESS] {event} " + " ".join(parts))
-
 
 def _greeting_debug_enabled() -> bool:
     """GREETING_DEBUG=1 or SETTINGS_LOAD_DEBUG=1 — logs greeting resolution on calls and Settings saves."""
@@ -912,8 +901,26 @@ from deps import (  # noqa: E402
     _clerk_fetch_user_link,
     _clerk_patch_user_tenant_metadata,
     _settings_load_debug_enabled,
+    _admin_access_debug_enabled,
+    _admin_access_log,
 )
 from models import SmsAutomationCreate, SmsAutomationUpdate  # noqa: E402,F401
+
+# Clerk linking/invites + admin access-debug snapshot now live in clerk_service;
+# re-export so main's admin routes (and tests patching main._clerk_*) keep resolving.
+from clerk_service import (  # noqa: E402,F401
+    _clerk_api_json_list,
+    _clerk_revoke_active_sessions,
+    _clerk_user_ids_from_api,
+    _clerk_user_ids_from_tenant_members,
+    _clerk_user_ids_for_email,
+    _clerk_relink_users_to_tenant,
+    _clerk_invite_error_message,
+    _clerk_clear_tenant_access,
+    _clerk_relink_user_to_tenant,
+    _clerk_link_email_to_tenant,
+    _admin_tenant_access_debug_snapshot,
+)
 
 # send_sms / _phone_to_e164 now live in sms_service; re-export so the many
 # `send_sms(...)` calls in main's still-unmigrated routes (and tests patching
@@ -4075,349 +4082,6 @@ def _normalize_admin_phone(value: str) -> str:
     return e164 or (value or "").strip()
 
 
-def _clerk_api_json_list(resp) -> list:
-    """Clerk list endpoints may return {data: [...]} or a bare list."""
-    if getattr(resp, "status_code", 500) >= 400:
-        return []
-    try:
-        body = resp.json()
-    except Exception:
-        return []
-    if isinstance(body, list):
-        return body
-    if isinstance(body, dict):
-        data = body.get("data")
-        return data if isinstance(data, list) else []
-    return []
-
-
-def _clerk_revoke_active_sessions(user_id: str, headers: dict) -> None:
-    """Force a fresh Clerk session so JWT public_metadata (tenant_id) is current."""
-    import httpx
-
-    try:
-        sessions_resp = httpx.get(
-            f"https://api.clerk.com/v1/sessions?user_id={user_id}&status=active",
-            headers=headers,
-            timeout=10.0,
-        )
-        for session in _clerk_api_json_list(sessions_resp):
-            sid = session.get("id") if isinstance(session, dict) else None
-            if not sid:
-                continue
-            httpx.post(
-                f"https://api.clerk.com/v1/sessions/{sid}/revoke",
-                headers=headers,
-                timeout=10.0,
-            )
-        print(f"[Admin] Revoked active Clerk sessions for user {user_id}")
-    except Exception as e:
-        print(f"[Admin] Error revoking sessions for Clerk user {user_id}: {e}")
-
-
-def _clerk_user_ids_from_api(email: str, headers: dict) -> List[str]:
-    """Query Clerk Users API by email (tries common filter shapes)."""
-    import httpx
-
-    raw = (email or "").strip()
-    if not raw or "@" not in raw:
-        return []
-    ids: List[str] = []
-    seen: set = set()
-    for candidate in {raw, raw.lower()}:
-        email_q = quote(candidate, safe="")
-        for url in (
-            f"https://api.clerk.com/v1/users?email_address[]={email_q}&limit=20",
-            f"https://api.clerk.com/v1/users?email_address={email_q}&limit=20",
-        ):
-            try:
-                users_resp = httpx.get(url, headers=headers, timeout=10.0)
-            except Exception as e:
-                print(f"[Admin] Clerk user lookup request failed: {e}")
-                continue
-            if users_resp.status_code >= 400:
-                print(
-                    f"[Admin] Clerk user lookup {users_resp.status_code} url={url}: "
-                    f"{(users_resp.text or '')[:160]}"
-                )
-                continue
-            users = users_resp.json()
-            user_list = users if isinstance(users, list) else users.get("data", [])
-            for row in user_list or []:
-                if isinstance(row, dict) and row.get("id"):
-                    uid = str(row["id"])
-                    if uid not in seen:
-                        seen.add(uid)
-                        ids.append(uid)
-            if ids:
-                return ids
-    return ids
-
-
-def _clerk_user_ids_from_tenant_members(email: str, headers: dict) -> List[str]:
-    """Find Clerk users by comparing emails on existing tenant memberships (API lookup fallback)."""
-    if not runtime.USE_DB:
-        return []
-    target = (email or "").strip().lower()
-    if not target or "@" not in target:
-        return []
-    matched: List[str] = []
-    for clerk_user_id in db_tenant_all_member_clerk_ids():
-        link = _clerk_fetch_user_link(clerk_user_id)
-        if not link:
-            continue
-        for em in link.get("emails") or []:
-            if (em or "").strip().lower() == target:
-                matched.append(clerk_user_id)
-                break
-    return matched
-
-
-def _clerk_user_ids_for_email(email: str, headers: dict) -> List[str]:
-    """Clerk user IDs for an email — API first, then scan known tenant members."""
-    ids = _clerk_user_ids_from_api(email, headers)
-    if ids:
-        return ids
-    member_ids = _clerk_user_ids_from_tenant_members(email, headers)
-    if member_ids:
-        print(
-            f"[Admin] Clerk API missed email {email!r}; matched via tenant_members "
-            f"({len(member_ids)} user(s))"
-        )
-    return member_ids
-
-
-def _clerk_relink_users_to_tenant(
-    user_ids: List[str],
-    tenant_id: str,
-    email: str,
-    headers: dict,
-) -> tuple[List[str], List[str], Optional[str]]:
-    """Re-link Clerk users to tenant. Returns (linked_ids, displaced_ids, error_message)."""
-    linked: List[str] = []
-    displaced_all: List[str] = []
-    link_errors: List[str] = []
-    for uid in user_ids:
-        try:
-            displaced = _clerk_relink_user_to_tenant(uid, tenant_id, headers)
-            displaced_all.extend(displaced or [])
-            linked.append(uid)
-            print(
-                f"[Admin] Re-linked existing user {uid} to tenant {tenant_id} (email={email})"
-            )
-        except Exception as e:
-            link_errors.append(f"{uid}: {e}")
-            print(f"[Admin] Error re-linking user {uid}: {e}")
-    err: Optional[str] = None
-    if link_errors and not linked:
-        err = f"Re-link failed: {'; '.join(link_errors[:3])}"
-    elif link_errors:
-        err = (
-            f"Linked {len(linked)} of {len(user_ids)} Clerk account(s); "
-            f"failures: {'; '.join(link_errors[:2])}"
-        )
-    return linked, displaced_all, err
-
-
-def _clerk_invite_error_message(status_code: int, body: str) -> str:
-    """Short admin-facing message for Clerk invitation failures."""
-    if status_code == 422 and "form_identifier_exists" in body:
-        return (
-            "That email already has a Clerk account. Use Resend invite again — we will link "
-            "the existing account to this business (no new invitation email)."
-        )
-    return f"Clerk API {status_code}: {body[:240]}"
-
-
-def _clerk_clear_tenant_access(clerk_user_id: str, headers: dict) -> None:
-    """Remove tenant from Clerk user and force re-auth (used when displacing a tenant owner)."""
-    import httpx
-
-    try:
-        httpx.patch(
-            f"https://api.clerk.com/v1/users/{clerk_user_id}",
-            headers=headers,
-            json={"public_metadata": {"tenant_id": None}},
-            timeout=10.0,
-        )
-    except Exception as e:
-        print(f"[Admin] Error clearing Clerk metadata for {clerk_user_id}: {e}")
-    _clerk_revoke_active_sessions(clerk_user_id, headers)
-
-
-def _clerk_relink_user_to_tenant(
-    clerk_user_id: str, tenant_id: str, headers: dict
-) -> List[str]:
-    """
-    Make this user the sole owner of the tenant; clear access for anyone else on that tenant.
-    Returns displaced clerk_user_ids (previous owners).
-    """
-    displaced = db_tenant_member_assign_owner(clerk_user_id, tenant_id)
-    if displaced is None:
-        raise RuntimeError(
-            f"Database membership update failed for {clerk_user_id} (tenant_id={tenant_id})"
-        )
-    if not _clerk_patch_user_tenant_metadata(clerk_user_id, tenant_id):
-        raise RuntimeError(
-            f"Clerk metadata patch failed for {clerk_user_id} (tenant_id={tenant_id})"
-        )
-    for uid in displaced:
-        _clerk_clear_tenant_access(uid, headers)
-    _clerk_revoke_active_sessions(clerk_user_id, headers)
-    return displaced
-
-
-def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
-    """
-    Queue pending invite by email and either re-link an existing Clerk user or send a new invitation.
-    When multiple Clerk users share the email, link all of them (common after OAuth + email test accounts).
-    """
-    email = (email or "").strip()
-    if not email or "@" not in email:
-        return {
-            "invite_sent": False,
-            "user_relinked": False,
-            "pending_invite_stored": False,
-            "clerk_error": "Valid email required",
-        }
-    lowered = email.lower()
-    if (
-        lowered.endswith("@example.com")
-        or lowered.endswith("@example.org")
-        or lowered.endswith("@test.com")
-    ):
-        return {
-            "invite_sent": False,
-            "user_relinked": False,
-            "pending_invite_stored": True,
-            "clerk_error": (
-                f"{email} is a placeholder address and cannot receive mail. "
-                "Use the client's real email (must match how they sign in)."
-            ),
-        }
-    db_tenant_invite_upsert(email, tenant_id)
-    invite_sent = False
-    user_relinked = False
-    clerk_error: Optional[str] = None
-    linked_clerk_user_id: Optional[str] = None
-    linked_clerk_user_ids: List[str] = []
-    clerk_users_matched_count = 0
-    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
-    if not clerk_secret:
-        return {
-            "invite_sent": False,
-            "user_relinked": False,
-            "pending_invite_stored": True,
-            "clerk_error": "CLERK_SECRET_KEY is not set on the backend (Render). Invites cannot be sent.",
-        }
-    import httpx
-
-    headers = {
-        "Authorization": f"Bearer {clerk_secret}",
-        "Content-Type": "application/json",
-    }
-    existing_user_ids = _clerk_user_ids_for_email(email, headers)
-    clerk_users_matched_count = len(existing_user_ids)
-    if clerk_users_matched_count > 1:
-        print(
-            f"[Admin] Clerk returned {clerk_users_matched_count} users for {email!r}; "
-            "using the first account only (one dashboard user per tenant)"
-        )
-        clerk_error = (
-            clerk_error
-            or f"Multiple Clerk accounts share {email}; linked the first only. "
-            "Remove duplicate accounts in Clerk or sign in with the linked account."
-        )
-    link_user_ids = existing_user_ids[:1] if existing_user_ids else []
-
-    def _apply_relink(ids_to_link: List[str]) -> None:
-        nonlocal user_relinked, linked_clerk_user_id, linked_clerk_user_ids, clerk_error
-        if not ids_to_link:
-            return
-        linked, displaced_all, relink_err = _clerk_relink_users_to_tenant(
-            ids_to_link, tenant_id, email, headers
-        )
-        if displaced_all:
-            print(
-                f"[Admin] Removed prior tenant owner(s) from tenant {tenant_id}: "
-                f"{', '.join(displaced_all[:5])}"
-            )
-        if linked:
-            db_tenant_invite_delete(email)
-            user_relinked = True
-            linked_clerk_user_ids = linked
-            linked_clerk_user_id = linked[0]
-            if not relink_err:
-                clerk_error = None
-            elif not clerk_error:
-                clerk_error = relink_err
-        elif relink_err and not clerk_error:
-            clerk_error = relink_err
-
-    if link_user_ids:
-        _apply_relink(link_user_ids)
-    else:
-        try:
-            resp = httpx.post(
-                "https://api.clerk.com/v1/invitations",
-                headers=headers,
-                json={
-                    "email_address": email,
-                    "public_metadata": {"tenant_id": tenant_id},
-                    "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com")
-                    + "/",
-                },
-                timeout=10.0,
-            )
-            if resp.status_code < 400:
-                invite_sent = True
-            else:
-                body = resp.text or ""
-                print(f"[Admin] Clerk invite failed: {resp.status_code} {body[:240]}")
-                if resp.status_code == 422 and "form_identifier_exists" in body:
-                    retry_ids = _clerk_user_ids_for_email(email, headers)[:1]
-                    if retry_ids:
-                        _apply_relink(retry_ids)
-                        if user_relinked:
-                            clerk_error = None
-                        else:
-                            clerk_error = (
-                                "Clerk account exists for this email but re-link failed. "
-                                "Confirm the email matches sign-in (including Google), then try again."
-                            )
-                    else:
-                        clerk_error = (
-                            "Clerk says this email is already registered, but we could not find "
-                            "the account to link. Check Clerk Dashboard → Users for the exact email."
-                        )
-                else:
-                    clerk_error = _clerk_invite_error_message(resp.status_code, body)
-        except Exception as e:
-            clerk_error = str(e)[:240]
-            print(f"[Admin] Clerk invite error: {e}")
-    result = {
-        "invite_sent": invite_sent,
-        "user_relinked": user_relinked,
-        "pending_invite_stored": True,
-        "clerk_error": clerk_error,
-        "linked_clerk_user_id": linked_clerk_user_id,
-        "linked_clerk_user_ids": linked_clerk_user_ids,
-        "clerk_users_matched_count": clerk_users_matched_count,
-    }
-    _admin_access_log(
-        "link_email_to_tenant",
-        tenant_id=tenant_id,
-        email=email,
-        invite_sent=invite_sent,
-        user_relinked=user_relinked,
-        linked_ids=linked_clerk_user_ids,
-        clerk_users_matched_count=clerk_users_matched_count,
-        clerk_error=(clerk_error or "")[:120] if clerk_error else None,
-    )
-    if _admin_access_debug_enabled():
-        result["access_debug"] = _admin_tenant_access_debug_snapshot(tenant_id)
-    return result
-
 
 def _extend_trial_through_exempt(tenant_id: str, exempt_until: datetime) -> None:
     """Keep trial_ends_at at or past billing_exempt_until so admin/client dates stay aligned."""
@@ -4498,56 +4162,6 @@ def _membership_diagnosis(
     return {"issues": issues, "recommended_action": recommended}
 
 
-def _admin_tenant_access_debug_snapshot(tenant_id: str) -> dict:
-    """Admin-only: how dashboard access is wired for one tenant."""
-    tenant = db_tenant_get_by_id(tenant_id) if runtime.USE_DB else None
-    if not tenant:
-        return {"found": False, "tenant_id": tenant_id}
-    tid = str(tenant.get("id") or "")
-    pending_invite = db_tenant_get_invite_email(tid) if runtime.USE_DB else None
-    member_ids = db_tenant_get_members(tid) if runtime.USE_DB else []
-    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
-    headers = (
-        {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
-        if clerk_secret
-        else None
-    )
-    members_debug: List[dict] = []
-    for uid in member_ids:
-        link = _clerk_fetch_user_link(uid) if headers else None
-        memberships = db_tenant_memberships_for_user(uid) if runtime.USE_DB else []
-        members_debug.append(
-            {
-                "clerk_user_id": uid,
-                "clerk_emails": (link or {}).get("emails") or [],
-                "clerk_metadata_tenant_id": (link or {}).get("tenant_id"),
-                "all_db_memberships": memberships,
-            }
-        )
-    clerk_api_ids: List[str] = []
-    lookup_source = None
-    if pending_invite and headers:
-        clerk_api_ids = _clerk_user_ids_from_api(pending_invite, headers)
-        lookup_source = "clerk_api" if clerk_api_ids else None
-    if pending_invite and headers and not clerk_api_ids:
-        clerk_api_ids = _clerk_user_ids_from_tenant_members(pending_invite, headers)
-        lookup_source = "tenant_members_scan" if clerk_api_ids else lookup_source
-    return {
-        "found": True,
-        "tenant_id": tid,
-        "client_id": tenant.get("client_id"),
-        "name": tenant.get("name"),
-        "twilio_phone_number": tenant.get("twilio_phone_number"),
-        "pending_invite_email": pending_invite,
-        "member_clerk_user_ids": member_ids,
-        "members": members_debug,
-        "clerk_lookup_for_pending_email": {
-            "email": pending_invite,
-            "user_ids": clerk_api_ids,
-            "source": lookup_source,
-        },
-        "one_email_per_tenant": True,
-    }
 
 
 def _admin_resolve_email_debug(email: str) -> dict:

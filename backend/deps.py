@@ -32,6 +32,18 @@ def _settings_load_debug_enabled() -> bool:
     return os.getenv("SETTINGS_LOAD_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
+def _admin_access_debug_enabled() -> bool:
+    """ADMIN_ACCESS_DEBUG=1 — INFO logs for invite/relink; extra fields on admin debug API responses."""
+    return os.getenv("ADMIN_ACCESS_DEBUG", "").strip().lower() in ("1", "true", "yes")
+
+
+def _admin_access_log(event: str, **fields) -> None:
+    if not _admin_access_debug_enabled():
+        return
+    parts = [f"{k}={v!r}" for k, v in fields.items() if v is not None]
+    print(f"[ADMIN_ACCESS] {event} " + " ".join(parts))
+
+
 def audit_log(
     actor_type: str,
     action: str,
