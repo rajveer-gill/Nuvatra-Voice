@@ -4,6 +4,8 @@ from sms_appointment_updates import (
     apply_sms_appointment_detail_updates,
     parse_email_from_sms,
     parse_name_from_sms,
+    parse_time_from_sms,
+    normalize_time_to_hhmm,
 )
 
 
@@ -17,6 +19,81 @@ def test_parse_email():
 
 def test_parse_name_unchanged_returns_none():
     assert parse_name_from_sms("my name is Jake", current_name="Jake") is None
+
+
+def test_parse_time_can_we_do_3():
+    assert parse_time_from_sms("can we do 3 actually?", current_time="14:00") == "15:00"
+
+
+def test_parse_time_unchanged_returns_none():
+    assert parse_time_from_sms("can we do 2?", current_time="14:00") is None
+
+
+def test_parse_time_skips_confirmation_only():
+    assert parse_time_from_sms("yup! thats correct", current_time="14:00") is None
+
+
+def test_apply_time_change_from_bodies():
+    stored = {
+        "id": 2,
+        "status": "pending_customer",
+        "name": "Raj",
+        "date": "2026-06-05",
+        "time": "14:00",
+        "reason": "Long Cut",
+    }
+
+    def fake_update(aid, client_id, **kwargs):
+        stored.update(kwargs)
+        return dict(stored)
+
+    from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
+
+    out, changed = apply_sms_appointment_detail_updates_from_bodies(
+        ["can we do 3 actually?"],
+        stored,
+        client_id="test",
+        from_number="+15551234567",
+        db_appointments_update=fake_update,
+        db_appointments_get_by_id=lambda aid, client_id: dict(stored),
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=__import__("logging").getLogger("test"),
+    )
+    assert out["time"] == "15:00"
+    assert changed == ["time"]
+
+
+def test_apply_time_change_on_confirm_turn_reads_prior_body():
+    stored = {
+        "id": 3,
+        "status": "pending_customer",
+        "name": "Raj",
+        "date": "2026-06-05",
+        "time": "14:00",
+        "reason": "Long Cut",
+    }
+
+    def fake_update(aid, client_id, **kwargs):
+        stored.update(kwargs)
+        return dict(stored)
+
+    from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
+
+    out, changed = apply_sms_appointment_detail_updates_from_bodies(
+        ["can we do 3 actually?", "yup! thats correct"],
+        stored,
+        client_id="test",
+        from_number="+15551234567",
+        db_appointments_update=fake_update,
+        db_appointments_get_by_id=lambda aid, client_id: dict(stored),
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=__import__("logging").getLogger("test"),
+    )
+    assert out["time"] == "15:00"
+    assert changed == ["time"]
+    assert normalize_time_to_hhmm(out["time"]) == "15:00"
 
 
 def test_apply_updates_name_only_ignores_email_in_sms():

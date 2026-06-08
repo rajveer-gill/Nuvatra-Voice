@@ -111,6 +111,18 @@ export default function Appointments() {
     [appointments]
   )
 
+  const archivedAppointments = useMemo(
+    () =>
+      appointments
+        .filter((a) => isHiddenAppointmentStatus(a.status))
+        .sort((a, b) =>
+          appointmentDateTimeSortKey(b.date, b.time).localeCompare(
+            appointmentDateTimeSortKey(a.date, a.time)
+          )
+        ),
+    [appointments]
+  )
+
   const filtered = visibleAppointments
     .filter((a) => {
       if (staffFilter && (a.staff_id || '') !== staffFilter) return false
@@ -439,14 +451,14 @@ export default function Appointments() {
                 type="date"
                 value={dateFrom}
                 onChange={(e) => setDateFrom(e.target.value)}
-                className="rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                className="date-input-dark rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
                 placeholder="From"
               />
               <input
                 type="date"
                 value={dateTo}
                 onChange={(e) => setDateTo(e.target.value)}
-                className="rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                className="date-input-dark rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
                 placeholder="To"
               />
             </div>
@@ -557,6 +569,38 @@ export default function Appointments() {
                   ))}
                 </AnimatePresence>
               </motion.div>
+            )}
+
+            {archivedAppointments.length > 0 && (
+              <details className="mt-8 rounded-2xl border border-white/10 bg-zinc-950/40 p-4">
+                <summary className="cursor-pointer select-none text-sm font-medium text-zinc-400 hover:text-zinc-200">
+                  Cancelled & declined ({archivedAppointments.length})
+                </summary>
+                <motion.div layout className="mt-4 space-y-4">
+                  {archivedAppointments.map((apt, i) => (
+                    <AppointmentCard
+                      key={apt.id}
+                      apt={apt}
+                      index={i}
+                      reduceMotion={!!reduceMotion}
+                      staffLabel={(apt.staff_id && staffNameById[apt.staff_id]) || ''}
+                      updatingId={updatingId}
+                      acceptRejectMsg={acceptRejectMsg}
+                      onAccept={handleAccept}
+                      onDecline={(id) => {
+                        setOwnerActionModal({ id, kind: 'reject' })
+                        setOwnerActionReason('')
+                        setDeclinePreview(null)
+                      }}
+                      onCancel={(id) => {
+                        setOwnerActionModal({ id, kind: 'cancel' })
+                        setOwnerActionReason('')
+                        setDeclinePreview(null)
+                      }}
+                    />
+                  ))}
+                </motion.div>
+              </details>
             )}
           </>
         )}

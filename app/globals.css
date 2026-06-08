@@ -93,6 +93,19 @@ body {
   textarea.cs-field {
     @apply placeholder:text-gray-600;
   }
+
+  /* Native date picker icon on dark inputs (admin, appointments list) */
+  .date-input-dark {
+    color-scheme: dark;
+  }
+  .date-input-dark::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    filter: invert(0.92);
+    opacity: 0.85;
+  }
+  .date-input-dark::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+  }
 }
 
 

@@ -35,7 +35,7 @@ export function needsResponse(status: string): boolean {
   return status === 'pending' || status === 'pending_review' || status === 'pending_customer'
 }
 
-/** Cancelled / declined rows are hidden from list and calendar views. */
+/** Cancelled / declined rows are kept in a collapsed list section (not on calendar). */
 export function isHiddenAppointmentStatus(status: string): boolean {
   return status === 'cancelled' || status === 'rejected'
 }

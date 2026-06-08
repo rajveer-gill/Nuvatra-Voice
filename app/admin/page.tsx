@@ -972,7 +972,7 @@ export default function AdminPage() {
                               type="date"
                               value={exemptUntilDate[t.id] || ''}
                               onChange={(e) => setExemptUntilDate((d) => ({ ...d, [t.id]: e.target.value }))}
-                              className={selectClass}
+                              className={`${selectClass} date-input-dark`}
                             />
                           )}
                           <button

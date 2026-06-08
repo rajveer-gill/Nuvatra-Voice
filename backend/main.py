@@ -2970,6 +2970,23 @@ def release_slot(appointment_id: int) -> None:
     system_debug("slot_released", appointment_id=appointment_id)
 
 
+def _reconcile_sms_appointment_slot_after_detail_change(apt: dict) -> None:
+    """After SMS time/date change, move calendar hold when the appointment already reserves a slot."""
+    aid = apt.get("id")
+    if not aid:
+        return
+    st = (apt.get("status") or "").strip()
+    if st not in ("pending_review", "accepted", "confirmed", "completed"):
+        return
+    release_slot(int(aid))
+    date_str = (apt.get("date") or "").strip()
+    time_hhmm = _normalize_time_to_hhmm(apt.get("time") or "") or (apt.get("time") or "").strip()
+    staff_for = (apt.get("staff_id") or "").strip() or None
+    duration = _appointment_duration_minutes(apt)
+    if date_str and time_hhmm and is_slot_available(date_str, time_hhmm, duration, staff_for):
+        reserve_slot(date_str, time_hhmm, int(aid), duration, staff_for)
+
+
 def _reconcile_booked_slots_orphans() -> int:
     """Drop booked_slots rows whose appointment no longer holds the calendar (fixes AI 'taken' with empty UI)."""
     if not USE_DB:
@@ -8733,6 +8750,10 @@ async def handle_incoming_sms(request: Request):
                     logger=logger,
                 )
             )
+            if detail_fields_updated and apt and any(
+                f in detail_fields_updated for f in ("time", "date")
+            ):
+                _reconcile_sms_appointment_slot_after_detail_change(apt)
         else:
             detail_fields_updated = []
         messages.append({"role": "user", "content": body})
