@@ -77,7 +77,7 @@ except ImportError:
     stripe = None
     STRIPE_AVAILABLE = False
 
-from prompts.receptionist import appointment_focus_guidance, build_system_prompt
+from prompts.receptionist import appointment_focus_guidance, build_system_prompt, caller_message_suggests_pricing, latest_user_message
 from voice.call_session_store import MemoryCallSessionStore, get_call_session_store
 from settings import get_settings
 from security.webhooks import (
@@ -3337,6 +3337,16 @@ def _voice_booking_nudge_message(
         return None
     turns = _count_booking_user_turns(conversation_history)
     user_text = _conversation_user_text(conversation_history)
+
+    last_user = latest_user_message(conversation_history)
+    if last_user and caller_message_suggests_pricing(last_user):
+        return (
+            "BOOKING REMINDER: Caller asked about price or cost. This is a normal business question—not off-topic. "
+            "Answer briefly using the dollar amounts in the Services menu in your system prompt; "
+            "speak naturally (e.g. a long cut runs around fifty dollars). "
+            "Do NOT say you are not sure or deflect to booking without giving the price when it is listed. "
+            "After answering, invite them to continue scheduling if they were booking."
+        )
 
     if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(
         user_text, biz

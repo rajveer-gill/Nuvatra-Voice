@@ -7,8 +7,32 @@ injected by the caller (typically main.py) so this module stays free of DB/Twili
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
+
+_PRICING_QUESTION_RE = re.compile(
+    r"\b("
+    r"how much|how much does|how much is|what(?:'s| is| does)?(?: the)? price|"
+    r"what(?:'s| is| does)?(?: a| the)? .* cost|what do you charge|"
+    r"price of|cost of|what are (?:your )?prices|pricing"
+    r")\b",
+    re.I,
+)
+
+
+def caller_message_suggests_pricing(text: str) -> bool:
+    """True when the caller is asking about service cost (not off-topic)."""
+    return bool(_PRICING_QUESTION_RE.search((text or "").strip()))
+
+
+def latest_user_message(conversation_history: Optional[list]) -> str:
+    if not conversation_history:
+        return ""
+    for msg in reversed(conversation_history):
+        if (msg.get("role") or "").strip() == "user":
+            return (msg.get("content") or "").strip()
+    return ""
 
 
 def appointment_focus_guidance(
@@ -27,7 +51,8 @@ def appointment_focus_guidance(
             return (
                 f"PRIMARY GOAL: Help them book an appointment at {biz}. "
                 "Steer every conversation toward scheduling when you can—ask for date, time, service, and name. "
-                "Answer business questions briefly (hours, location, services). "
+                "Answer business questions briefly (hours, location, services, prices, policies). "
+                "When they ask how much a service costs, answer from the configured service menu—never say you do not know if prices are listed. "
                 "If they text about unrelated topics (sports, trivia, jokes, random chat): one short line at most, "
                 f"then redirect—e.g. \"Ha! I'm mostly here to help you book at {biz}—want to set up a time?\" "
                 "Stay warm; never be rude. If they only want info, answer and offer to book."
@@ -40,7 +65,9 @@ def appointment_focus_guidance(
         return (
             f"PRIMARY GOAL: Your main job is helping callers book an appointment at {biz}. "
             "Move every turn toward scheduling when possible—name, date, time, stylist when applicable, and service. "
-            "Answer business-related questions briefly (hours, location, services, policies, staff). "
+            "Answer business-related questions briefly (hours, location, services, prices, policies, staff). "
+            "When they ask how much a service costs or what you charge, answer from the service menu in your context—"
+            "that is a business question, NOT off-topic. Never say you are unsure if the price is listed there. "
             "If they ask something unrelated to the business or booking (trivia, sports, jokes, chit-chat): "
             "at most one short sentence, then politely steer back—e.g. "
             f"\"I'm not much help with that, but I can get you booked at {biz}—would you like an appointment?\" "
@@ -107,13 +134,22 @@ def format_service_catalog_for_prompt(catalog: List[dict]) -> str:
     if not lines:
         return ""
     names_only = ", ".join(f'"{(e.get("name") or "").strip()}"' for e in catalog if (e.get("name") or "").strip())
+    has_any_price = any(_format_price_for_prompt(e.get("price")) for e in catalog)
+    pricing_note = (
+        "When they ask how much something costs, the price, or what you charge: answer using the dollar amounts above "
+        "for that service in natural speech (e.g. a long cut is around fifty dollars). "
+        "Never say you do not know or are not sure if the price is listed in this menu. "
+        if has_any_price
+        else "Prices are not configured in Settings for this business—if they ask cost, say the shop will confirm exact pricing when booking; do not treat price questions as off-topic. "
+    )
     return (
         "- Services menu (BOOKING reason field must use an exact name from this list):\n"
         + "\n".join(lines)
         + "\n- VOICE: When describing services to the caller, sound like a real receptionist—not a spreadsheet. "
         "List service names in plain language (e.g. we offer short cuts and long cuts). "
         f"Valid names: {names_only}. "
-        "Only mention price or length if they ask; then say it naturally (e.g. around thirty dollars, about half an hour). "
+        + pricing_note
+        + "Only mention price or length unprompted if it helps them choose; when they ask about cost, answer directly. "
         "Never read internal labels, parentheses, decimals like 30.0, or phrasing like dollar-sign thirty comma thirty min."
     )
 
@@ -194,6 +230,10 @@ def build_system_prompt(
         help_lines.append(f"- Location: {address}")
     if services_prompt_block:
         help_lines.append(services_prompt_block)
+        if any(_format_price_for_prompt(e.get("price")) for e in service_catalog):
+            help_lines.append(
+                "- Pricing: When callers ask how much a service costs, answer from the prices in the Services menu above."
+            )
     if specials_list:
         help_lines.append(f"- Specials / promotions: {specials_list}")
     if reservation_info:
@@ -341,6 +381,7 @@ def build_system_prompt(
                 "After they pick a stylist, offer ONLY that person's services from the staff/service list—not the full menu. "
                 "Before BOOKING you MUST ask which service they want unless they already clearly named one from that stylist's list. "
                 "Put the exact service name in the reason field. When speaking, follow the VOICE rules under Services menu above.\n"
+                "- PRICING: Service prices are in the menu above. When asked about cost, answer directly in natural speech, then continue booking if they were scheduling.\n"
                 f"{staff_booking_rules}"
                 "- When they have confirmed name, date, time, and service (service name in reason), and stylist preference when applicable, and the slot is available, "
             )

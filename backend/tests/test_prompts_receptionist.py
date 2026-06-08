@@ -5,7 +5,9 @@ import pytest
 from prompts.receptionist import (
     appointment_focus_guidance,
     build_system_prompt,
+    caller_message_suggests_pricing,
     format_service_catalog_for_prompt,
+    latest_user_message,
 )
 
 
@@ -185,3 +187,48 @@ def test_prompt_services_not_robotic_price_list():
     assert "Services menu" in p
     assert "VOICE:" in p
     assert "Short Cut ($30.0, 30 min)" not in p
+    assert "Pricing:" in p
+    assert "how much" in p.lower() or "cost" in p.lower()
+
+
+def test_caller_message_suggests_pricing():
+    assert caller_message_suggests_pricing("How much is a long cut?")
+    assert caller_message_suggests_pricing("What's the price for short cut")
+    assert not caller_message_suggests_pricing("Book me for tomorrow at 3")
+
+
+def test_service_catalog_includes_price_answer_guidance():
+    block = format_service_catalog_for_prompt(
+        [{"name": "Long Cut", "price": 50, "duration_minutes": 45}]
+    )
+    assert "Never say you do not know" in block
+    assert "$50" in block
+
+
+def test_service_catalog_without_prices_configured():
+    block = format_service_catalog_for_prompt(
+        [{"name": "Long Cut", "price": 0, "duration_minutes": 45}]
+    )
+    assert "not configured" in block.lower() or "confirm" in block.lower()
+
+
+def test_voice_booking_nudge_prioritizes_pricing_question(monkeypatch):
+    from main import _voice_booking_nudge_message
+
+    monkeypatch.setattr(
+        "main.get_business_info",
+        lambda: {
+            "staff": [{"id": "j1", "name": "Jake"}],
+            "services": [{"id": "s1", "name": "Long Cut", "price": 50, "duration_minutes": 45}],
+        },
+    )
+    history = [
+        {"role": "user", "content": "I want to book with Jake tomorrow"},
+        {"role": "assistant", "content": "Sure"},
+        {"role": "user", "content": "How much is a long cut?"},
+    ]
+    nudge = _voice_booking_nudge_message(history)
+    assert nudge is not None
+    assert "price" in nudge.lower()
+    assert "not off-topic" in nudge.lower()
+    assert "BOOKING:" not in nudge
