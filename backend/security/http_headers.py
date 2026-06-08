@@ -12,6 +12,13 @@ from twilio_provision import validate_public_base_url
 
 HSTS_VALUE = "max-age=63072000; includeSubDomains; preload"
 
+# This service is a pure JSON/XML/audio API — it never returns browser-rendered
+# HTML, so the tightest possible CSP is safe and blocks the API from being abused
+# as a script/content-injection vector. Swagger UI at /docs needs inline scripts,
+# so the policy is skipped there (see apply_security_headers).
+API_CSP_VALUE = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+_CSP_EXEMPT_PREFIXES = ("/docs", "/redoc", "/openapi.json")
+
 BASE_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
@@ -49,6 +56,9 @@ def apply_security_headers(response: Response, *, request: Request) -> None:
 
     if should_send_hsts(request):
         _set_if_missing(response.headers, "Strict-Transport-Security", HSTS_VALUE)
+
+    if not request.url.path.startswith(_CSP_EXEMPT_PREFIXES):
+        _set_if_missing(response.headers, "Content-Security-Policy", API_CSP_VALUE)
 
     if request.url.path.startswith("/api/admin/"):
         _set_if_missing(response.headers, "Cache-Control", "no-store")

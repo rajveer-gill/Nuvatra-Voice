@@ -21,6 +21,17 @@ def test_health_includes_base_security_headers():
     assert resp.headers.get("Permissions-Policy") == "camera=(), microphone=(), geolocation=()"
     assert resp.headers.get("X-DNS-Prefetch-Control") == "off"
     assert resp.headers.get("X-Request-ID")
+    assert (
+        resp.headers.get("Content-Security-Policy")
+        == "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    )
+
+
+def test_csp_skipped_on_swagger_docs():
+    # Swagger UI needs inline scripts; a default-src 'none' CSP would break it.
+    client = TestClient(app)
+    resp = client.get("/docs")
+    assert "Content-Security-Policy" not in resp.headers
 
 
 def test_hsts_absent_on_http_request(monkeypatch):
