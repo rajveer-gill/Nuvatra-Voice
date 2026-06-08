@@ -23,3 +23,9 @@ USE_DB: bool = False
 # True once the `database` module imported cleanly (set in main.py). Guards the
 # deferred-init path in deps._ensure_db_ready.
 _db_imported: bool = False
+
+# Twilio REST client singleton, created once at startup in main.py (or None when
+# Twilio is unavailable / unconfigured). Shared by main's phone code and
+# sms_service.send_sms — read as runtime.twilio_client so both see the same object.
+twilio_client = None
+

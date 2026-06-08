@@ -716,10 +716,9 @@ TWILIO_SMS_FROM = (
     os.getenv("TWILIO_SMS_FROM") or TWILIO_PHONE_NUMBER
 )  # Same or separate number for SMS
 
-twilio_client = None
 if TWILIO_AVAILABLE and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
     try:
-        twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        runtime.twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         print(f"Twilio initialized successfully")
     except Exception as e:
         print(f"WARNING: Twilio initialization failed: {e}")
@@ -738,7 +737,7 @@ def _voice_stt_use_deepgram() -> bool:
     except ImportError:
         return False
     return deepgram_stt_active(
-        twilio_available=TWILIO_AVAILABLE, twilio_client=twilio_client
+        twilio_available=TWILIO_AVAILABLE, twilio_client=runtime.twilio_client
     )
 
 
@@ -913,6 +912,11 @@ from deps import (  # noqa: E402
     _settings_load_debug_enabled,
 )
 from models import SmsAutomationCreate, SmsAutomationUpdate  # noqa: E402,F401
+
+# send_sms / _phone_to_e164 now live in sms_service; re-export so the many
+# `send_sms(...)` calls in main's still-unmigrated routes (and tests patching
+# main.send_sms) keep resolving.
+from sms_service import send_sms, _phone_to_e164  # noqa: E402,F401
 
 
 def _init_db_background():
@@ -1724,16 +1728,6 @@ class TTSRequest(BaseModel):
 
 
 
-def _phone_to_e164(phone: str) -> Optional[str]:
-    """Convert to E.164 for Twilio SMS (e.g. +15551234567). Returns None if too short."""
-    digits = "".join(c for c in phone if c.isdigit())
-    if len(digits) == 10:
-        return f"+1{digits}"
-    if len(digits) == 11 and digits.startswith("1"):
-        return f"+{digits}"
-    if len(digits) >= 10:
-        return f"+{digits}"
-    return None
 
 
 def _is_sms_confirmation(body: str) -> bool:
@@ -1805,122 +1799,6 @@ def _sms_compliance_keyword(body: str) -> Optional[str]:
     return None
 
 
-def send_sms(
-    to_phone: str,
-    body: str,
-    from_override: Optional[str] = None,
-    *,
-    force: bool = False,
-) -> bool:
-    """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number).
-    Records usage via db_usage_increment_sms when client_id is set.
-    If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only).
-    """
-    if not TWILIO_AVAILABLE or not twilio_client:
-        sms_info("outbound_skipped", reason="twilio_not_configured")
-        return False
-    from_num = (from_override or TWILIO_SMS_FROM or "").strip()
-    if not from_num:
-        sms_info(
-            "outbound_skipped",
-            reason="from_number_missing",
-            from_override_set=bool(from_override),
-            twilio_sms_from_set=bool(TWILIO_SMS_FROM),
-        )
-        return False
-    e164 = _phone_to_e164(to_phone or "")
-    if not e164:
-        sms_info("outbound_skipped", reason="invalid_recipient_phone")
-        return False
-    if runtime.USE_DB and not force:
-        cid = get_db_client_id()
-        if cid and cid != "default":
-            if db_sms_opt_out_is_blocked(e164, cid):
-                to_masked = mask_phone_e164(e164)
-                sms_info(
-                    "outbound_skipped",
-                    reason="recipient_opted_out",
-                    client_id_prefix=cid[:12],
-                    to_masked=to_masked,
-                )
-                return False
-    to_masked = mask_phone_e164(e164)
-    sms_debug(
-        "outbound_attempt",
-        from_num=from_num,
-        to_masked=to_masked,
-        body_len=len(body or ""),
-        force=force,
-    )
-    sms_trace(
-        "outbound_attempt",
-        from_num=from_num,
-        to_masked=to_masked,
-        body_len=len(body or ""),
-        force=force,
-    )
-    last_err = None
-    for attempt in range(3):
-        try:
-            msg = twilio_client.messages.create(from_=from_num, to=e164, body=body)
-            sid = getattr(msg, "sid", None) or getattr(msg, "id", None)
-            sms_info(
-                "outbound_twilio_ok",
-                message_sid=sid,
-                to_masked=to_masked,
-                body_len=len(body or ""),
-            )
-            # Record SMS usage for billing (graceful degradation)
-            if runtime.USE_DB:
-                cid = get_db_client_id()
-                if cid and cid != "default":
-                    try:
-                        month = datetime.now(timezone.utc).strftime("%Y-%m")
-                        db_usage_increment_sms(cid, month)
-                    except Exception as e:
-                        logger.error("SMS usage increment failed: %s", e)
-            audit_log(
-                "sms",
-                "outbound_sent",
-                resource_type="message",
-                resource_id=str(sid) if sid else None,
-                client_id=get_db_client_id() if runtime.USE_DB else None,
-                details={
-                    "to_masked": to_masked,
-                    "from_masked": mask_phone_e164(from_num),
-                    "body_len": len(body or ""),
-                    "body_sha256": _stable_sha256(body or ""),
-                    "force": bool(force),
-                },
-            )
-            return True
-        except Exception as e:
-            last_err = e
-            logger.warning(
-                "[SMS] outbound_twilio_retry attempt=%s error=%s to_masked=%s",
-                attempt + 1,
-                e,
-                to_masked,
-            )
-            if attempt < 2:
-                import time
-
-                time.sleep(2**attempt)
-    sms_info("outbound_failed_after_retries", error=str(last_err), to_masked=to_masked)
-    audit_log(
-        "sms",
-        "outbound_failed",
-        resource_type="message",
-        client_id=get_db_client_id() if runtime.USE_DB else None,
-        details={
-            "to_masked": to_masked,
-            "from_masked": mask_phone_e164(from_num),
-            "body_len": len(body or ""),
-            "body_sha256": _stable_sha256(body or ""),
-            "error": str(last_err)[:240] if last_err else None,
-        },
-    )
-    return False
 
 
 def _tenant_sms_from_number() -> Optional[str]:
@@ -9788,12 +9666,12 @@ async def handle_call_status(request: Request):
 @app.websocket("/api/phone/media")
 async def phone_media_websocket(websocket: WebSocket):
     """Twilio Media Streams → Deepgram Nova-2 live STT (when VOICE_STT_PROVIDER=deepgram)."""
-    if not TWILIO_AVAILABLE or not twilio_client:
+    if not TWILIO_AVAILABLE or not runtime.twilio_client:
         await websocket.close(code=1011)
         return
     from voice.media_ws import handle_phone_media_websocket
 
-    await handle_phone_media_websocket(websocket, twilio_client)
+    await handle_phone_media_websocket(websocket, runtime.twilio_client)
 
 
 @app.post("/api/phone/stream")
