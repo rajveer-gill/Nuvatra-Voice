@@ -7,9 +7,22 @@ re-exports them so existing ``from main import <Model>`` usages keep working.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class ProvisioningTenantRow(BaseModel):
+    client_id: str
+    name: Optional[str] = None
+    email: Optional[str] = None
+    area_code: Optional[str] = None
+    plan: str = "free"
+
+
+class ProvisioningJobRequest(BaseModel):
+    tenants: List[ProvisioningTenantRow] = Field(..., min_length=1, max_length=500)
+    default_area_code: Optional[str] = None
 
 
 class SmsAutomationCreate(BaseModel):

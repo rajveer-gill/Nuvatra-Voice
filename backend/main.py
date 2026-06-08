@@ -658,11 +658,13 @@ from routers import health as health_router
 from routers import leads as leads_router
 from routers import sms_automations as sms_automations_router
 from routers import cron as cron_router
+from routers import provisioning as provisioning_router
 
 app.include_router(health_router.router)
 app.include_router(leads_router.router)
 app.include_router(sms_automations_router.router)
 app.include_router(cron_router.router)
+app.include_router(provisioning_router.router)
 
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()

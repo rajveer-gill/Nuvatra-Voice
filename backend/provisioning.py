@@ -9,6 +9,7 @@ so they stay patchable and the import graph stays acyclic (no import of main).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -109,3 +110,63 @@ def provision_one_tenant(
             type(e).__name__,
         )
     return out
+
+
+def _provision_and_release(task: dict, **kw) -> dict:
+    """Run one tenant in a worker thread, then return that thread's pooled DB
+    connection (the request middleware won't — this isn't a request)."""
+    try:
+        return provision_one_tenant(task, **kw)
+    finally:
+        database.db_release_thread_connection()
+
+
+async def run_provisioning_job(
+    job_id: str,
+    *,
+    base_url: str,
+    account_sid: str,
+    auth_token: str,
+    default_area_code: Optional[str] = None,
+    concurrency: int = 6,
+) -> dict:
+    """Process a job's unfinished tasks with bounded concurrency. Each tenant's
+    blocking work runs in a thread; results persist as they complete. Returns a
+    summary {done, failed, total}. Safe to re-invoke (resume) — finished tasks
+    are skipped at the SQL level and the step machine is idempotent."""
+    database.db_provisioning_job_set_status(job_id, "running")
+    tasks = database.db_provisioning_tasks_for_job(job_id, only_unfinished=True)
+    sem = asyncio.Semaphore(max(1, concurrency))
+    done = 0
+    failed = 0
+
+    async def _one(task: dict):
+        nonlocal done, failed
+        async with sem:
+            result = await asyncio.to_thread(
+                _provision_and_release,
+                task,
+                base_url=base_url,
+                account_sid=account_sid,
+                auth_token=auth_token,
+                default_area_code=default_area_code,
+            )
+            await asyncio.to_thread(
+                database.db_provisioning_task_save,
+                task["id"],
+                status=result["status"],
+                steps_done=result["steps_done"],
+                phone_e164=result.get("phone_e164"),
+                error=result.get("error"),
+            )
+            if result["status"] == "done":
+                done += 1
+            else:
+                failed += 1
+
+    try:
+        await asyncio.gather(*[_one(t) for t in tasks], return_exceptions=False)
+    finally:
+        await asyncio.to_thread(database.db_release_thread_connection)
+    database.db_provisioning_job_set_status(job_id, "failed" if failed else "done")
+    return {"done": done, "failed": failed, "total": len(tasks)}
