@@ -151,6 +151,75 @@ def configure_webhooks(
     return result
 
 
+def purchase_number(
+    *,
+    account_sid: str,
+    auth_token: str,
+    base_url: str,
+    area_code: Optional[str] = None,
+    country: str = "US",
+) -> dict[str, Any]:
+    """Search available local numbers and buy one, configuring webhooks at purchase.
+
+    Used by bulk onboarding. Idempotency (don't buy twice for a tenant) is the
+    caller's responsibility — this just provisions one number. Returns
+    { ok, phone_e164, number_sid, errors }.
+    """
+    result: dict[str, Any] = {
+        "ok": False,
+        "phone_e164": None,
+        "number_sid": None,
+        "errors": [],
+    }
+    base, base_errors = validate_public_base_url(base_url)
+    if base_errors:
+        result["errors"].extend(base_errors)
+        return result
+    if not account_sid or not auth_token:
+        result["errors"].append("twilio_credentials_required")
+        return result
+    if TwilioClient is None:
+        result["errors"].append("twilio_sdk_unavailable")
+        return result
+
+    urls = _expected_webhook_urls(base)
+    try:
+        client = TwilioClient(account_sid, auth_token)
+        search_kwargs: dict[str, Any] = {"limit": 1}
+        if area_code:
+            search_kwargs["area_code"] = re.sub(r"\D", "", str(area_code))[:3]
+        available = client.available_phone_numbers(country).local.list(**search_kwargs)
+        if not available:
+            result["errors"].append("no_available_numbers")
+            return result
+        chosen = getattr(available[0], "phone_number", None)
+        if not chosen:
+            result["errors"].append("no_available_numbers")
+            return result
+        purchased = client.incoming_phone_numbers.create(
+            phone_number=chosen,
+            voice_url=urls["voice"],
+            voice_method="POST",
+            sms_url=urls["sms"],
+            sms_method="POST",
+            status_callback=urls["status"],
+            status_callback_method="POST",
+        )
+        result["ok"] = True
+        result["phone_e164"] = normalize_e164(
+            getattr(purchased, "phone_number", chosen) or chosen
+        )
+        result["number_sid"] = getattr(purchased, "sid", None)
+    except Exception as e:
+        result["errors"].append("twilio_purchase_failed")
+        _log.warning(
+            "twilio_purchase_number_failed area=%s err=%s",
+            area_code,
+            type(e).__name__,
+        )
+    return result
+
+
 def verify_webhooks_match(
     *,
     account_sid: str,
