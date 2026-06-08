@@ -394,8 +394,65 @@ async def keep_client_warm():
             print(f"[WARN] Keep-warm error (non-critical): {e}")
 
 
+def _server_error(
+    context: str,
+    exc: Exception,
+    *,
+    status_code: int = 500,
+    public_detail: str = "Internal server error",
+) -> HTTPException:
+    """Log the real exception server-side; return a client-safe HTTPException.
+
+    Raw exception strings from the DB driver, Stripe, OpenAI, or Twilio can embed
+    connection strings, partial keys, or internal hostnames — never echo str(e)
+    to clients. Callers do `raise _server_error("context", e)`.
+    """
+    logger.error("%s: %s", context, exc, exc_info=True)
+    return HTTPException(status_code=status_code, detail=public_detail)
+
+
+def _assert_secure_production_config() -> None:
+    """Fail closed at boot.
+
+    A DB-backed (i.e. multi-tenant production) deployment MUST have JWT-auth and
+    webhook-signature secrets configured, and MUST NOT pin all data to a single
+    legacy CLIENT_ID. This guarantees that a single missing/typo'd env var can
+    never silently disable authentication or webhook validation — the process
+    refuses to serve instead. DATABASE_URL is the production signal (it is what
+    flips USE_DB on). ALLOW_INSECURE_WEBHOOKS is the explicit, deliberate dev
+    opt-out and bypasses the guard.
+    """
+    if not (os.getenv("DATABASE_URL") or "").strip():
+        return  # local / in-memory dev mode
+    if (os.getenv("ALLOW_INSECURE_WEBHOOKS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+    problems: List[str] = []
+    for var in ("CLERK_JWKS_URL", "CLERK_ISSUER", "CLERK_AUDIENCE"):
+        if not (os.getenv(var) or "").strip():
+            problems.append(f"{var} unset — JWT auth would be disabled")
+    if not (os.getenv("TWILIO_AUTH_TOKEN") or "").strip():
+        problems.append(
+            "TWILIO_AUTH_TOKEN unset — Twilio webhook signatures would not be verified"
+        )
+    if (os.getenv("CLIENT_ID") or "").strip():
+        problems.append(
+            "CLIENT_ID is set — would pin all tenant data to one client in multi-tenant mode"
+        )
+    if problems:
+        raise RuntimeError(
+            "Refusing to start: insecure production configuration:\n  - "
+            + "\n  - ".join(problems)
+            + "\n(set ALLOW_INSECURE_WEBHOOKS=1 only for local development)"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _assert_secure_production_config()
     # Init DB first (in thread so it doesn't block the event loop), then pre-warm OpenAI
     db_task = create_tracked_task(
         asyncio.to_thread(_init_db_background), name="init_db_background"
@@ -508,12 +565,30 @@ WEBHOOK_RATE_LIMIT_PER_MIN = 120
 WEBHOOK_RATE_LIMIT_MAX_IPS = 5000
 
 
+def _rate_limit_client_ip(request: Request) -> str:
+    """Per-source key for rate limiting.
+
+    Behind Render's edge the socket peer (request.client.host) is the load
+    balancer, so keying on it collapses every caller into one bucket — useless
+    for isolating an abuser and liable to 429 legitimate traffic. Render sets
+    the originating client as the leftmost X-Forwarded-For hop, so we use that.
+    XFF is client-spoofable, but this limiter is only a coarse cost backstop;
+    the authoritative gate against forged webhooks is signature validation.
+    """
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
+
+
 async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
     """Return 429 response if IP over limit for /api/phone/incoming or /api/sms/incoming; else None."""
     path = request.url.path
     if path not in ("/api/phone/incoming", "/api/sms/incoming"):
         return None
-    ip = request.client.host if request.client else "unknown"
+    ip = _rate_limit_client_ip(request)
     now = datetime.now(timezone.utc).timestamp()
     async with _webhook_rate_limit_lock:
         # Opportunistically prune stale IP buckets.
@@ -6159,7 +6234,12 @@ async def admin_tenant_billing_exempt(
                 )
                 return {"success": True, "trial_ends_at": new_ends.isoformat()}
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise _server_error(
+                "trial extension failed",
+                e,
+                status_code=400,
+                public_detail="Could not update trial",
+            )
     if req.extend_months is not None and req.extend_months >= 0:
         exempt_until = now + timedelta(days=30 * req.extend_months)
         if db_tenant_set_billing_exempt(tenant_id, exempt_until):
@@ -6324,7 +6404,7 @@ async def handle_conversation(
         return ConversationResponse(response=ai_response, action=action, data=data)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _server_error("conversation endpoint failed", e)
 
 
 def polish_owner_customer_sms(
@@ -6635,7 +6715,7 @@ async def create_appointment(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _server_error("create appointment failed", e)
 
 
 @app.get("/api/appointments")
@@ -6996,7 +7076,7 @@ async def create_message(
             messages.append(message_data)
         return {"success": True, "message": message_data}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _server_error("create message failed", e)
 
 
 class SmsAutomationCreate(BaseModel):
@@ -7224,8 +7304,7 @@ async def create_checkout_session(
         )
         return {"url": session.url}
     except Exception as e:
-        logger.error("Stripe checkout session failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _server_error("Stripe checkout session failed", e)
 
 
 @app.post("/api/create-portal-session")
@@ -7274,8 +7353,7 @@ async def create_portal_session(tenant: Optional[dict] = Depends(require_tenant)
         )
         return {"url": session.url}
     except Exception as e:
-        logger.error("Stripe portal session failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _server_error("Stripe portal session failed", e)
 
 
 @app.post("/api/stripe-webhook")
@@ -8217,7 +8295,7 @@ async def text_to_speech(
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _server_error("text-to-speech failed", e)
 
 
 # Phone call runtime state (memory or Redis via call_session_store)
@@ -10492,10 +10570,7 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
             },
         )
     except Exception as e:
-        print(f"Error generating HD TTS audio: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to generate HD TTS audio: {str(e)}"
-        )
+        raise _server_error("HD TTS generation failed", e)
 
 
 @app.get("/api/phone/tts-audio")
@@ -10548,8 +10623,7 @@ async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
                 },
             )
         except Exception as e2:
-            print(f"TTS fallback also failed: {e2}")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise _server_error("TTS fallback also failed", e2)
 
 
 @app.post("/api/phone/process-recording")
@@ -10761,7 +10835,7 @@ async def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
         return {"transcript": transcript.text}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _server_error("transcription failed", e)
 
 
 @app.get("/api/phone/calls")
