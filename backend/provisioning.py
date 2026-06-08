@@ -43,8 +43,39 @@ def provision_one_tenant(
     phone = (task.get("phone_e164") or "").strip() or None
 
     try:
-        # 1. Tenant row — idempotent (db_tenant_create is ON CONFLICT DO NOTHING).
-        if STEP_TENANT not in steps:
+        # 1. Twilio number FIRST. db_tenant_create requires a valid number (and a
+        #    tenant should never exist without one), so the number must be in hand
+        #    before we create the row. Never double-buy: reuse a number already on
+        #    the task (resume) or on an existing tenant row (partial prior run).
+        if STEP_NUMBER not in steps:
+            if not phone:
+                existing = database.db_tenant_get_by_client_id(cid)
+                existing_num = (
+                    (existing.get("twilio_phone_number") or "").strip()
+                    if existing
+                    else ""
+                )
+                if existing_num:
+                    phone = existing_num
+                else:
+                    res = twilio_provision.purchase_number(
+                        account_sid=account_sid,
+                        auth_token=auth_token,
+                        base_url=base_url,
+                        area_code=task.get("area_code") or default_area_code,
+                    )
+                    if not res.get("ok"):
+                        raise RuntimeError(
+                            "twilio_purchase_failed:" + ",".join(res.get("errors") or [])
+                        )
+                    phone = res["phone_e164"]
+            out["phone_e164"] = phone
+            steps.add(STEP_NUMBER)
+
+        # 2. Tenant row, now with a valid number. db_tenant_create is
+        #    ON CONFLICT DO NOTHING; re-fetch to confirm and get the id.
+        created_now = STEP_TENANT not in steps
+        if created_now:
             database.db_tenant_create(
                 client_id=cid,
                 name=task.get("name") or "",
@@ -52,31 +83,14 @@ def provision_one_tenant(
                 plan=task.get("plan") or "free",
             )
             steps.add(STEP_TENANT)
-
         tenant = database.db_tenant_get_by_client_id(cid)
         if not tenant:
             raise RuntimeError("tenant_row_missing_after_create")
         tenant_id = str(tenant.get("id") or "")
-        phone = phone or ((tenant.get("twilio_phone_number") or "").strip() or None)
-
-        # 2. Twilio number — never re-buy: skip if the tenant already has one.
-        if STEP_NUMBER not in steps:
-            if not phone:
-                res = twilio_provision.purchase_number(
-                    account_sid=account_sid,
-                    auth_token=auth_token,
-                    base_url=base_url,
-                    area_code=task.get("area_code") or default_area_code,
-                )
-                if not res.get("ok"):
-                    raise RuntimeError(
-                        "twilio_purchase_failed:" + ",".join(res.get("errors") or [])
-                    )
-                phone = res["phone_e164"]
-                if not database.db_tenant_set_twilio_phone(tenant_id, phone):
-                    raise RuntimeError("twilio_phone_assign_failed")
-            out["phone_e164"] = phone
-            steps.add(STEP_NUMBER)
+        # On first creation only, ensure the number is assigned (covers a tenant
+        # that pre-existed without one). Skipped on resume to avoid a redundant write.
+        if created_now and phone and (tenant.get("twilio_phone_number") or "").strip() != phone:
+            database.db_tenant_set_twilio_phone(tenant_id, phone)
 
         # 3. Seed business config — idempotent upsert.
         if STEP_CONFIG not in steps:

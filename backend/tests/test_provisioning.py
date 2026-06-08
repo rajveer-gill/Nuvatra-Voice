@@ -63,8 +63,7 @@ def test_skips_purchase_when_phone_already_provided(monkeypatch):
     out = provisioning.provision_one_tenant(task, **CREDS)
     assert out["status"] == "done"
     assert out["phone_e164"] == "+14155559999"
-    assert calls["purchased"] == 0  # never bought
-    assert calls["phone_set"] == 0
+    assert calls["purchased"] == 0  # never bought — phone was supplied
 
 
 def test_skips_purchase_when_tenant_already_has_number(monkeypatch):
@@ -88,15 +87,35 @@ def test_resume_skips_completed_steps(monkeypatch):
     assert calls == {"created": 0, "purchased": 0, "phone_set": 0, "config": 0, "clerk": 1}
 
 
-def test_purchase_failure_marks_failed_and_preserves_progress(monkeypatch):
+def test_purchase_failure_marks_failed_before_tenant(monkeypatch):
+    # Number is purchased FIRST (db_tenant_create requires a valid phone), so a
+    # purchase failure stops before any tenant row / config / clerk work.
     calls = _patch_all(monkeypatch, purchase_ok=False)
     task = {"client_id": "acme", "email": "o@acme.com", "steps_done": []}
     out = provisioning.provision_one_tenant(task, **CREDS)
     assert out["status"] == "failed"
     assert "twilio_purchase_failed" in out["error"]
-    assert "tenant_created" in out["steps_done"]      # progress kept for resume
     assert "number_purchased" not in out["steps_done"]
-    assert calls["config"] == 0 and calls["clerk"] == 0  # stopped at failed step
+    assert "tenant_created" not in out["steps_done"]
+    assert calls["created"] == 0 and calls["config"] == 0 and calls["clerk"] == 0
+
+
+def test_tenant_created_with_a_real_number(monkeypatch):
+    """Regression: db_tenant_create requires a valid phone, so the number must be
+    purchased BEFORE the tenant row is created (never with an empty number)."""
+    captured = {}
+
+    def capture_create(**kw):
+        captured.update(kw)
+        return {"id": "tid-1", "client_id": kw["client_id"]}
+
+    _patch_all(monkeypatch)
+    monkeypatch.setattr("database.db_tenant_create", capture_create)
+    out = provisioning.provision_one_tenant(
+        {"client_id": "acme", "name": "Acme", "steps_done": []}, **CREDS
+    )
+    assert out["status"] == "done"
+    assert captured["twilio_phone_number"] == "+14155550001"  # non-empty, the purchased number
 
 
 def test_no_email_skips_clerk(monkeypatch):
