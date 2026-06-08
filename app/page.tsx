@@ -3,6 +3,7 @@ import Image from 'next/image'
 import { ArrowRight } from 'lucide-react'
 import MarketingNav from '@/components/MarketingNav'
 import ContactForm from '@/components/ContactForm'
+import { Reveal, RevealStagger, RevealItem } from '@/components/motion'
 import { LandingHero } from '@/components/call-surge/LandingHero'
 import { LandingMetricsStrip } from '@/components/call-surge/LandingMetricsStrip'
 import { LandingOutcomes } from '@/components/call-surge/LandingOutcomes'
@@ -22,7 +23,7 @@ export default function HomePage() {
 
         {/* Trust strip */}
         <section className="border-y border-white/10 px-4 py-16">
-          <div className="mx-auto max-w-4xl text-center">
+          <Reveal className="mx-auto max-w-4xl text-center">
             <p className="text-sm font-medium uppercase tracking-[0.25em] text-zinc-500">Trusted operations</p>
             <p className="mt-4 font-display text-2xl font-semibold text-white md:text-3xl">
               Designed for teams who cannot afford a dropped call.
@@ -31,12 +32,12 @@ export default function HomePage() {
               Whether you run one location or many, Call Surge scales with your front-office ambition—without scaling
               chaos.
             </p>
-          </div>
+          </Reveal>
         </section>
 
         {/* Compliance / trust (conversion moment) */}
         <section className="border-t border-white/10 bg-zinc-950/80 px-4 py-10">
-          <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-center gap-x-6 gap-y-3 text-center text-sm text-zinc-400">
+          <Reveal className="mx-auto flex max-w-4xl flex-wrap items-center justify-center gap-x-6 gap-y-3 text-center text-sm text-zinc-400">
             <span>Clerk authentication</span>
             <span className="hidden text-zinc-600 sm:inline" aria-hidden>
               ·
@@ -58,27 +59,27 @@ export default function HomePage() {
             <Link href="/privacy" className="text-cyan-400 transition hover:text-cyan-300">
               Privacy
             </Link>
-          </div>
+          </Reveal>
         </section>
 
         {/* Contact */}
         <section id="contact" className="scroll-mt-24 px-4 pb-12 pt-8 md:pb-20">
           <div className="mx-auto grid max-w-6xl gap-12 lg:grid-cols-2 lg:gap-16">
-            <div>
+            <Reveal>
               <h2 className="font-display text-3xl font-semibold tracking-tight text-white md:text-4xl">
                 Let&apos;s talk
               </h2>
               <p className="mt-4 text-lg text-zinc-400">
                 Tell us about your call volume, locations, and goals—we&apos;ll follow up fast.
               </p>
-              <div className="mt-10 space-y-6 text-zinc-300">
-                <div>
+              <RevealStagger className="mt-10 space-y-6 text-zinc-300">
+                <RevealItem>
                   <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Email</p>
                   <a href="mailto:info@nuvatrahq.com" className="mt-1 inline-block text-cyan-400 hover:text-cyan-300">
                     info@nuvatrahq.com
                   </a>
-                </div>
-                <div>
+                </RevealItem>
+                <RevealItem>
                   <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Company</p>
                   <a
                     href="https://nuvatrahq.com"
@@ -89,12 +90,12 @@ export default function HomePage() {
                     Nuvatra HQ
                     <ArrowRight className="h-4 w-4" />
                   </a>
-                </div>
-              </div>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white p-8 shadow-2xl shadow-black/40">
+                </RevealItem>
+              </RevealStagger>
+            </Reveal>
+            <Reveal direction="up" delay={0.1} className="rounded-2xl border border-white/10 bg-white p-8 shadow-2xl shadow-black/40">
               <ContactForm />
-            </div>
+            </Reveal>
           </div>
         </section>
 
