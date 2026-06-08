@@ -12,6 +12,8 @@ import main
 
 @pytest.fixture
 def client_config_dir(tmp_path, monkeypatch):
+    # config_service owns PROJECT_ROOT for config file paths now.
+    monkeypatch.setattr("config_service.PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
     return tmp_path
 
@@ -25,7 +27,7 @@ def test_read_raw_client_config_prefers_db(client_config_dir, monkeypatch):
     db_cfg = {"client_id": cid, "business_name": "DB Spa", "voice": "nova", "greeting": "from database"}
 
     monkeypatch.setattr("runtime.USE_DB", True)
-    monkeypatch.setattr(main, "db_tenant_get_business_config", lambda c: db_cfg if c == cid else None)
+    monkeypatch.setattr("database.db_tenant_get_business_config", lambda c: db_cfg if c == cid else None)
 
     raw = main._read_raw_client_config(cid)
     assert raw is not None
@@ -42,7 +44,7 @@ def test_save_raw_client_config_writes_db_and_file(client_config_dir, monkeypatc
         return True
 
     monkeypatch.setattr("runtime.USE_DB", True)
-    monkeypatch.setattr(main, "db_tenant_set_business_config", fake_set)
+    monkeypatch.setattr("database.db_tenant_set_business_config", fake_set)
 
     data = main._default_client_config_data(cid, "free")
     data["voice"] = "shimmer"
