@@ -54,9 +54,10 @@ def test_diagnostics_never_leaks_other_tenants():
 
 
 def test_bind_tenant_db_context_sets_explicit_client_id():
-    import main
+    import deps
 
-    with patch.object(main, "set_request_client_id") as set_cid:
-        cid = main._bind_tenant_db_context({"client_id": "my-tenant"})
+    # _bind_tenant_db_context lives in deps and calls database.set_request_client_id.
+    with patch("database.set_request_client_id") as set_cid:
+        cid = deps._bind_tenant_db_context({"client_id": "my-tenant"})
     assert cid == "my-tenant"
     set_cid.assert_called_once_with("my-tenant")

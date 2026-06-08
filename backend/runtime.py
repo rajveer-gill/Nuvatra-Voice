@@ -17,5 +17,9 @@ and would silently miss the startup flip. Tests patch ``runtime.USE_DB``.
 from __future__ import annotations
 
 # True once init_db() has successfully connected. Written by the startup paths in
-# main.py (init_db_background / _ensure_db_ready); read across the app.
+# main.py (init_db_background) and deps._ensure_db_ready; read across the app.
 USE_DB: bool = False
+
+# True once the `database` module imported cleanly (set in main.py). Guards the
+# deferred-init path in deps._ensure_db_ready.
+_db_imported: bool = False
