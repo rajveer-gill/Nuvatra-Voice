@@ -31,7 +31,6 @@ def test_diagnostics_flags_env_mismatch():
         cur.fetchall.side_effect = [
             [("pending_customer", 2)],
             [],
-            [("other-env", 5), ("my-tenant", 0)],
         ]
         cur.fetchone.side_effect = [(0,), (5,)]
         with patch.dict("os.environ", {"CLIENT_ID": "other-env"}, clear=False):
@@ -39,6 +38,19 @@ def test_diagnostics_flags_env_mismatch():
     assert out["likely_mismatch"] is True
     assert out["env_client_id"] == "other-env"
     assert out["env_client_id_appointment_count"] == 5
+
+
+def test_diagnostics_never_leaks_other_tenants():
+    """Diagnostics must not enumerate other tenants' client_ids (cross-tenant leak)."""
+    with patch.object(database, "_get_conn") as mock_conn:
+        cur = mock_conn.return_value.cursor.return_value
+        cur.fetchall.side_effect = [[("pending_customer", 2)], []]
+        cur.fetchone.side_effect = [(3,)]
+        with patch.dict("os.environ", {"CLIENT_ID": ""}, clear=False):
+            out = database.db_appointments_diagnostics("my-tenant")
+    assert "counts_by_client" not in out
+    assert set(out["by_status"]) == {"pending_customer"}
+    assert out["dashboard_client_id"] == "my-tenant"
 
 
 def test_bind_tenant_db_context_sets_explicit_client_id():

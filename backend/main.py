@@ -260,11 +260,73 @@ def _sentry_traces_sample_rate() -> float:
     return 1.0 if env in ("development", "dev", "local", "test") else 0.1
 
 
+# Caller PII (phone numbers, names, message bodies) must never leave the app in
+# plaintext. The log helpers in security/redaction.py only cover our own log
+# lines — Sentry events (exceptions, breadcrumbs, request data) bypass them, so
+# we scrub at the SDK boundary too.
+_SENTRY_PII_KEYS = {
+    "from",
+    "to",
+    "body",
+    "phone",
+    "phone_number",
+    "caller",
+    "caller_phone",
+    "name",
+    "customer_name",
+    "email",
+    "password",
+    "token",
+}
+_SENTRY_PHONE_RE = re.compile(r"\+?\d[\d\-\s().]{6,}\d")
+_SENTRY_DROP_HEADERS = (
+    "authorization",
+    "cookie",
+    "x-twilio-signature",
+    "stripe-signature",
+)
+
+
+def _sentry_scrub(value, _depth: int = 0):
+    if _depth > 6:
+        return value
+    if isinstance(value, str):
+        return _SENTRY_PHONE_RE.sub("[redacted-phone]", value)
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if isinstance(k, str) and k.lower() in _SENTRY_PII_KEYS:
+                out[k] = "[redacted]"
+            else:
+                out[k] = _sentry_scrub(v, _depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_sentry_scrub(v, _depth + 1) for v in value]
+    return value
+
+
+def _sentry_before_send(event, _hint):
+    try:
+        req = event.get("request")
+        if isinstance(req, dict):
+            req.pop("data", None)  # raw request bodies (SMS text, form fields)
+            headers = req.get("headers")
+            if isinstance(headers, dict):
+                for key in list(headers.keys()):
+                    if isinstance(key, str) and key.lower() in _SENTRY_DROP_HEADERS:
+                        headers[key] = "[redacted]"
+        return _sentry_scrub(event)
+    except Exception:
+        return event
+
+
 sentry_sdk.init(
     dsn=os.environ.get("SENTRY_DSN"),
     environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
     traces_sample_rate=_sentry_traces_sample_rate(),
     integrations=[StarletteIntegration(), FastApiIntegration()],
+    send_default_pii=False,
+    before_send=_sentry_before_send,
 )
 
 
@@ -282,7 +344,7 @@ if not api_key:
         f"Make sure your .env file is in the backend directory with OPENAI_API_KEY=your_key"
     )
 else:
-    print(f"API Key loaded successfully (length: {len(api_key)})")
+    print("OPENAI_API_KEY loaded successfully")
 
 
 _openai_pre_warm_disabled = False
@@ -8056,9 +8118,32 @@ async def get_analytics_export(
     )
 
 
+def _is_trusted_twilio_media_url(url: str) -> bool:
+    """True only for https URLs on a Twilio-owned host.
+
+    Recording/media URLs arrive in webhook bodies, which an attacker could forge
+    if a signature check is ever bypassed. We never attach Twilio credentials to
+    any other host — this is the SSRF / credential-exfil trust boundary, enforced
+    at every credentialed fetch site below.
+    """
+    try:
+        parsed = urlparse((url or "").strip())
+    except Exception:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return host == "twilio.com" or host.endswith(".twilio.com")
+
+
 def _fetch_twilio_recording_bytes(recording_url: str) -> tuple:
     import httpx
 
+    if not _is_trusted_twilio_media_url(recording_url):
+        logger.error("[Recording] Refusing to fetch recording from untrusted host")
+        return 0, b""
     r = httpx.get(
         recording_url,
         auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
@@ -8232,6 +8317,12 @@ def _summarize_call_recording_sync(
 ) -> None:
     """Download Twilio recording, Whisper transcribe, short GPT summary; persist call_summary."""
     if not recording_url or not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        return
+    if not _is_trusted_twilio_media_url(recording_url):
+        logger.error(
+            "[Recording] Refusing summary fetch from untrusted host call_sid=%s",
+            call_sid,
+        )
         return
     try:
         cap = int(os.getenv("CALL_SUMMARY_MAX_DURATION_SEC", "1800"))
@@ -10495,6 +10586,18 @@ async def process_recording(request: Request):
             response = VoiceResponse()
             response.say(
                 "I didn't receive the recording. Please try again.", voice="alice"
+            )
+            bu = _twilio_base_url(request)
+            if bu:
+                response.redirect(f"{bu}/api/phone/process-speech", method="POST")
+            return Response(content=str(response), media_type="application/xml")
+
+        if not _is_trusted_twilio_media_url(recording_url):
+            logger.warning("recording_url_untrusted_host call_sid=%s", call_sid or "")
+            response = VoiceResponse()
+            response.say(
+                "I had trouble processing the recording. Please try again.",
+                voice="alice",
             )
             bu = _twilio_base_url(request)
             if bu:

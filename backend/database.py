@@ -1501,17 +1501,12 @@ def db_appointments_diagnostics(dashboard_client_id: str) -> dict:
     if env_cid and env_cid != cid:
         cur.execute("SELECT COUNT(*)::int FROM appointments WHERE client_id = %s", (env_cid,))
         env_count = (cur.fetchone() or (0,))[0]
-    cur.execute(
-        """
-        SELECT client_id, COUNT(*)::int AS n
-        FROM appointments
-        GROUP BY client_id
-        ORDER BY n DESC
-        LIMIT 6
-        """
-    )
-    counts_by_client = [{"client_id": r[0], "count": r[1]} for r in cur.fetchall()]
     cur.close()
+    # NOTE: we deliberately do NOT return a global counts_by_client breakdown.
+    # That enumerated every tenant's client_id and relative volume to any
+    # authenticated caller — a cross-tenant info leak. env_client_id below is
+    # the deployment's OWN config value (not another customer's), kept because
+    # ops logging and the single->multi migration banner rely on it.
     return {
         "dashboard_client_id": cid,
         "total": total,
@@ -1519,7 +1514,6 @@ def db_appointments_diagnostics(dashboard_client_id: str) -> dict:
         "recent": recent,
         "env_client_id": env_cid or None,
         "env_client_id_appointment_count": env_count,
-        "counts_by_client": counts_by_client,
         "likely_mismatch": bool(env_cid and env_cid != cid and env_count and env_count > 0 and total == 0),
     }
 
