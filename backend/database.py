@@ -418,6 +418,38 @@ def init_db() -> bool:
             "CREATE INDEX IF NOT EXISTS idx_cron_runs_job_finished "
             "ON cron_runs(job_name, finished_at DESC)"
         )
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS provisioning_jobs (
+                id TEXT PRIMARY KEY,
+                created_by TEXT,
+                total INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS provisioning_tasks (
+                id SERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                name TEXT,
+                email TEXT,
+                area_code TEXT,
+                plan TEXT NOT NULL DEFAULT 'free',
+                status TEXT NOT NULL DEFAULT 'pending',
+                phone_e164 TEXT,
+                steps_done JSONB NOT NULL DEFAULT '[]'::jsonb,
+                error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_provisioning_tasks_job "
+            "ON provisioning_tasks(job_id, status)"
+        )
         try:
             cur.execute(
                 "UPDATE tenants SET billing_period_anchor_at = created_at "
@@ -2898,3 +2930,194 @@ def db_cron_runs_last_success() -> dict:
     except Exception as e:
         _log.warning("db_cron_runs_last_success failed: %s", e)
         return {}
+
+
+# --- Background provisioning (bulk onboarding) -------------------------------
+
+import json as _json
+
+
+def db_provisioning_job_create(job_id: str, created_by: Optional[str], total: int) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO provisioning_jobs (id, created_by, total, status) "
+            "VALUES (%s, %s, %s, 'pending')",
+            (job_id, created_by, int(total)),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        _log.warning("db_provisioning_job_create failed: %s", e)
+        return False
+
+
+def db_provisioning_task_create(
+    job_id: str,
+    client_id: str,
+    *,
+    name: Optional[str] = None,
+    email: Optional[str] = None,
+    area_code: Optional[str] = None,
+    plan: str = "free",
+) -> Optional[int]:
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO provisioning_tasks (job_id, client_id, name, email, area_code, plan) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (job_id, client_id, name, email, area_code, plan),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return int(row[0]) if row else None
+    except Exception as e:
+        _log.warning("db_provisioning_task_create failed: %s", e)
+        return None
+
+
+def _row_to_provisioning_task(r) -> dict:
+    steps = r[8]
+    if isinstance(steps, str):
+        try:
+            steps = _json.loads(steps)
+        except Exception:
+            steps = []
+    return {
+        "id": r[0],
+        "job_id": r[1],
+        "client_id": r[2],
+        "name": r[3],
+        "email": r[4],
+        "area_code": r[5],
+        "plan": r[6],
+        "status": r[7],
+        "steps_done": steps or [],
+        "phone_e164": r[9],
+        "error": r[10],
+        "attempts": r[11],
+    }
+
+
+_PROVISIONING_TASK_COLS = (
+    "id, job_id, client_id, name, email, area_code, plan, status, steps_done, "
+    "phone_e164, error, attempts"
+)
+
+
+def db_provisioning_tasks_for_job(job_id: str, *, only_unfinished: bool = False) -> List[dict]:
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        sql = f"SELECT {_PROVISIONING_TASK_COLS} FROM provisioning_tasks WHERE job_id = %s"
+        if only_unfinished:
+            sql += " AND status <> 'done'"
+        sql += " ORDER BY id"
+        cur.execute(sql, (job_id,))
+        rows = cur.fetchall()
+        cur.close()
+        return [_row_to_provisioning_task(r) for r in rows]
+    except Exception as e:
+        _log.warning("db_provisioning_tasks_for_job failed: %s", e)
+        return []
+
+
+def db_provisioning_task_save(
+    task_id: int,
+    *,
+    status: str,
+    steps_done: List[str],
+    phone_e164: Optional[str] = None,
+    error: Optional[str] = None,
+    attempts: Optional[int] = None,
+) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        if attempts is None:
+            cur.execute(
+                "UPDATE provisioning_tasks SET status=%s, steps_done=%s::jsonb, "
+                "phone_e164=COALESCE(%s, phone_e164), error=%s, "
+                "attempts=attempts+1, updated_at=NOW() WHERE id=%s",
+                (status, _json.dumps(steps_done or []), phone_e164, error, task_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE provisioning_tasks SET status=%s, steps_done=%s::jsonb, "
+                "phone_e164=COALESCE(%s, phone_e164), error=%s, "
+                "attempts=%s, updated_at=NOW() WHERE id=%s",
+                (status, _json.dumps(steps_done or []), phone_e164, error, int(attempts), task_id),
+            )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        _log.warning("db_provisioning_task_save failed: %s", e)
+        return False
+
+
+def db_provisioning_job_set_status(job_id: str, status: str) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE provisioning_jobs SET status=%s, updated_at=NOW() WHERE id=%s",
+            (status, job_id),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        _log.warning("db_provisioning_job_set_status failed: %s", e)
+        return False
+
+
+def db_provisioning_job_get(job_id: str) -> Optional[dict]:
+    """Return the job with a per-status task count summary, or None if missing."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, created_by, total, status, created_at, updated_at "
+            "FROM provisioning_jobs WHERE id = %s",
+            (job_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            return None
+        cur.execute(
+            "SELECT status, COUNT(*)::int FROM provisioning_tasks "
+            "WHERE job_id = %s GROUP BY status",
+            (job_id,),
+        )
+        counts = {s: n for s, n in cur.fetchall()}
+        cur.close()
+        return {
+            "id": row[0],
+            "created_by": row[1],
+            "total": row[2],
+            "status": row[3],
+            "created_at": row[4].isoformat() if row[4] else None,
+            "updated_at": row[5].isoformat() if row[5] else None,
+            "counts": counts,
+        }
+    except Exception as e:
+        _log.warning("db_provisioning_job_get failed: %s", e)
+        return None
