@@ -18,7 +18,7 @@ def _tenant_pro():
 def test_recording_complete_persists_and_returns_200(client, monkeypatch):
     monkeypatch.setattr("main._validate_twilio_webhook", lambda req, d: True)
     monkeypatch.setenv("CALL_SUMMARY_ENABLED", "false")
-    monkeypatch.setattr("main.USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main.active_calls", {})
     monkeypatch.setattr("main._call_recording_enabled_for_tenant", lambda tenant: True)
 
@@ -63,7 +63,7 @@ def test_recording_playback_404_when_no_row(client, monkeypatch):
     from main import require_tenant
 
     app.dependency_overrides[require_tenant] = _tenant_pro
-    monkeypatch.setattr("main.USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main.TWILIO_ACCOUNT_SID", "ACxxx")
     monkeypatch.setattr("main.TWILIO_AUTH_TOKEN", "token")
     monkeypatch.setattr("main.db_call_log_get_by_call_sid", lambda cid, sid: None)
@@ -78,7 +78,7 @@ def test_recording_playback_404_when_no_recording_url(client, monkeypatch):
     from main import require_tenant
 
     app.dependency_overrides[require_tenant] = _tenant_pro
-    monkeypatch.setattr("main.USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main.TWILIO_ACCOUNT_SID", "ACxxx")
     monkeypatch.setattr("main.TWILIO_AUTH_TOKEN", "token")
     monkeypatch.setattr(

@@ -15,7 +15,7 @@ def phone_client(monkeypatch):
     import main
 
     monkeypatch.setattr(main, "_validate_twilio_webhook", lambda _r, _d: True)
-    monkeypatch.setattr(main, "USE_DB", False)
+    monkeypatch.setattr("runtime.USE_DB", False)
     monkeypatch.setattr(main, "voice_receptionist_ready", lambda info=None: True)
     return TestClient(main.app)
 

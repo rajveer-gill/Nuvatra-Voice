@@ -39,12 +39,12 @@ def test_tenant_can_use_app_states(tenant, expected, monkeypatch):
     elif tenant == "no_tenant_no_db":
         import main
 
-        monkeypatch.setattr(main, "USE_DB", False)
+        monkeypatch.setattr("runtime.USE_DB", False)
         tenant = None
     elif tenant == "no_tenant_db":
         import main
 
-        monkeypatch.setattr(main, "USE_DB", True)
+        monkeypatch.setattr("runtime.USE_DB", True)
         tenant = None
     assert tenant_can_use_app(tenant) is expected
 
@@ -52,7 +52,7 @@ def test_tenant_can_use_app_states(tenant, expected, monkeypatch):
 def test_missing_tenant_denied_when_db_mode(monkeypatch):
     import main
 
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     from subscription_access import webhook_access_denial_reason
 
     assert webhook_access_denial_reason(None) == "tenant_not_found"
@@ -92,7 +92,7 @@ def test_incoming_call_expired_subscription_returns_twiml(webhook_client, monkey
         "trial_ends_at": past,
         "created_at": past,
     }
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(main, "db_tenant_get_by_phone", lambda _p: tenant)
     monkeypatch.setattr(main, "db_tenant_get_by_client_id", lambda _c: tenant)
     resp = webhook_client.post(
@@ -127,7 +127,7 @@ def test_sms_incoming_expired_sends_polite_message(webhook_client, monkeypatch):
         "trial_ends_at": past,
         "created_at": past,
     }
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(main, "db_tenant_get_by_phone", lambda _p: tenant)
     monkeypatch.setattr(main, "send_sms", capture_send)
     resp = webhook_client.post(

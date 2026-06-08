@@ -8,7 +8,7 @@ from main import app
 
 def test_health_ok_without_db():
     client = TestClient(app)
-    with patch("main.USE_DB", False):
+    with patch("runtime.USE_DB", False):
         resp = client.get("/api/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
@@ -17,7 +17,7 @@ def test_health_ok_without_db():
 
 def test_health_ok_with_db():
     client = TestClient(app)
-    with patch("main.USE_DB", True), patch("main.db_ping", return_value=True):
+    with patch("runtime.USE_DB", True), patch("database.db_ping", return_value=True):
         resp = client.get("/api/health")
     assert resp.status_code == 200
     assert resp.json()["database"] == "ok"
@@ -25,7 +25,7 @@ def test_health_ok_with_db():
 
 def test_health_503_when_db_unreachable():
     client = TestClient(app)
-    with patch("main.USE_DB", True), patch("main.db_ping", return_value=False):
+    with patch("runtime.USE_DB", True), patch("database.db_ping", return_value=False):
         resp = client.get("/api/health")
     assert resp.status_code == 503
     assert resp.json()["status"] == "degraded"

@@ -12,11 +12,11 @@ _log = logging.getLogger("nuvatra")
 
 
 def _use_database() -> bool:
-    """Whether PostgreSQL tenant data is active (main.USE_DB after init)."""
+    """Whether PostgreSQL tenant data is active (runtime.USE_DB after init)."""
     try:
-        import main as m
+        import runtime
 
-        return bool(getattr(m, "USE_DB", False))
+        return bool(runtime.USE_DB)
     except ImportError:
         return False
 

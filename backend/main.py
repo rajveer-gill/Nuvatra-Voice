@@ -23,6 +23,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 
 logger = logging.getLogger("nuvatra")
 import os
+import runtime  # process-wide mutable state (USE_DB, etc.); read as runtime.X
 from dotenv import load_dotenv
 from datetime import date, datetime, timezone, timedelta
 import hmac
@@ -419,7 +420,7 @@ def _assert_secure_production_config() -> None:
     legacy CLIENT_ID. This guarantees that a single missing/typo'd env var can
     never silently disable authentication or webhook validation — the process
     refuses to serve instead. DATABASE_URL is the production signal (it is what
-    flips USE_DB on). ALLOW_INSECURE_WEBHOOKS is the explicit, deliberate dev
+    flips runtime.USE_DB on). ALLOW_INSECURE_WEBHOOKS is the explicit, deliberate dev
     opt-out and bypasses the guard.
     """
     if not (os.getenv("DATABASE_URL") or "").strip():
@@ -666,6 +667,11 @@ if os.getenv("DEBUG_CORS", "").strip() == "1":
 
     _debug_log_payload({"event": "startup", "allowed_origins": allowed_origins})
 
+# Domain routers (strangler-fig migration out of main.py — see routers/).
+from routers import health as health_router
+
+app.include_router(health_router.router)
+
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
 
@@ -752,7 +758,7 @@ def _tenant_for_call_recording(tenant: Optional[dict] = None) -> Optional[dict]:
     """Resolve tenant dict for plan-gated recording (explicit tenant or current client)."""
     if tenant:
         return tenant
-    if not USE_DB:
+    if not runtime.USE_DB:
         return None
     cid = get_db_client_id()
     if cid and cid != "default":
@@ -791,8 +797,8 @@ except ImportError as e:
     raise RuntimeError("Failed to import auth module") from e
 
 # Database: PostgreSQL when DATABASE_URL is set (production)
-# Import functions eagerly (no network); init_db() is deferred to background
-USE_DB = False
+# Import functions eagerly (no network); init_db() is deferred to background.
+# USE_DB lives in runtime.py and is read app-wide as runtime.USE_DB.
 _db_imported = False
 try:
     from database import (
@@ -895,12 +901,11 @@ except ImportError as e:
 
 def _init_db_background():
     """Initialize DB connection in background thread so server starts immediately."""
-    global USE_DB
     if not _db_imported or not os.getenv("DATABASE_URL"):
         return
     try:
-        USE_DB = init_db()
-        print(f"[INIT] Database ready (USE_DB={USE_DB})", flush=True)
+        runtime.USE_DB = init_db()
+        print(f"[INIT] Database ready (runtime.USE_DB={runtime.USE_DB})", flush=True)
     except Exception as e:
         print(f"[WARN] Database init failed (using in-memory): {e}", flush=True)
 
@@ -917,7 +922,7 @@ def audit_log(
     request: Optional[Request] = None,
 ) -> None:
     """Append an audit event. No full PII (e.g. no message bodies)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         return
     try:
         ip = request.client.host if request and request.client else None
@@ -1075,7 +1080,7 @@ def client_config_source(cid: str) -> str:
     c = (cid or "").strip()
     if not c:
         return "none"
-    if USE_DB:
+    if runtime.USE_DB:
         try:
             if db_tenant_get_business_config(c):
                 return "database"
@@ -1090,7 +1095,7 @@ def client_config_source(cid: str) -> str:
 def _read_raw_client_config(cid: str) -> Optional[dict]:
     """Load raw config from PostgreSQL (production) then clients/<cid>/config.json (local dev)."""
     raw = None
-    if USE_DB:
+    if runtime.USE_DB:
         try:
             raw = db_tenant_get_business_config(cid)
         except Exception as e:
@@ -1104,7 +1109,7 @@ def _read_raw_client_config(cid: str) -> Optional[dict]:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        if USE_DB and raw:
+        if runtime.USE_DB and raw:
             try:
                 db_tenant_set_business_config(cid, raw)
             except Exception as e:
@@ -1120,7 +1125,7 @@ def _read_raw_client_config(cid: str) -> Optional[dict]:
 def save_raw_client_config(cid: str, data: dict) -> None:
     """Persist business config to DB (required on Render) and optionally to clients/<cid>/config.json."""
     db_ok = True
-    if USE_DB:
+    if runtime.USE_DB:
         db_ok = bool(db_tenant_set_business_config(cid, data))
         if not db_ok:
             raise HTTPException(
@@ -1132,7 +1137,7 @@ def save_raw_client_config(cid: str, data: dict) -> None:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        if not USE_DB:
+        if not runtime.USE_DB:
             raise HTTPException(
                 status_code=500, detail=f"Failed to write config: {e}"
             ) from e
@@ -1217,7 +1222,7 @@ def _minimal_business_info_from_tenant_dict(tenant: dict) -> dict:
 
 def _default_business_info_for_tenant() -> Optional[dict]:
     """Build minimal business info from the tenant DB record when no config file exists."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         return None
     cid = get_db_client_id()
     if not cid or cid == "default":
@@ -1317,7 +1322,7 @@ def get_business_info() -> dict:
     cfg = load_client_config()
     if cfg:
         out = dict(cfg)
-        if not out.get("phone") and USE_DB:
+        if not out.get("phone") and runtime.USE_DB:
             cid = get_db_client_id()
             if cid:
                 tenant = db_tenant_get_by_client_id(cid)
@@ -1329,7 +1334,7 @@ def get_business_info() -> dict:
             out = dict(tenant_info)
         else:
             out = dict(_DEMO_BUSINESS_INFO)
-    if USE_DB:
+    if runtime.USE_DB:
         cid = get_db_client_id()
         if cid:
             t = db_tenant_get_by_client_id(cid)
@@ -1496,7 +1501,7 @@ def warm_client_voice_cache(client_id: str) -> None:
 
 def _warm_all_tenant_voice_caches() -> None:
     """Prewarm voice clips for every tenant with a Twilio number (startup / after deploy)."""
-    if USE_DB:
+    if runtime.USE_DB:
         try:
             tenants = db_tenant_list_all()
         except Exception as e:
@@ -1559,7 +1564,7 @@ def _resolve_greeting_business_name(info: dict, tenant: Optional[dict] = None) -
         if name:
             return name
     cid = get_db_client_id()
-    if USE_DB and cid:
+    if runtime.USE_DB and cid:
         t = db_tenant_get_by_client_id(cid)
         if t:
             name = (t.get("name") or "").strip()
@@ -1733,18 +1738,17 @@ class TTSRequest(BaseModel):
 
 def _ensure_db_ready():
     """Block briefly to let background init_db finish if it hasn't yet."""
-    global USE_DB
-    if USE_DB or not _db_imported or not os.getenv("DATABASE_URL"):
+    if runtime.USE_DB or not _db_imported or not os.getenv("DATABASE_URL"):
         return
     import time
 
     for _ in range(20):
-        if USE_DB:
+        if runtime.USE_DB:
             return
         time.sleep(0.5)
     # Last resort: try init synchronously
     try:
-        USE_DB = init_db()
+        runtime.USE_DB = init_db()
     except Exception:
         pass
 
@@ -1826,13 +1830,13 @@ def require_tenant(request: Request):
     preferred_tid = str(tenant_id_from_meta or "").strip() or None
     link = None
     # DB membership is authoritative — JWT public_metadata can be stale after tenant delete/relink.
-    if USE_DB and user_id:
+    if runtime.USE_DB and user_id:
         tenant = db_tenant_get_for_user(user_id, preferred_tenant_id=preferred_tid)
-    if not tenant and tenant_id_from_meta and USE_DB:
+    if not tenant and tenant_id_from_meta and runtime.USE_DB:
         tenant = db_tenant_get_by_id(str(tenant_id_from_meta))
         if tenant and user_id:
             db_tenant_member_set_single(user_id, tenant["id"])
-    if not tenant and USE_DB:
+    if not tenant and runtime.USE_DB:
         # JWT often omits public_metadata; resolve via Clerk API + pending invite email.
         link = _clerk_fetch_user_link(user_id)
         if link:
@@ -1858,7 +1862,7 @@ def require_tenant(request: Request):
                             f"[Auth] Auto-linked user {user_id} to tenant {tenant['id']} via invite email {em}"
                         )
                         break
-    elif USE_DB and user_id and not preferred_tid:
+    elif runtime.USE_DB and user_id and not preferred_tid:
         link = _clerk_fetch_user_link(user_id)
         if link and link.get("tenant_id"):
             preferred_tid = str(link.get("tenant_id"))
@@ -2065,7 +2069,7 @@ def send_sms(
     if not e164:
         sms_info("outbound_skipped", reason="invalid_recipient_phone")
         return False
-    if USE_DB and not force:
+    if runtime.USE_DB and not force:
         cid = get_db_client_id()
         if cid and cid != "default":
             if db_sms_opt_out_is_blocked(e164, cid):
@@ -2104,7 +2108,7 @@ def send_sms(
                 body_len=len(body or ""),
             )
             # Record SMS usage for billing (graceful degradation)
-            if USE_DB:
+            if runtime.USE_DB:
                 cid = get_db_client_id()
                 if cid and cid != "default":
                     try:
@@ -2117,7 +2121,7 @@ def send_sms(
                 "outbound_sent",
                 resource_type="message",
                 resource_id=str(sid) if sid else None,
-                client_id=get_db_client_id() if USE_DB else None,
+                client_id=get_db_client_id() if runtime.USE_DB else None,
                 details={
                     "to_masked": to_masked,
                     "from_masked": mask_phone_e164(from_num),
@@ -2144,7 +2148,7 @@ def send_sms(
         "sms",
         "outbound_failed",
         resource_type="message",
-        client_id=get_db_client_id() if USE_DB else None,
+        client_id=get_db_client_id() if runtime.USE_DB else None,
         details={
             "to_masked": to_masked,
             "from_masked": mask_phone_e164(from_num),
@@ -2158,7 +2162,7 @@ def send_sms(
 
 def _tenant_sms_from_number() -> Optional[str]:
     """Outbound SMS From: tenant's Twilio number in DB, else business config phone (non-DB). None → send_sms uses TWILIO_SMS_FROM."""
-    if USE_DB:
+    if runtime.USE_DB:
         cid = get_db_client_id()
         if cid and cid != "default":
             tenant = db_tenant_get_by_client_id(cid)
@@ -2177,7 +2181,7 @@ def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
         "true",
         "yes",
     )
-    strict_required = bool(USE_DB) and not allow_insecure
+    strict_required = bool(runtime.USE_DB) and not allow_insecure
     return validate_twilio_signature(
         request,
         form_data,
@@ -2204,7 +2208,7 @@ def normalize_phone(phone: str) -> str:
 
 def get_caller_memory(phone: str) -> Optional[dict]:
     """Load caller memory for repeat-caller recognition. Returns None or {name, call_count, last_call_iso, last_reason}."""
-    if USE_DB:
+    if runtime.USE_DB:
         return db_caller_memory_get(phone)
     data_dir = get_client_data_dir()
     if not data_dir:
@@ -2243,7 +2247,7 @@ def refresh_caller_memory_for_prompt(
     when the DB row is stale (e.g. still 'Jake' after the customer texted a new name).
     """
     mem = get_caller_memory(phone)
-    if not USE_DB:
+    if not runtime.USE_DB:
         return mem
     cid = (client_id or "").strip() or get_db_client_id()
     if not cid:
@@ -2294,7 +2298,7 @@ def update_caller_memory(
     data_patch: Optional[dict] = None,
 ):
     """Update caller memory after a call (increment count, set last call time and optional reason)."""
-    if USE_DB:
+    if runtime.USE_DB:
         db_caller_memory_upsert(
             phone,
             name=name,
@@ -2511,7 +2515,7 @@ def call_log_start(call_sid: str, from_number: str, to_number: str):
         "call_started",
         resource_type="call",
         resource_id=call_sid,
-        client_id=get_db_client_id() if USE_DB else None,
+        client_id=get_db_client_id() if runtime.USE_DB else None,
         details={
             "from_masked": mask_phone_e164(from_number or ""),
             "to_masked": mask_phone_e164(to_number or ""),
@@ -2584,14 +2588,14 @@ def call_log_end(call_sid: str):
         "call_ended",
         resource_type="call",
         resource_id=call_sid,
-        client_id=get_db_client_id() if USE_DB else None,
+        client_id=get_db_client_id() if runtime.USE_DB else None,
         details={
             "outcome": entry.get("outcome"),
             "duration_sec": entry.get("duration_sec"),
             "recording_status": entry.get("recording_status"),
         },
     )
-    if USE_DB:
+    if runtime.USE_DB:
         db_call_log_append(entry)
     else:
         data_dir = get_client_data_dir()
@@ -2701,7 +2705,7 @@ def _booked_slot_duration_by_appointment_id() -> dict[int, int]:
 
 def _load_booked_slots() -> List[dict]:
     """Load booked slots from client data dir. Each entry: {date, time, appointment_id, duration_minutes?}."""
-    if USE_DB:
+    if runtime.USE_DB:
         return db_booked_slots_load()
     data_dir = get_client_data_dir()
     if not data_dir:
@@ -2717,7 +2721,7 @@ def _load_booked_slots() -> List[dict]:
 
 
 def _save_booked_slots(slots: List[dict]) -> None:
-    if USE_DB:
+    if runtime.USE_DB:
         db_booked_slots_save(slots)
         return
     data_dir = get_client_data_dir()
@@ -2751,7 +2755,7 @@ _CALENDAR_HOLDING_STATUSES = frozenset(
 
 
 def _appointment_rows_for_calendar_merge() -> List[dict]:
-    if USE_DB:
+    if runtime.USE_DB:
         return db_appointments_get_all()
     return list(appointments)
 
@@ -2797,7 +2801,7 @@ def _get_all_booked_slots_merged() -> List[dict]:
     apts = _appointment_rows_for_calendar_merge()
     apt_by_id = _appointment_by_id_map(apts)
     slots = _booked_slot_rows_that_hold_calendar(_load_booked_slots(), apt_by_id)
-    if USE_DB:
+    if runtime.USE_DB:
         seen = {
             (s.get("date"), s.get("time"), _staff_slot_key(s.get("staff_id")))
             for s in slots
@@ -3006,7 +3010,7 @@ def _supersede_pending_customer_drafts_for_slot(
     - pending_customer: unconfirmed draft (slot not held until SMS YES).
     - pending_review: same caller + receptionist source — frees a held slot when they call again.
     """
-    if not USE_DB:
+    if not runtime.USE_DB:
         return 0
     cid = (client_id or "").strip() or get_db_client_id()
     if not cid:
@@ -3137,7 +3141,7 @@ def _reconcile_sms_appointment_slot_after_detail_change(apt: dict) -> None:
 
 def _reconcile_booked_slots_orphans() -> int:
     """Drop booked_slots rows whose appointment no longer holds the calendar (fixes AI 'taken' with empty UI)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         return 0
     apts = _appointment_rows_for_calendar_merge()
     apt_by_id = _appointment_by_id_map(apts)
@@ -3971,7 +3975,7 @@ def _create_appointment_from_booking(
     }
     if client_id_override:
         appointment_data["client_id"] = client_id_override
-    if USE_DB:
+    if runtime.USE_DB:
         row = db_appointments_insert(appointment_data)
         apt_id = row["id"]
     else:
@@ -4236,7 +4240,7 @@ async def generate_response_async(
                             "from_number"
                         ):
                             apt["phone"] = call_data["from_number"]
-                            if USE_DB and apt.get("id"):
+                            if runtime.USE_DB and apt.get("id"):
                                 try:
                                     db_appointments_update(
                                         apt["id"], phone=apt["phone"]
@@ -4252,7 +4256,7 @@ async def generate_response_async(
                         from_number_sms = (
                             call_data.get("to_number") or ""
                         ).strip() or None
-                        if not from_number_sms and cid and USE_DB:
+                        if not from_number_sms and cid and runtime.USE_DB:
                             tenant_row = db_tenant_get_by_client_id(cid)
                             if tenant_row:
                                 from_number_sms = (
@@ -4288,7 +4292,7 @@ async def generate_response_async(
                                 success=ok,
                             )
                             if ok:
-                                if USE_DB and cid and apt.get("id"):
+                                if runtime.USE_DB and cid and apt.get("id"):
                                     try:
                                         db_sms_session_upsert(
                                             to_number_sms,
@@ -4750,50 +4754,6 @@ def get_system_prompt(
     return prompt
 
 
-@app.get("/")
-async def root():
-    return {"message": "Call Surge API", "status": "running"}
-
-
-@app.get("/api/health")
-async def health():
-    """Health check for load balancers and monitoring. Returns 503 when DB is required but unreachable."""
-    db_ok = "ok" if (USE_DB and db_ping()) else ("error" if USE_DB else "n/a")
-    if USE_DB and db_ok == "error":
-        return JSONResponse(
-            status_code=503,
-            content={"status": "degraded", "database": db_ok},
-        )
-    return {"status": "ok", "database": db_ok}
-
-
-def _sentry_debug_allowed(request: Request) -> bool:
-    """Do not expose a public crash endpoint in production. Opt-in via env or shared secret header."""
-    if (os.getenv("ENABLE_SENTRY_DEBUG_ROUTE") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    ):
-        return True
-    secret = (os.getenv("SENTRY_DEBUG_SECRET") or "").strip()
-    if secret:
-        got = (request.headers.get("X-Sentry-Debug-Secret") or "").strip()
-        if not got:
-            return False
-        try:
-            return secrets.compare_digest(secret, got)
-        except Exception:
-            return False
-    return False
-
-
-@app.get("/sentry-debug")
-async def trigger_sentry_error(request: Request):
-    if not _sentry_debug_allowed(request):
-        raise HTTPException(status_code=404, detail="Not Found")
-    _ = 1 / 0  # intentional test error for Sentry when route is enabled
-
-
 def _verify_cron_secret(request: Request) -> bool:
     """Constant-time comparison of X-Cron-Secret. Returns True if valid."""
     expected = (os.getenv("CRON_SECRET") or "").strip()
@@ -4831,8 +4791,8 @@ async def cron_appointment_reminders(request: Request):
     """Day-before SMS reminders for accepted appointments. Requires X-Cron-Secret. Idempotent."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    run_id = db_cron_run_start("appointment-reminders") if USE_DB else None
-    if not USE_DB:
+    run_id = db_cron_run_start("appointment-reminders") if runtime.USE_DB else None
+    if not runtime.USE_DB:
         result = {
             "ok": True,
             "reminders_sent": 0,
@@ -4916,8 +4876,8 @@ async def cron_process_overage(request: Request):
     """Monthly overage billing. Compute overage for previous month and create Stripe invoice items. Requires X-Cron-Secret."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    run_id = db_cron_run_start("process-overage") if USE_DB else None
-    if not USE_DB or not STRIPE_AVAILABLE or not stripe:
+    run_id = db_cron_run_start("process-overage") if runtime.USE_DB else None
+    if not runtime.USE_DB or not STRIPE_AVAILABLE or not stripe:
         result = {
             "ok": True,
             "tenants_processed": 0,
@@ -4999,8 +4959,8 @@ async def cron_retention_purge(request: Request):
     """Purge expired rows (default 3 years) while honoring active legal holds."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    run_id = db_cron_run_start("retention-purge") if USE_DB else None
-    if not USE_DB:
+    run_id = db_cron_run_start("retention-purge") if runtime.USE_DB else None
+    if not runtime.USE_DB:
         result = {
             "ok": True,
             "deleted": {"audit_events": 0, "call_log": 0, "sms_sessions": 0},
@@ -5019,8 +4979,8 @@ async def cron_export_snapshot(request: Request):
     """Daily tenant-scoped JSON snapshot export with SHA256 manifest."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    run_id = db_cron_run_start("export-snapshot") if USE_DB else None
-    if not USE_DB:
+    run_id = db_cron_run_start("export-snapshot") if runtime.USE_DB else None
+    if not runtime.USE_DB:
         return {"ok": True, "exported": False}
     export_root = (
         os.getenv("OFFSITE_EXPORT_DIR") or str(PROJECT_ROOT / "exports")
@@ -5158,7 +5118,7 @@ def _clerk_user_ids_from_api(email: str, headers: dict) -> List[str]:
 
 def _clerk_user_ids_from_tenant_members(email: str, headers: dict) -> List[str]:
     """Find Clerk users by comparing emails on existing tenant memberships (API lookup fallback)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         return []
     target = (email or "").strip().lower()
     if not target or "@" not in target:
@@ -5502,12 +5462,12 @@ def _membership_diagnosis(
 
 def _admin_tenant_access_debug_snapshot(tenant_id: str) -> dict:
     """Admin-only: how dashboard access is wired for one tenant."""
-    tenant = db_tenant_get_by_id(tenant_id) if USE_DB else None
+    tenant = db_tenant_get_by_id(tenant_id) if runtime.USE_DB else None
     if not tenant:
         return {"found": False, "tenant_id": tenant_id}
     tid = str(tenant.get("id") or "")
-    pending_invite = db_tenant_get_invite_email(tid) if USE_DB else None
-    member_ids = db_tenant_get_members(tid) if USE_DB else []
+    pending_invite = db_tenant_get_invite_email(tid) if runtime.USE_DB else None
+    member_ids = db_tenant_get_members(tid) if runtime.USE_DB else []
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     headers = (
         {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
@@ -5517,7 +5477,7 @@ def _admin_tenant_access_debug_snapshot(tenant_id: str) -> dict:
     members_debug: List[dict] = []
     for uid in member_ids:
         link = _clerk_fetch_user_link(uid) if headers else None
-        memberships = db_tenant_memberships_for_user(uid) if USE_DB else []
+        memberships = db_tenant_memberships_for_user(uid) if runtime.USE_DB else []
         members_debug.append(
             {
                 "clerk_user_id": uid,
@@ -5563,8 +5523,8 @@ def _admin_resolve_email_debug(email: str) -> dict:
         if clerk_secret
         else None
     )
-    invite_tid = db_tenant_invite_peek(email) if USE_DB else None
-    invite_tenant = db_tenant_get_by_id(invite_tid) if invite_tid and USE_DB else None
+    invite_tid = db_tenant_invite_peek(email) if runtime.USE_DB else None
+    invite_tenant = db_tenant_get_by_id(invite_tid) if invite_tid and runtime.USE_DB else None
     api_ids = _clerk_user_ids_from_api(email, headers) if headers else []
     member_ids = _clerk_user_ids_from_tenant_members(email, headers) if headers else []
     all_ids = list(dict.fromkeys(api_ids + member_ids))
@@ -5576,11 +5536,11 @@ def _admin_resolve_email_debug(email: str) -> dict:
                 "clerk_user_id": uid,
                 "clerk_emails": (link or {}).get("emails") or [],
                 "clerk_metadata_tenant_id": (link or {}).get("tenant_id"),
-                "db_memberships": db_tenant_memberships_for_user(uid) if USE_DB else [],
+                "db_memberships": db_tenant_memberships_for_user(uid) if runtime.USE_DB else [],
             }
         )
     tenants_by_client: List[dict] = []
-    if USE_DB:
+    if runtime.USE_DB:
         for t in db_tenant_list_all():
             tid = str(t.get("id") or "")
             if db_tenant_get_invite_email(tid) == _normalize_invite_email(email):
@@ -5634,9 +5594,9 @@ async def me_access(request: Request):
     except HTTPException:
         return {"signed_in": False, "token_invalid": True}
     _ensure_db_ready()
-    tenant = db_tenant_get_for_user(user_id) if USE_DB else None
-    link = _clerk_fetch_user_link(user_id) if USE_DB else None
-    memberships = db_tenant_memberships_for_user(user_id) if USE_DB else []
+    tenant = db_tenant_get_for_user(user_id) if runtime.USE_DB else None
+    link = _clerk_fetch_user_link(user_id) if runtime.USE_DB else None
+    memberships = db_tenant_memberships_for_user(user_id) if runtime.USE_DB else []
     admin_ids = [
         x.strip()
         for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
@@ -5644,7 +5604,7 @@ async def me_access(request: Request):
     ]
     primary_email = ((link or {}).get("emails") or [None])[0]
     pending_invite_tid = (
-        db_tenant_invite_peek(primary_email) if USE_DB and primary_email else None
+        db_tenant_invite_peek(primary_email) if runtime.USE_DB and primary_email else None
     )
     diagnosis = _membership_diagnosis(user_id, jwt_tid, link, tenant, memberships)
     return {
@@ -5677,7 +5637,7 @@ async def admin_create_tenant(
     admin_user_id: str = Depends(require_admin),
 ):
     """Create tenant and send Clerk invite. Requires admin auth."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(
             status_code=503, detail="Database required for multi-tenant"
         )
@@ -5725,7 +5685,7 @@ async def admin_resend_invite(
     admin_user_id: str = Depends(require_admin),
 ):
     """Re-queue pending invite by email and send a new Clerk invitation (existing tenants)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(
             status_code=503, detail="Database required for multi-tenant"
         )
@@ -5789,7 +5749,7 @@ def _admin_tenant_with_access_email(tenant: dict) -> dict:
 @app.get("/api/admin/tenants")
 async def admin_list_tenants(_: str = Depends(require_admin)):
     """List all tenants. Requires admin auth."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         return {"tenants": [], "db_enabled": False}
     try:
         tenants = db_tenant_list_all()
@@ -5823,7 +5783,7 @@ async def admin_bulk_create_tenants(
     admin_user_id: str = Depends(require_admin),
 ):
     """Bulk create tenants with validation and idempotency checks."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(
             status_code=503, detail="Database required for multi-tenant"
         )
@@ -5945,10 +5905,10 @@ async def admin_ops_self_check(_: str = Depends(require_admin)):
     twilio_auth_token_set = bool((os.getenv("TWILIO_AUTH_TOKEN") or "").strip())
     public_base_url_set = bool((os.getenv("PUBLIC_BASE_URL") or "").strip())
     client_id_set = bool((os.getenv("CLIENT_ID") or "").strip())
-    last_cron_runs = db_cron_runs_last_success() if USE_DB else {}
+    last_cron_runs = db_cron_runs_last_success() if runtime.USE_DB else {}
     stale_cron_jobs = (
         _cron_stale_jobs(last_cron_runs)
-        if USE_DB and cron_secret_set
+        if runtime.USE_DB and cron_secret_set
         else list(DAILY_CRON_JOBS)
     )
     stt_provider = (os.getenv("VOICE_STT_PROVIDER") or "twilio").strip().lower()
@@ -5959,7 +5919,7 @@ async def admin_ops_self_check(_: str = Depends(require_admin)):
         "twilio_signature_validation_enabled": twilio_auth_token_set,
         "cron_secret_set": cron_secret_set,
         "multi_tenant_client_id_env_ok": not client_id_set,
-        "database_enabled": bool(USE_DB),
+        "database_enabled": bool(runtime.USE_DB),
         **redis_health,
         "clerk_issuer_set": bool((os.getenv("CLERK_ISSUER") or "").strip()),
         "clerk_audience_set": bool((os.getenv("CLERK_AUDIENCE") or "").strip()),
@@ -5972,7 +5932,7 @@ async def admin_ops_self_check(_: str = Depends(require_admin)):
 
 @app.get("/api/admin/legal-holds")
 async def admin_list_legal_holds(_: str = Depends(require_admin)):
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     return {"holds": db_legal_hold_list_active()}
 
@@ -5983,7 +5943,7 @@ async def admin_upsert_legal_hold(
     request: Request,
     admin_user_id: str = Depends(require_admin),
 ):
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     ok = db_legal_hold_set(
         req.client_id.strip(),
@@ -6014,7 +5974,7 @@ async def admin_clear_legal_hold(
     request: Request,
     admin_user_id: str = Depends(require_admin),
 ):
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     cleared = db_legal_hold_clear(client_id)
     audit_log(
@@ -6032,7 +5992,7 @@ async def admin_clear_legal_hold(
 @app.get("/api/admin/tenants/{tenant_id}/access-debug")
 async def admin_tenant_access_debug(tenant_id: str, _: str = Depends(require_admin)):
     """Admin: full access wiring snapshot for one tenant (invite, DB member, Clerk metadata)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     return _admin_tenant_access_debug_snapshot(tenant_id)
 
@@ -6040,7 +6000,7 @@ async def admin_tenant_access_debug(tenant_id: str, _: str = Depends(require_adm
 @app.get("/api/admin/debug/resolve-email")
 async def admin_resolve_email_debug(email: str, _: str = Depends(require_admin)):
     """Admin: find an email across pending invites, Clerk users, and tenant memberships."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     return _admin_resolve_email_debug(email)
 
@@ -6053,7 +6013,7 @@ async def admin_update_tenant_twilio_phone(
     admin_user_id: str = Depends(require_admin),
 ):
     """Set the tenant's inbound Twilio number so SMS/voice webhooks resolve the tenant (E.164)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     phone = (req.twilio_phone_number or "").strip()
     if not any(c.isdigit() for c in phone):
@@ -6108,7 +6068,7 @@ async def admin_delete_tenant(
       5. For each former member via Clerk API: clear public_metadata tenant_id and revoke sessions.
       Users are NOT banned — they can be re-invited to a new tenant later.
     """
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
@@ -6196,7 +6156,7 @@ async def admin_tenant_billing_exempt(
     admin_user_id: str = Depends(require_admin),
 ):
     """Set billing exemption or extend trial for a tenant. Admin only."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
@@ -6298,7 +6258,7 @@ async def admin_add_tenant_member(
     admin_user_id: str = Depends(require_admin),
 ):
     """Link a Clerk user to a tenant by email (re-link existing account or send invite)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     tenant = db_tenant_get_by_id(tenant_id)
     if not tenant:
@@ -6568,7 +6528,7 @@ def _maybe_handle_staff_sms_approval(
             token=str(tokens[1])[:20],
         )
         return False
-    apt = db_appointments_get_by_id(apt_id) if USE_DB else None
+    apt = db_appointments_get_by_id(apt_id) if runtime.USE_DB else None
     if not apt:
         sms_info(
             "staff_command_unknown_appointment",
@@ -6600,7 +6560,7 @@ def _maybe_handle_staff_sms_approval(
         return True
     business_name = get_business_info().get("name", "your shop")
     if verb in ("YES", "APPROVE", "OK", "ACCEPT"):
-        if USE_DB:
+        if runtime.USE_DB:
             db_appointments_update(apt_id, status="accepted")
         audit_log(
             "staff_sms",
@@ -6630,7 +6590,7 @@ def _maybe_handle_staff_sms_approval(
         return True
     if verb in ("NO", "DECLINE", "REJECT"):
         reason = " ".join(tokens[2:]).strip() or "We could not accommodate that time."
-        if USE_DB:
+        if runtime.USE_DB:
             db_appointments_update(
                 apt_id, status="rejected", owner_decline_reason=reason[:2000]
             )
@@ -6697,7 +6657,7 @@ async def create_appointment(
             "staff_id": staff_key,
             "client_id": cid,
         }
-        if USE_DB:
+        if runtime.USE_DB:
             row = db_appointments_insert(appointment_data)
             appointment_id = row["id"]
         else:
@@ -6723,13 +6683,13 @@ async def get_appointments(
     tenant: Optional[dict] = Depends(require_active_subscription),
 ):
     cid = _bind_tenant_db_context(tenant)
-    orphans_removed = _reconcile_booked_slots_orphans() if USE_DB else 0
-    lst = db_appointments_get_all(client_id=cid) if USE_DB else appointments
+    orphans_removed = _reconcile_booked_slots_orphans() if runtime.USE_DB else 0
+    lst = db_appointments_get_all(client_id=cid) if runtime.USE_DB else appointments
     for a in lst:
         a.setdefault("source", "manual")
         a.setdefault("status", "pending")
-    holds = _voice_calendar_holds() if USE_DB else []
-    diag = db_appointments_diagnostics(cid) if USE_DB else {}
+    holds = _voice_calendar_holds() if runtime.USE_DB else []
+    diag = db_appointments_diagnostics(cid) if runtime.USE_DB else {}
     twilio_on_tenant = ((tenant or {}).get("twilio_phone_number") or "").strip() or None
     system_info(
         "appointments_list_loaded",
@@ -6742,7 +6702,7 @@ async def get_appointments(
         env_appointment_count=diag.get("env_client_id_appointment_count"),
         twilio_phone_configured=bool(twilio_on_tenant),
     )
-    if USE_DB and holds and not lst:
+    if runtime.USE_DB and holds and not lst:
         system_info(
             "appointments_list_empty_but_calendar_holds",
             client_id=cid,
@@ -6766,8 +6726,8 @@ async def get_appointments_diagnostics(
 ):
     """Tenant-scoped appointment debug snapshot (for dashboard troubleshooting)."""
     cid = _bind_tenant_db_context(tenant)
-    holds = _voice_calendar_holds() if USE_DB else []
-    diag = db_appointments_diagnostics(cid) if USE_DB else {}
+    holds = _voice_calendar_holds() if runtime.USE_DB else []
+    diag = db_appointments_diagnostics(cid) if runtime.USE_DB else {}
     return {
         "client_id": cid,
         "twilio_phone_number": ((tenant or {}).get("twilio_phone_number") or "").strip()
@@ -6785,7 +6745,7 @@ async def appointments_calendar(
     tenant: Optional[dict] = Depends(require_active_subscription),
 ):
     """Return active appointments for calendar grid (excludes cancelled/rejected)."""
-    if not USE_DB:
+    if not runtime.USE_DB:
         return {"events": []}
     cid = _bind_tenant_db_context(tenant)
     events = db_appointments_in_date_range(date_from, date_to, staff_id, client_id=cid)
@@ -6821,7 +6781,7 @@ async def update_appointment(
         kwargs["email"] = update.email
     if update.phone is not None:
         kwargs["phone"] = update.phone
-    if USE_DB and kwargs:
+    if runtime.USE_DB and kwargs:
         apt = db_appointments_update(appointment_id, client_id=cid, **kwargs)
         if apt:
             return {"success": True, "appointment": apt}
@@ -6886,7 +6846,7 @@ async def accept_appointment(
     cid = _bind_tenant_db_context(tenant)
     apt = (
         db_appointments_get_by_id(appointment_id, client_id=cid)
-        if USE_DB
+        if runtime.USE_DB
         else next((a for a in appointments if a["id"] == appointment_id), None)
     )
     if not apt:
@@ -6900,7 +6860,7 @@ async def accept_appointment(
         raise HTTPException(
             status_code=400, detail="Appointment is not awaiting approval"
         )
-    if USE_DB:
+    if runtime.USE_DB:
         apt = (
             db_appointments_update(appointment_id, status="accepted", client_id=cid)
             or apt
@@ -6934,7 +6894,7 @@ async def reject_appointment(
     cid = _bind_tenant_db_context(tenant)
     apt = (
         db_appointments_get_by_id(appointment_id, client_id=cid)
-        if USE_DB
+        if runtime.USE_DB
         else next((a for a in appointments if a["id"] == appointment_id), None)
     )
     if not apt:
@@ -6944,7 +6904,7 @@ async def reject_appointment(
             status_code=400, detail="Appointment is not awaiting approval"
         )
     reason_clean = body.reason.strip()
-    if USE_DB:
+    if runtime.USE_DB:
         apt = (
             db_appointments_update(
                 appointment_id,
@@ -6982,7 +6942,7 @@ async def cancel_appointment(
     cid = _bind_tenant_db_context(tenant)
     apt = (
         db_appointments_get_by_id(appointment_id, client_id=cid)
-        if USE_DB
+        if runtime.USE_DB
         else next((a for a in appointments if a["id"] == appointment_id), None)
     )
     if not apt:
@@ -6994,7 +6954,7 @@ async def cancel_appointment(
             detail="Only accepted appointments can be cancelled from the dashboard",
         )
     reason_clean = body.reason.strip()
-    if USE_DB:
+    if runtime.USE_DB:
         apt = (
             db_appointments_update(
                 appointment_id,
@@ -7036,7 +6996,7 @@ async def preview_decline_sms(
     """Return AI-polished decline text without sending SMS (for owner review before reject)."""
     cid = _bind_tenant_db_context(tenant)
     apt: dict = {}
-    if body.appointment_id is not None and USE_DB:
+    if body.appointment_id is not None and runtime.USE_DB:
         apt = db_appointments_get_by_id(body.appointment_id, client_id=cid) or {}
         if not apt:
             raise HTTPException(status_code=404, detail="Appointment not found")
@@ -7065,7 +7025,7 @@ async def create_message(
             "urgency": message.urgency,
             "status": "unread",
         }
-        if USE_DB:
+        if runtime.USE_DB:
             message_data = db_messages_insert(data)
         else:
             message_data = {
@@ -7194,13 +7154,13 @@ async def get_leads(
         limits = get_plan_limits(tenant)
         if not limits.get("has_lead_capture"):
             return {"leads": []}
-    leads = db_leads_get_all(cid, 100) if USE_DB else []
+    leads = db_leads_get_all(cid, 100) if runtime.USE_DB else []
     return {"leads": leads}
 
 
 @app.get("/api/messages")
 async def get_messages(_: None = Depends(require_active_subscription)):
-    lst = db_messages_get_all() if USE_DB else messages
+    lst = db_messages_get_all() if runtime.USE_DB else messages
     return {"messages": lst}
 
 
@@ -7211,7 +7171,7 @@ async def get_subscription(tenant: Optional[dict] = Depends(require_tenant)):
     if get_plan_limits:
         state["limits"] = get_plan_limits(tenant)
     cid = get_db_client_id()
-    if USE_DB and cid and cid != "default":
+    if runtime.USE_DB and cid and cid != "default":
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         usage = db_usage_get(cid, month)
         state["usage"] = {
@@ -7254,7 +7214,7 @@ async def create_checkout_session(
     """Create a Stripe Checkout session for the given plan. Returns { url } for redirect."""
     if not STRIPE_AVAILABLE or not stripe:
         raise HTTPException(status_code=503, detail="Billing not configured")
-    if not tenant or not USE_DB:
+    if not tenant or not runtime.USE_DB:
         raise HTTPException(status_code=403, detail="Tenant required")
     secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not secret:
@@ -7312,7 +7272,7 @@ async def create_portal_session(tenant: Optional[dict] = Depends(require_tenant)
     """Create a Stripe Customer Portal session for managing subscription. Returns { url }."""
     if not STRIPE_AVAILABLE or not stripe:
         raise HTTPException(status_code=503, detail="Billing not configured")
-    if not tenant or not USE_DB:
+    if not tenant or not runtime.USE_DB:
         raise HTTPException(status_code=403, detail="Tenant required")
     stripe_customer_id = tenant.get("stripe_customer_id")
     if not stripe_customer_id:
@@ -7371,7 +7331,7 @@ async def stripe_webhook(request: Request):
         code = 503 if verr == "Webhook secret not configured" else 400
         raise HTTPException(status_code=code, detail=verr)
     assert event is not None
-    if not USE_DB:
+    if not runtime.USE_DB:
         return {"received": True}
     # Handle events
     if event.type == "checkout.session.completed":
@@ -7440,7 +7400,7 @@ async def stripe_webhook(request: Request):
     elif event.type == "invoice.payment_failed":
         inv = event.data.object
         sub_id = inv.get("subscription")
-        if sub_id and USE_DB:
+        if sub_id and runtime.USE_DB:
             tenant = db_tenant_get_by_stripe_subscription_id(sub_id)
             if tenant:
                 db_tenant_update_subscription(
@@ -7622,7 +7582,7 @@ async def api_onboarding_complete(
         cid, tenant.get("plan") or "free"
     )
     raw["onboarding_completed_at"] = datetime.now(timezone.utc).isoformat()
-    if USE_DB:
+    if runtime.USE_DB:
         if not db_tenant_set_business_config(cid, raw):
             raise HTTPException(
                 status_code=500, detail="Failed to save onboarding state"
@@ -7815,7 +7775,7 @@ async def api_update_business_info(
     data = _read_raw_client_config(cid)
     if data is None:
         plan = tid.get("plan") or "free"
-        if USE_DB:
+        if runtime.USE_DB:
             trow = db_tenant_get_by_client_id(cid)
             if trow and trow.get("plan"):
                 plan = trow.get("plan") or plan
@@ -7869,7 +7829,7 @@ async def api_update_business_info(
         data["receptionist_name"] = update.receptionist_name
         voice_affecting = True
     if update.business_type is not None:
-        if not (USE_DB and tid and tid.get("business_vertical")):
+        if not (runtime.USE_DB and tid and tid.get("business_vertical")):
             data["business_type"] = update.business_type
     if update.staff is not None:
         from staff_transfers import (
@@ -7925,7 +7885,7 @@ async def api_update_business_info(
         voice_info(
             "greeting_settings_saved",
             client_id_prefix=cid[:12],
-            config_source="database" if USE_DB else "file",
+            config_source="database" if runtime.USE_DB else "file",
             fields=[k for k in update.model_dump(exclude_none=True)],
             greeting_len=len(data.get("greeting") or ""),
             voice=data.get("voice"),
@@ -7960,8 +7920,8 @@ async def api_update_business_info(
 
 @app.get("/api/stats")
 async def get_stats(_: None = Depends(require_active_subscription)):
-    apts = db_appointments_get_all() if USE_DB else appointments
-    msgs = db_messages_get_all() if USE_DB else messages
+    apts = db_appointments_get_all() if runtime.USE_DB else appointments
+    msgs = db_messages_get_all() if runtime.USE_DB else messages
     pending = len([a for a in apts if a.get("status") == "pending"])
     return {
         "total_appointments": len(apts),
@@ -7972,7 +7932,7 @@ async def get_stats(_: None = Depends(require_active_subscription)):
 
 def _load_call_log(days: Optional[int] = None) -> List[dict]:
     """Load call log. If days set, filter by plan (DB only). Returns list of call entries (newest first)."""
-    if USE_DB:
+    if runtime.USE_DB:
         return db_call_log_load(limit=5000, days=days)
     data_dir = get_client_data_dir()
     if not data_dir:
@@ -8237,7 +8197,7 @@ async def get_call_recording_audio(
     _: None = Depends(require_active_subscription),
 ):
     """Stream call recording (MP3) from Twilio using server-side credentials; tenant must own the call."""
-    if not tenant or not USE_DB:
+    if not tenant or not runtime.USE_DB:
         raise HTTPException(status_code=404, detail="Recording not available")
     if not _call_recording_enabled_for_tenant(tenant):
         raise HTTPException(status_code=404, detail="Recording not available")
@@ -8451,10 +8411,10 @@ def _summarize_call_recording_sync(
         if not summary:
             return
         set_request_client_id(client_id)
-        if USE_DB:
+        if runtime.USE_DB:
             db_call_log_update_summary(call_sid, client_id, summary)
         call_log_merge_recording(call_sid, call_summary=summary)
-        if not USE_DB:
+        if not runtime.USE_DB:
             _file_call_log_merge_recording(call_sid, call_summary=summary)
     except Exception:
         logger.exception("[Recording] Summarize failed call_sid=%s", call_sid)
@@ -8701,7 +8661,7 @@ async def handle_incoming_sms(request: Request):
             content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
             media_type="application/xml",
         )
-    if not USE_DB:
+    if not runtime.USE_DB:
         sms_debug("inbound_skipped", reason="database_not_enabled")
         sms_trace("inbound_early_exit", reason="database_not_enabled", request_id=rid)
         return Response(
@@ -8849,7 +8809,7 @@ async def handle_incoming_sms(request: Request):
                 content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 media_type="application/xml",
             )
-        if USE_DB and db_sms_opt_out_is_blocked(from_number, tenant["client_id"]):
+        if runtime.USE_DB and db_sms_opt_out_is_blocked(from_number, tenant["client_id"]):
             sms_info(
                 "inbound_blocked_opt_out",
                 client_id=tenant["client_id"],
@@ -8922,7 +8882,7 @@ async def handle_incoming_sms(request: Request):
                 )
         apt = None
         resolve_via = "none"
-        if USE_DB:
+        if runtime.USE_DB:
             apt, resolve_via = db_appointments_resolve_for_sms(
                 from_number, tenant["client_id"]
             )
@@ -8965,7 +8925,7 @@ async def handle_incoming_sms(request: Request):
                 "inbound_no_appointment_for_number", request_id=rid, body_len=len(body)
             )
         session = (
-            db_sms_session_get(from_number, tenant["client_id"]) if USE_DB else None
+            db_sms_session_get(from_number, tenant["client_id"]) if runtime.USE_DB else None
         )
         messages = (session["messages"] if session else []) if session else []
         prior_turns = len(messages)
@@ -8973,7 +8933,7 @@ async def handle_incoming_sms(request: Request):
         if (
             apt
             and apt.get("status") in ("pending_customer", "pending_review", "accepted")
-            and USE_DB
+            and runtime.USE_DB
             and apt.get("id")
         ):
             from sms_appointment_updates import (
@@ -9002,7 +8962,7 @@ async def handle_incoming_sms(request: Request):
                     db_appointments_get_by_id=db_appointments_get_by_id,
                     update_caller_memory=update_caller_memory,
                     db_appointments_update_active_name_by_phone=(
-                        db_appointments_update_active_name_by_phone if USE_DB else None
+                        db_appointments_update_active_name_by_phone if runtime.USE_DB else None
                     ),
                     system_info=system_info,
                     logger=logger,
@@ -9074,7 +9034,7 @@ async def handle_incoming_sms(request: Request):
                 client_id=tenant["client_id"],
             )
             apt_after = apt
-            if USE_DB and apt.get("id"):
+            if runtime.USE_DB and apt.get("id"):
                 aid = int(apt["id"])
                 apt_full = db_appointments_get_by_id(aid) or apt
                 date = (apt_full.get("date") or "").strip()
@@ -9227,7 +9187,7 @@ async def handle_incoming_sms(request: Request):
                 media_type="application/xml",
             )
         sms_context_apts: list[dict] = []
-        if USE_DB:
+        if runtime.USE_DB:
             try:
                 sms_context_apts = db_appointments_get_active_for_sms_context(
                     from_number, client_id=tenant["client_id"], limit=5
@@ -9443,7 +9403,7 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                     body_qualifies=True,
                 )
                 # SMS automation: after_inquiry - send template to customer
-                if USE_DB:
+                if runtime.USE_DB:
                     automations = db_sms_automations_get_by_trigger(
                         tenant["client_id"], "after_inquiry"
                     )
@@ -9551,7 +9511,7 @@ async def handle_incoming_call(request: Request):
         )
 
         # Multi-tenant: resolve tenant strictly by Twilio destination number.
-        tenant = db_tenant_get_by_phone(to_number or "") if USE_DB else None
+        tenant = db_tenant_get_by_phone(to_number or "") if runtime.USE_DB else None
         tenant_for_access = tenant
         if tenant:
             set_request_client_id(tenant["client_id"])
@@ -9582,7 +9542,7 @@ async def handle_incoming_call(request: Request):
             )
 
         # Pre-call usage check: allow overage, log for billing (Option B)
-        if USE_DB and tenant and get_plan_limits:
+        if runtime.USE_DB and tenant and get_plan_limits:
             limits = get_plan_limits(tenant)
             month = datetime.now(timezone.utc).strftime("%Y-%m")
             usage = db_usage_get(tenant["client_id"], month)
@@ -9604,7 +9564,7 @@ async def handle_incoming_call(request: Request):
         call_log_start(call_sid, from_number, to_number)
         client_id = (tenant or {}).get("client_id") or ""
         if not client_id:
-            if USE_DB:
+            if runtime.USE_DB:
                 raise HTTPException(
                     status_code=403, detail="Unknown destination number"
                 )
@@ -9880,7 +9840,7 @@ async def handle_recording_complete(request: Request):
         client_id: Optional[str] = None
         if call_sid and call_sid in active_calls:
             client_id = active_calls[call_sid].get("client_id")
-        if not client_id and USE_DB:
+        if not client_id and runtime.USE_DB:
             client_id = db_call_log_get_client_id_by_call_sid(call_sid)
         if not client_id:
             voice_warning(
@@ -9890,7 +9850,7 @@ async def handle_recording_complete(request: Request):
         set_request_client_id(client_id)
 
         tenant_rec = (
-            db_tenant_get_by_client_id(client_id) if USE_DB and client_id else None
+            db_tenant_get_by_client_id(client_id) if runtime.USE_DB and client_id else None
         )
         if not _call_recording_enabled_for_tenant(tenant_rec):
             voice_info(
@@ -9900,7 +9860,7 @@ async def handle_recording_complete(request: Request):
             )
             return Response(content="OK", status_code=200, media_type="text/plain")
 
-        if USE_DB:
+        if runtime.USE_DB:
             db_call_log_update_recording(
                 call_sid,
                 client_id,
@@ -9916,7 +9876,7 @@ async def handle_recording_complete(request: Request):
             recording_duration_sec=duration_sec,
             recording_status=recording_status,
         )
-        if not USE_DB:
+        if not runtime.USE_DB:
             _file_call_log_merge_recording(
                 call_sid,
                 recording_sid=recording_sid,
@@ -10083,7 +10043,7 @@ async def handle_call_status(request: Request):
                 client_id_before = call_data_cp.get("client_id")
                 from_number_before = call_data_cp.get("from_number")
                 appointment_created = call_data_cp.get("appointment_created") or False
-            if not client_id_before and USE_DB and call_sid in call_log_entries:
+            if not client_id_before and runtime.USE_DB and call_sid in call_log_entries:
                 client_id_before = call_log_entries[call_sid].get("client_id")
             if not from_number_before and call_sid in call_log_entries:
                 from_number_before = call_log_entries[call_sid].get("from_number")
@@ -10126,7 +10086,7 @@ async def handle_call_status(request: Request):
                 cleanup_call_runtime_state(call_sid or "")
             # Lead capture: when call ended without booking and plan allows
             if (
-                USE_DB
+                runtime.USE_DB
                 and client_id_before
                 and client_id_before != "default"
                 and from_number_before
@@ -10152,7 +10112,7 @@ async def handle_call_status(request: Request):
                         extra={"client_id": client_id_before, "error": str(e)},
                     )
             # Record voice usage for billing (graceful degradation: log on failure, do not raise)
-            if USE_DB and client_id_before and client_id_before != "default":
+            if runtime.USE_DB and client_id_before and client_id_before != "default":
                 try:
                     minutes = max(0, math.ceil(duration_sec / 60))
                     month = datetime.now(timezone.utc).strftime("%Y-%m")

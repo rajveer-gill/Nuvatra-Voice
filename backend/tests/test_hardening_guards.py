@@ -15,7 +15,7 @@ def test_verify_clerk_token_requires_issuer_and_audience(monkeypatch):
 
 
 def test_twilio_webhook_validation_fail_closed_in_db(monkeypatch):
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(main, "TWILIO_AVAILABLE", True)
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ALLOW_INSECURE_WEBHOOKS", raising=False)

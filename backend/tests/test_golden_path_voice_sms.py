@@ -9,7 +9,7 @@ import main
 def test_generate_response_async_links_sms_session_on_booking(monkeypatch):
     """Happy path: BOOKING line creates appointment and links SMS session."""
     linked = []
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(main, "staff_roster_ready_for_booking", lambda info=None: True)
     monkeypatch.setattr(
         main,

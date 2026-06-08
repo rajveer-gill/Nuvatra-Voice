@@ -10,7 +10,7 @@ def client():
 
 
 def test_sms_compliance_stop_sets_opt_out_and_force_sends(client, monkeypatch):
-    monkeypatch.setattr("main.USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main._validate_twilio_webhook", lambda r, d: True)
     monkeypatch.setattr(
         "main.db_tenant_get_by_phone",
@@ -38,7 +38,7 @@ def test_sms_compliance_stop_sets_opt_out_and_force_sends(client, monkeypatch):
 
 
 def test_sms_compliance_start_clears_opt_out(client, monkeypatch):
-    monkeypatch.setattr("main.USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main._validate_twilio_webhook", lambda r, d: True)
     monkeypatch.setattr(
         "main.db_tenant_get_by_phone",
@@ -66,7 +66,7 @@ def test_sms_compliance_start_clears_opt_out(client, monkeypatch):
 
 
 def test_sms_inbound_ignored_when_opted_out(client, monkeypatch):
-    monkeypatch.setattr("main.USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main._validate_twilio_webhook", lambda r, d: True)
     monkeypatch.setattr(
         "main.db_tenant_get_by_phone",

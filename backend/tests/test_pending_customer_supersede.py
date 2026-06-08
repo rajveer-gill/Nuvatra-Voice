@@ -20,7 +20,7 @@ def test_supersede_cancels_pending_customer_same_slot():
     ]
     updated = []
 
-    with patch.object(main, "USE_DB", True), patch.object(
+    with patch("runtime.USE_DB", True), patch.object(
         main, "_appointment_rows_for_calendar_merge", return_value=rows
     ), patch.object(main, "db_appointments_update", side_effect=lambda aid, **kw: updated.append((aid, kw))), patch.object(
         main, "release_slot"
@@ -50,7 +50,7 @@ def test_supersede_cancels_pending_review_receptionist_same_caller():
         }
     ]
     updated = []
-    with patch.object(main, "USE_DB", True), patch.object(
+    with patch("runtime.USE_DB", True), patch.object(
         main, "_appointment_rows_for_calendar_merge", return_value=rows
     ), patch.object(main, "db_appointments_update", side_effect=lambda aid, **kw: updated.append((aid, kw))), patch.object(
         main, "release_slot"
@@ -78,7 +78,7 @@ def test_supersede_skips_manual_pending_review():
             "staff_id": None,
         }
     ]
-    with patch.object(main, "USE_DB", True), patch.object(
+    with patch("runtime.USE_DB", True), patch.object(
         main, "_appointment_rows_for_calendar_merge", return_value=rows
     ), patch.object(main, "db_appointments_update") as upd:
         n = main._supersede_pending_customer_drafts_for_slot(

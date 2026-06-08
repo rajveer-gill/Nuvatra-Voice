@@ -18,7 +18,7 @@ def deepgram_phone_client(monkeypatch):
     monkeypatch.setattr(main, "_voice_stt_use_deepgram", lambda: True)
     monkeypatch.setattr(main, "twilio_client", object(), raising=False)
     monkeypatch.setattr(main, "_validate_twilio_webhook", lambda _r, _d: True)
-    monkeypatch.setattr(main, "USE_DB", False)
+    monkeypatch.setattr("runtime.USE_DB", False)
     monkeypatch.setattr(main, "voice_receptionist_ready", lambda info=None: True)
     return TestClient(main.app)
 

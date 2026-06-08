@@ -20,7 +20,7 @@ def test_post_booking_links_sms_session(monkeypatch):
     """After confirmation SMS, voice flow should link sms_sessions to appointment id."""
     linked = []
 
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(main, "staff_roster_ready_for_booking", lambda info=None: True)
     monkeypatch.setattr(
         main,

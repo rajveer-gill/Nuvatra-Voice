@@ -80,7 +80,7 @@ def test_subscription_state_trialing_no_end_date():
         "plan": "free",
         "billing_exempt_until": None,
     }
-    with patch("main.USE_DB", True):
+    with patch("runtime.USE_DB", True):
         state = get_tenant_subscription_state(tenant)
     assert state["can_use_app"] is True
 
@@ -96,7 +96,7 @@ def test_subscription_state_trial_ended_no_subscription():
         "plan": "free",
         "billing_exempt_until": None,
     }
-    with patch("main.USE_DB", True):
+    with patch("runtime.USE_DB", True):
         state = get_tenant_subscription_state(tenant)
     assert state["can_use_app"] is False
 

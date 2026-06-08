@@ -49,7 +49,7 @@ def test_booked_slot_pending_review_kept():
 
 
 def test_is_slot_available_ignores_stale_row_for_pending_customer():
-    with patch("main._load_booked_slots") as load, patch("main.USE_DB", True), patch(
+    with patch("main._load_booked_slots") as load, patch("runtime.USE_DB", True), patch(
         "main.db_appointments_get_all"
     ) as ga:
         load.return_value = [
@@ -75,7 +75,7 @@ def test_is_slot_available_ignores_stale_row_for_pending_customer():
 
 
 def test_is_slot_available_orphan_booked_slot_ignored():
-    with patch("main._load_booked_slots") as load, patch("main.USE_DB", True), patch(
+    with patch("main._load_booked_slots") as load, patch("runtime.USE_DB", True), patch(
         "main.db_appointments_get_all"
     ) as ga:
         load.return_value = [

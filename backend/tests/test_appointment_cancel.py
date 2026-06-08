@@ -6,7 +6,7 @@ import main
 
 
 def test_cancel_accepted_appointment(monkeypatch):
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     stored = {
         "id": 7,
         "status": "accepted",
@@ -63,7 +63,7 @@ def test_cancel_accepted_appointment(monkeypatch):
 
 
 def test_cancel_rejects_pending_review(monkeypatch):
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(
         main,
         "db_appointments_get_by_id",

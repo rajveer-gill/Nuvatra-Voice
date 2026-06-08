@@ -100,6 +100,6 @@ def test_billing_period_key_changes_after_anchor_month(monkeypatch):
 def test_reserve_without_db_allows(monkeypatch):
     import main
 
-    monkeypatch.setattr(main, "USE_DB", False)
+    monkeypatch.setattr("runtime.USE_DB", False)
     r = reserve_conversational_sms_session(_tenant("no-db"), "+15551234567")
     assert r.allowed is True

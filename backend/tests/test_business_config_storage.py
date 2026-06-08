@@ -24,7 +24,7 @@ def test_read_raw_client_config_prefers_db(client_config_dir, monkeypatch):
     cfg_path.write_text(json.dumps(file_cfg), encoding="utf-8")
     db_cfg = {"client_id": cid, "business_name": "DB Spa", "voice": "nova", "greeting": "from database"}
 
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(main, "db_tenant_get_business_config", lambda c: db_cfg if c == cid else None)
 
     raw = main._read_raw_client_config(cid)
@@ -41,7 +41,7 @@ def test_save_raw_client_config_writes_db_and_file(client_config_dir, monkeypatc
         stored[client_id] = dict(config)
         return True
 
-    monkeypatch.setattr(main, "USE_DB", True)
+    monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(main, "db_tenant_set_business_config", fake_set)
 
     data = main._default_client_config_data(cid, "free")

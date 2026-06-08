@@ -43,9 +43,9 @@ def reserve_conversational_sms_session(tenant: dict, from_phone: str) -> Convers
     from database import db_conversational_sms_reserve_session
 
     try:
-        import main as m
+        import runtime
 
-        use_db = bool(getattr(m, "USE_DB", False))
+        use_db = bool(runtime.USE_DB)
     except ImportError:
         use_db = False
 

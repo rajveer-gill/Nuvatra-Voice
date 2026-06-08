@@ -42,7 +42,7 @@ def test_get_leads_growth_returns_leads(client, monkeypatch):
 
     with patch("main.db_tenant_get_by_client_id", return_value=growth_tenant), \
          patch("main.db_leads_get_all", return_value=mock_leads), \
-         patch("main.USE_DB", True):
+         patch("runtime.USE_DB", True):
         resp = client.get("/api/leads")
         if resp.status_code == 200:
             data = resp.json()
