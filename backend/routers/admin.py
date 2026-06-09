@@ -1,0 +1,752 @@
+"""Admin API — tenant management, invites, members, legal holds, billing exemptions,
+Twilio-number assignment, and ops self-check.
+
+Admin-only (Depends(deps.require_admin)). Backed by clerk_service (user linking),
+database (tenant/legal-hold CRUD), deps (auth/audit), config_service. Helpers are
+module-qualified so monkeypatches target the owning module.
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+
+import clerk_service
+import config_service
+import database
+import deps
+import runtime
+
+router = APIRouter()
+
+
+class AdminTenantTwilioUpdate(BaseModel):
+    twilio_phone_number: str
+
+
+class BillingExemptUpdate(BaseModel):
+    exempt_until: Optional[str] = None
+    extend_months: Optional[int] = None
+    extend_trial_months: Optional[int] = None
+
+
+class AdminCreateTenantRequest(BaseModel):
+    client_id: str
+    name: str
+    twilio_phone_number: str
+    email: str
+    plan: Optional[str] = "starter"
+    business_vertical: str = "salon_chair"
+
+
+class AdminResendInviteRequest(BaseModel):
+    email: str
+
+
+class AdminLegalHoldRequest(BaseModel):
+    client_id: str = Field(..., min_length=1, max_length=120)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+    hold_until: Optional[datetime] = None
+
+
+def _cron_stale_jobs(last_success: dict) -> List[str]:
+    """Daily cron jobs with no successful run in the last 36 hours."""
+    stale: List[str] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=36)
+    for job in database.DAILY_CRON_JOBS:
+        ts = last_success.get(job)
+        if not ts:
+            stale.append(job)
+            continue
+        try:
+            finished = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if finished.tzinfo is None:
+                finished = finished.replace(tzinfo=timezone.utc)
+            if finished < cutoff:
+                stale.append(job)
+        except Exception:
+            stale.append(job)
+    return stale
+
+
+def _extend_trial_through_exempt(tenant_id: str, exempt_until: datetime) -> None:
+    """Keep trial_ends_at at or past billing_exempt_until so admin/client dates stay aligned."""
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        return
+    now = datetime.now(timezone.utc)
+    trial_ends_at = tenant.get("trial_ends_at")
+    try:
+        if trial_ends_at:
+            trial_dt = (
+                datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00"))
+                if isinstance(trial_ends_at, str)
+                else trial_ends_at
+            )
+            if trial_dt.tzinfo is None:
+                trial_dt = trial_dt.replace(tzinfo=timezone.utc)
+        else:
+            trial_dt = now
+    except Exception:
+        trial_dt = now
+    if exempt_until > trial_dt:
+        database.db_tenant_extend_trial(tenant_id, exempt_until)
+
+
+def _membership_diagnosis(
+    user_id: str,
+    jwt_tid: Optional[str],
+    link: Optional[dict],
+    tenant: Optional[dict],
+    memberships: List[dict],
+) -> dict:
+    """Explain likely dashboard routing for support (no secrets)."""
+    clerk_tid = (link or {}).get("tenant_id")
+    db_tid = str((tenant or {}).get("id") or "")
+    issues: List[str] = []
+    if len(memberships) > 1:
+        issues.append("multiple_db_memberships")
+    if not memberships:
+        issues.append("no_db_membership")
+    if jwt_tid and db_tid and str(jwt_tid) != db_tid:
+        issues.append("jwt_metadata_tenant_id_differs_from_db")
+    if clerk_tid and db_tid and str(clerk_tid) != db_tid:
+        issues.append("clerk_metadata_tenant_id_differs_from_db")
+    if memberships and tenant and len(memberships) == 1:
+        only = memberships[0]
+        if only.get("tenant_id") != db_tid:
+            issues.append("resolved_tenant_not_newest_membership")
+    recommended = "ok"
+    if "no_db_membership" in issues:
+        recommended = "admin_resend_invite_exact_sign_in_email"
+    elif issues:
+        recommended = "sign_out_all_devices_then_sign_in_again"
+    return {"issues": issues, "recommended_action": recommended}
+
+
+def _admin_resolve_email_debug(email: str) -> dict:
+    """Admin-only: where an email appears across invites, Clerk, and memberships."""
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return {"error": "valid_email_required"}
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    headers = (
+        {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+        if clerk_secret
+        else None
+    )
+    invite_tid = database.db_tenant_invite_peek(email) if runtime.USE_DB else None
+    invite_tenant = database.db_tenant_get_by_id(invite_tid) if invite_tid and runtime.USE_DB else None
+    api_ids = clerk_service._clerk_user_ids_from_api(email, headers) if headers else []
+    member_ids = clerk_service._clerk_user_ids_from_tenant_members(email, headers) if headers else []
+    all_ids = list(dict.fromkeys(api_ids + member_ids))
+    users: List[dict] = []
+    for uid in all_ids:
+        link = deps._clerk_fetch_user_link(uid) if headers else None
+        users.append(
+            {
+                "clerk_user_id": uid,
+                "clerk_emails": (link or {}).get("emails") or [],
+                "clerk_metadata_tenant_id": (link or {}).get("tenant_id"),
+                "db_memberships": database.db_tenant_memberships_for_user(uid) if runtime.USE_DB else [],
+            }
+        )
+    tenants_by_client: List[dict] = []
+    if runtime.USE_DB:
+        for t in database.db_tenant_list_all():
+            tid = str(t.get("id") or "")
+            if database.db_tenant_get_invite_email(tid) == database._normalize_invite_email(email):
+                tenants_by_client.append(
+                    {
+                        "tenant_id": tid,
+                        "client_id": t.get("client_id"),
+                        "role": "pending_invite_on_tenant",
+                    }
+                )
+            for uid in database.db_tenant_get_members(tid):
+                link = deps._clerk_fetch_user_link(uid) if headers else None
+                for em in (link or {}).get("emails") or []:
+                    if (em or "").strip().lower() == email.strip().lower():
+                        tenants_by_client.append(
+                            {
+                                "tenant_id": tid,
+                                "client_id": t.get("client_id"),
+                                "role": "active_member",
+                                "clerk_user_id": uid,
+                            }
+                        )
+    return {
+        "email": email,
+        "pending_invite_tenant": (
+            {
+                "tenant_id": invite_tid,
+                "client_id": (invite_tenant or {}).get("client_id"),
+            }
+            if invite_tid
+            else None
+        ),
+        "clerk_user_ids_api": api_ids,
+        "clerk_user_ids_member_scan": member_ids,
+        "clerk_users": users,
+        "tenant_roles_for_email": tenants_by_client,
+    }
+
+
+def _admin_tenant_with_access_email(tenant: dict) -> dict:
+    """Attach dashboard owner / pending invite email for admin UI."""
+    tid = str(tenant.get("id") or "")
+    pending: Optional[str] = None
+    owner_email: Optional[str] = None
+    try:
+        pending = database.db_tenant_get_invite_email(tid) if tid else None
+        members = database.db_tenant_get_members(tid) if tid else []
+        if members:
+            link = deps._clerk_fetch_user_link(members[0])
+            emails = (link or {}).get("emails") or []
+            if emails:
+                owner_email = str(emails[0]).strip()
+    except Exception as e:
+        print(
+            f"[Admin] tenant access email lookup failed client_id={tenant.get('client_id')}: {e}"
+        )
+    allocated = owner_email or pending
+    if owner_email and pending and owner_email.lower() != pending.lower():
+        access_status = "active_pending_mismatch"
+    elif owner_email:
+        access_status = "active"
+    elif pending:
+        access_status = "pending_invite"
+    else:
+        access_status = "none"
+    return {
+        **tenant,
+        "owner_email": owner_email,
+        "pending_invite_email": pending,
+        "allocated_email": allocated,
+        "access_status": access_status,
+    }
+
+
+@router.get("/api/admin/session")
+async def admin_session(request: Request):
+    """True if the bearer token user id is in ADMIN_CLERK_USER_IDS. No tenant required."""
+    token = deps.get_bearer_token(request)
+    if not token:
+        return {"is_admin": False}
+    try:
+        user_id, _ = verify_clerk_token(token)
+    except HTTPException:
+        return {"is_admin": False}
+    admin_ids = [
+        x.strip()
+        for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
+        if x.strip()
+    ]
+    if not admin_ids:
+        return {"is_admin": False}
+    return {"is_admin": user_id in admin_ids}
+
+
+@router.post("/api/admin/tenants")
+async def admin_create_tenant(
+    req: AdminCreateTenantRequest,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Create tenant and send Clerk invite. Requires admin auth."""
+    if not runtime.USE_DB:
+        raise HTTPException(
+            status_code=503, detail="Database required for multi-tenant"
+        )
+    bv = (req.business_vertical or "salon_chair").strip()
+    if bv not in ALLOWED_BUSINESS_VERTICALS:
+        raise HTTPException(status_code=400, detail="Invalid business_vertical")
+    # New tenants get 7-day trial (plan=free, subscription_status=trialing); no paid plan at creation
+    tenant = database.db_tenant_create(
+        req.client_id, req.name, req.twilio_phone_number, "free", bv
+    )
+    if not tenant:
+        raise HTTPException(
+            status_code=409, detail="Tenant already exists or create failed"
+        )
+    cfg = config_service._default_client_config_data(req.client_id, tenant.get("plan") or "free")
+    save_raw_client_config(req.client_id, cfg)
+    link = clerk_service._clerk_link_email_to_tenant(req.email, tenant["id"])
+    invite_sent = bool(link.get("invite_sent"))
+    user_relinked = bool(link.get("user_relinked"))
+    deps.audit_log(
+        "admin",
+        "tenant_created",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant["id"],
+        client_id=tenant["client_id"],
+        details={"name": req.name, **link},
+        request=request,
+    )
+    return {
+        "success": True,
+        "tenant": tenant,
+        "invite_sent": invite_sent,
+        "user_relinked": user_relinked,
+        "clerk_error": link.get("clerk_error"),
+        "linked_clerk_user_id": link.get("linked_clerk_user_id"),
+    }
+
+
+@router.post("/api/admin/tenants/{tenant_id}/resend-invite")
+async def admin_resend_invite(
+    tenant_id: str,
+    req: AdminResendInviteRequest,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Re-queue pending invite by email and send a new Clerk invitation (existing tenants)."""
+    if not runtime.USE_DB:
+        raise HTTPException(
+            status_code=503, detail="Database required for multi-tenant"
+        )
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    email = (req.email or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    link = clerk_service._clerk_link_email_to_tenant(email, tenant_id)
+    invite_sent = bool(link.get("invite_sent"))
+    user_relinked = bool(link.get("user_relinked"))
+    deps.audit_log(
+        "admin",
+        "tenant_invite_resent",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"email": email, **link},
+        request=request,
+    )
+    return {"success": True, **link}
+
+
+@router.get("/api/admin/tenants")
+async def admin_list_tenants(_: str = Depends(deps.require_admin)):
+    """List all tenants. Requires admin auth."""
+    if not runtime.USE_DB:
+        return {"tenants": [], "db_enabled": False}
+    try:
+        tenants = database.db_tenant_list_all()
+    except Exception as e:
+        print(f"[Admin] database.db_tenant_list_all failed: {e}")
+        raise HTTPException(
+            status_code=500, detail="Failed to load tenants from database"
+        ) from e
+    enriched: List[dict] = []
+    for t in tenants:
+        try:
+            enriched.append(_admin_tenant_with_access_email(t))
+        except Exception as e:
+            print(f"[Admin] enrich tenant {t.get('client_id')} failed: {e}")
+            enriched.append(
+                {
+                    **t,
+                    "owner_email": None,
+                    "pending_invite_email": None,
+                    "allocated_email": None,
+                    "access_status": "none",
+                }
+            )
+    return {"tenants": enriched, "db_enabled": True}
+
+
+@router.post("/api/admin/tenants/bulk", deprecated=True)
+async def admin_bulk_create_tenants(_admin: str = Depends(deps.require_admin)):
+    """Deprecated. The synchronous bulk-create timed out and left tenants
+    half-provisioned at scale. Use the background provisioning pipeline:
+    POST /api/admin/provisioning/jobs (idempotent, resumable, auto-purchases
+    Twilio numbers)."""
+    raise HTTPException(
+        status_code=410,
+        detail="Deprecated. Use POST /api/admin/provisioning/jobs for bulk onboarding.",
+    )
+
+
+@router.get("/api/admin/ops/self-check")
+async def admin_ops_self_check(_: str = Depends(deps.require_admin)):
+    """Production safety checks for webhook and auth hardening."""
+    from voice.redis_ops_health import redis_ops_health
+
+    cron_secret_set = bool((os.getenv("CRON_SECRET") or "").strip())
+    twilio_auth_token_set = bool((os.getenv("TWILIO_AUTH_TOKEN") or "").strip())
+    public_base_url_set = bool((os.getenv("PUBLIC_BASE_URL") or "").strip())
+    client_id_set = bool((os.getenv("CLIENT_ID") or "").strip())
+    last_cron_runs = database.db_cron_runs_last_success() if runtime.USE_DB else {}
+    stale_cron_jobs = (
+        _cron_stale_jobs(last_cron_runs)
+        if runtime.USE_DB and cron_secret_set
+        else list(database.DAILY_CRON_JOBS)
+    )
+    stt_provider = (os.getenv("VOICE_STT_PROVIDER") or "twilio").strip().lower()
+    deepgram_key_set = bool((os.getenv("DEEPGRAM_API_KEY") or "").strip())
+    redis_health = redis_ops_health()
+    return {
+        "public_base_url_set": public_base_url_set,
+        "twilio_signature_validation_enabled": twilio_auth_token_set,
+        "cron_secret_set": cron_secret_set,
+        "multi_tenant_client_id_env_ok": not client_id_set,
+        "database_enabled": bool(runtime.USE_DB),
+        **redis_health,
+        "clerk_issuer_set": bool((os.getenv("CLERK_ISSUER") or "").strip()),
+        "clerk_audience_set": bool((os.getenv("CLERK_AUDIENCE") or "").strip()),
+        "deepgram_ready": stt_provider != "deepgram" or deepgram_key_set,
+        "last_cron_runs": last_cron_runs,
+        "stale_cron_jobs": stale_cron_jobs,
+        "cron_jobs_healthy": len(stale_cron_jobs) == 0,
+    }
+
+
+@router.get("/api/admin/legal-holds")
+async def admin_list_legal_holds(_: str = Depends(deps.require_admin)):
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    return {"holds": database.db_legal_hold_list_active()}
+
+
+@router.post("/api/admin/legal-holds")
+async def admin_upsert_legal_hold(
+    req: AdminLegalHoldRequest,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    ok = database.db_legal_hold_set(
+        req.client_id.strip(),
+        reason=(req.reason or "").strip() or None,
+        hold_until=req.hold_until,
+        created_by=admin_user_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to set legal hold")
+    deps.audit_log(
+        "admin",
+        "legal_hold_upserted",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        client_id=req.client_id.strip(),
+        details={
+            "reason": (req.reason or "").strip()[:200],
+            "hold_until": req.hold_until.isoformat() if req.hold_until else None,
+        },
+        request=request,
+    )
+    return {"success": True}
+
+
+@router.delete("/api/admin/legal-holds/{client_id}")
+async def admin_clear_legal_hold(
+    client_id: str,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    cleared = database.db_legal_hold_clear(client_id)
+    deps.audit_log(
+        "admin",
+        "legal_hold_cleared",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        client_id=(client_id or "").strip(),
+        details={"cleared": bool(cleared)},
+        request=request,
+    )
+    return {"success": True, "cleared": bool(cleared)}
+
+
+@router.get("/api/admin/tenants/{tenant_id}/access-debug")
+async def admin_tenant_access_debug(tenant_id: str, _: str = Depends(deps.require_admin)):
+    """Admin: full access wiring snapshot for one tenant (invite, DB member, Clerk metadata)."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    return clerk_service._admin_tenant_access_debug_snapshot(tenant_id)
+
+
+@router.get("/api/admin/debug/resolve-email")
+async def admin_resolve_email_debug(email: str, _: str = Depends(deps.require_admin)):
+    """Admin: find an email across pending invites, Clerk users, and tenant memberships."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    return _admin_resolve_email_debug(email)
+
+
+@router.patch("/api/admin/tenants/{tenant_id}/twilio-phone")
+async def admin_update_tenant_twilio_phone(
+    tenant_id: str,
+    req: AdminTenantTwilioUpdate,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Set the tenant's inbound Twilio number so SMS/voice webhooks resolve the tenant (E.164)."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    phone = (req.twilio_phone_number or "").strip()
+    if not any(c.isdigit() for c in phone):
+        raise HTTPException(
+            status_code=400,
+            detail="twilio_phone_number must contain digits (E.164 or US local is fine)",
+        )
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if not database.db_tenant_set_twilio_phone(tenant_id, phone):
+        raise HTTPException(status_code=500, detail="Failed to update Twilio number")
+    updated = database.db_tenant_get_by_id(tenant_id)
+    from twilio_provision import configure_webhooks, public_webhook_result
+
+    base = _public_base_url()
+    webhook_config = configure_webhooks(
+        account_sid=TWILIO_ACCOUNT_SID or "",
+        auth_token=TWILIO_AUTH_TOKEN or "",
+        phone=(updated or {}).get("twilio_phone_number") or phone,
+        base_url=base,
+    )
+    public_config = public_webhook_result(webhook_config)
+    deps.audit_log(
+        "admin",
+        "tenant_twilio_phone_updated",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={
+            "twilio_phone_number": (updated or {}).get("twilio_phone_number") or phone,
+            "webhook_config": public_config,
+        },
+        request=request,
+    )
+    return {"success": True, "tenant": updated, "webhook_config": public_config}
+
+
+@router.delete("/api/admin/tenants/{tenant_id}")
+async def admin_delete_tenant(
+    tenant_id: str, request: Request, admin_user_id: str = Depends(deps.require_admin)
+):
+    """Delete a tenant and revoke access for its members.
+
+    Steps:
+      1. Look up all tenant_members (clerk_user_ids) before any destructive work.
+      2. Archive all client_id-scoped operational data to tenant_removed_archive, then delete live rows
+         (so a new tenant reusing the same client_id does not see old runtime.appointments, etc.; archive supports retention).
+      3. Remove clients/<client_id> on-disk config if present.
+      4. Delete the tenant row (cascades to tenant_members).
+      5. For each former member via Clerk API: clear public_metadata tenant_id and revoke sessions.
+      Users are NOT banned — they can be re-invited to a new tenant later.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    member_ids = database.db_tenant_get_members(tenant_id)
+    archive_id = database.db_archive_purge_and_delete_tenant(
+        tenant_id, tenant, actor_clerk_id=admin_user_id
+    )
+    if archive_id is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to archive tenant operational data; tenant was not removed. Retry or check database logs.",
+        )
+    client_slug = (tenant.get("client_id") or "").strip()
+    if client_slug:
+        client_dir = PROJECT_ROOT / "clients" / client_slug
+        try:
+            if client_dir.is_dir():
+                shutil.rmtree(client_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[Admin] Could not remove client directory {client_dir}: {e}")
+    revoked_users: list[str] = []
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if clerk_secret and member_ids:
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {clerk_secret}",
+            "Content-Type": "application/json",
+        }
+        for uid in member_ids:
+            try:
+                httpx.patch(
+                    f"https://api.clerk.com/v1/users/{uid}",
+                    headers=headers,
+                    json={"public_metadata": {"tenant_id": None}},
+                    timeout=10.0,
+                )
+                sessions_resp = httpx.get(
+                    f"https://api.clerk.com/v1/sessions?user_id={uid}&status=active",
+                    headers=headers,
+                    timeout=10.0,
+                )
+                for session in clerk_service._clerk_api_json_list(sessions_resp):
+                    sid = session.get("id") if isinstance(session, dict) else None
+                    if not sid:
+                        continue
+                    httpx.post(
+                        f"https://api.clerk.com/v1/sessions/{sid}/revoke",
+                        headers=headers,
+                        timeout=10.0,
+                    )
+                revoked_users.append(uid)
+            except Exception as e:
+                print(f"[Admin] Error revoking access for Clerk user {uid}: {e}")
+    deps.audit_log(
+        "admin",
+        "tenant_deleted",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"name": tenant.get("name"), "data_archive_id": archive_id},
+        request=request,
+    )
+    return {
+        "success": True,
+        "deleted_tenant": tenant,
+        "revoked_users": revoked_users,
+        "data_archive_id": archive_id,
+    }
+
+
+@router.patch("/api/admin/tenants/{tenant_id}/billing-exempt")
+async def admin_tenant_billing_exempt(
+    tenant_id: str,
+    req: BillingExemptUpdate,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Set billing exemption or extend trial for a tenant. Admin only."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    now = datetime.now(timezone.utc)
+    if req.extend_trial_months is not None and req.extend_trial_months >= 0:
+        trial_ends_at = tenant.get("trial_ends_at")
+        try:
+            if trial_ends_at:
+                trial_dt = (
+                    datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00"))
+                    if isinstance(trial_ends_at, str)
+                    else trial_ends_at
+                )
+                if trial_dt.tzinfo is None:
+                    trial_dt = trial_dt.replace(tzinfo=timezone.utc)
+                base = max(trial_dt, now)
+            else:
+                base = now
+            new_ends = base + timedelta(days=30 * req.extend_trial_months)
+            if database.db_tenant_extend_trial(tenant_id, new_ends):
+                deps.audit_log(
+                    "admin",
+                    "billing_exempt",
+                    actor_id=admin_user_id,
+                    resource_type="tenant",
+                    resource_id=tenant_id,
+                    client_id=tenant.get("client_id"),
+                    details={
+                        "action": "extend_trial_months",
+                        "months": req.extend_trial_months,
+                        "trial_ends_at": new_ends.isoformat(),
+                    },
+                    request=request,
+                )
+                return {"success": True, "trial_ends_at": new_ends.isoformat()}
+        except Exception as e:
+            raise deps._server_error(
+                "trial extension failed",
+                e,
+                status_code=400,
+                public_detail="Could not update trial",
+            )
+    if req.extend_months is not None and req.extend_months >= 0:
+        exempt_until = now + timedelta(days=30 * req.extend_months)
+        if database.db_tenant_set_billing_exempt(tenant_id, exempt_until):
+            _extend_trial_through_exempt(tenant_id, exempt_until)
+            deps.audit_log(
+                "admin",
+                "billing_exempt",
+                actor_id=admin_user_id,
+                resource_type="tenant",
+                resource_id=tenant_id,
+                client_id=tenant.get("client_id"),
+                details={
+                    "action": "extend_months",
+                    "months": req.extend_months,
+                    "exempt_until": exempt_until.isoformat(),
+                },
+                request=request,
+            )
+            return {"success": True, "billing_exempt_until": exempt_until.isoformat()}
+    if req.exempt_until:
+        try:
+            exempt_dt = datetime.fromisoformat(req.exempt_until.replace("Z", "+00:00"))
+            if exempt_dt.tzinfo is None:
+                exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
+            if database.db_tenant_set_billing_exempt(tenant_id, exempt_dt):
+                _extend_trial_through_exempt(tenant_id, exempt_dt)
+                deps.audit_log(
+                    "admin",
+                    "billing_exempt",
+                    actor_id=admin_user_id,
+                    resource_type="tenant",
+                    resource_id=tenant_id,
+                    client_id=tenant.get("client_id"),
+                    details={
+                        "action": "exempt_until",
+                        "exempt_until": exempt_dt.isoformat(),
+                    },
+                    request=request,
+                )
+                return {"success": True, "billing_exempt_until": exempt_dt.isoformat()}
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid exempt_until date: {e}"
+            )
+    raise HTTPException(
+        status_code=400,
+        detail="Provide exempt_until, extend_months, or extend_trial_months",
+    )
+
+
+@router.post("/api/admin/tenants/{tenant_id}/members")
+async def admin_add_tenant_member(
+    tenant_id: str,
+    req: AdminResendInviteRequest,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Link a Clerk user to a tenant by email (re-link existing account or send invite)."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    email = (req.email or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    link = clerk_service._clerk_link_email_to_tenant(email, tenant_id)
+    deps.audit_log(
+        "admin",
+        "tenant_member_add_attempt",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"email": email, **link},
+        request=request,
+    )
+    return {"success": True, **link}
