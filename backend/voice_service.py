@@ -1155,3 +1155,22 @@ Respond with just the language name, nothing else."""
 
     # Default to English if detection fails
     return "English"
+
+
+def invalidate_voice_cache(client_id: Optional[str] = None) -> None:
+    """Clear greeting/got-it audio cache when voice, speed, greeting, name, or receptionist changes."""
+    from voice.tts_cache import invalidate_client
+
+    if client_id:
+        invalidate_client(PROJECT_ROOT, client_id)
+    else:
+        for d in (PROJECT_ROOT / "clients").glob("*/voice_cache"):
+            if d.is_dir():
+                for p in d.glob("*.mp3"):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+        from voice.tts_cache import clear_all_memory
+
+        clear_all_memory()

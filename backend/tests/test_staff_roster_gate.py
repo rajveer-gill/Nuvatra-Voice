@@ -5,6 +5,7 @@ from __future__ import annotations
 from urllib.parse import unquote
 
 import main
+from routers import business as business_router
 
 
 def test_staff_on_roster_requires_name_only():
@@ -55,7 +56,7 @@ def test_setup_not_ready_call_message_no_store_phone_no_transfer_hint():
 
 
 def test_setup_status_roster_only_gap_flag():
-    body = main.get_setup_status(
+    body = business_router.get_setup_status(
         {
             "name": "Spa",
             "hours": "9-5",
@@ -70,7 +71,7 @@ def test_setup_status_roster_only_gap_flag():
 
 
 def test_setup_status_warns_without_store_phone():
-    body = main.get_setup_status(
+    body = business_router.get_setup_status(
         {
             "name": "Spa",
             "hours": "9-5",
