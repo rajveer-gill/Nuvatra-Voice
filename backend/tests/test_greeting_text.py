@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import main
+import voice_service
 
 
 def test_greeting_prepends_receptionist_name(monkeypatch):
@@ -15,8 +16,8 @@ def test_greeting_prepends_receptionist_name(monkeypatch):
             "greeting": "Thank you for calling {business_name}. How can I help?",
         },
     )
-    monkeypatch.setattr(main, "_call_recording_enabled_for_tenant", lambda _t: False)
-    monkeypatch.setattr(main, "_tenant_for_call_recording", lambda: None)
+    monkeypatch.setattr(voice_service, "_call_recording_enabled_for_tenant", lambda _t: False)
+    monkeypatch.setattr(voice_service, "_tenant_for_call_recording", lambda: None)
     text = main.get_greeting_text()
     assert text.startswith("Hi, I'm Ava.")
     assert "Test Spa" in text
@@ -32,8 +33,8 @@ def test_greeting_respects_custom_receptionist_placeholder(monkeypatch):
             "greeting": "Hi, this is {receptionist_name} at {business_name}.",
         },
     )
-    monkeypatch.setattr(main, "_call_recording_enabled_for_tenant", lambda _t: False)
-    monkeypatch.setattr(main, "_tenant_for_call_recording", lambda: None)
+    monkeypatch.setattr(voice_service, "_call_recording_enabled_for_tenant", lambda _t: False)
+    monkeypatch.setattr(voice_service, "_tenant_for_call_recording", lambda: None)
     text = main.get_greeting_text()
     assert text.startswith("Hi, this is Ava at Test Spa.")
     assert "Hi, I'm Ava" not in text
@@ -49,8 +50,8 @@ def test_user_custom_greeting_template(monkeypatch):
             "greeting": "Thank you for calling {business_name}. I am {receptionist_name}. What is up?",
         },
     )
-    monkeypatch.setattr(main, "_call_recording_enabled_for_tenant", lambda _t: False)
-    monkeypatch.setattr(main, "_tenant_for_call_recording", lambda: None)
+    monkeypatch.setattr(voice_service, "_call_recording_enabled_for_tenant", lambda _t: False)
+    monkeypatch.setattr(voice_service, "_tenant_for_call_recording", lambda: None)
     payload = main.build_phone_greeting_payload(main.get_business_info(), None)
     assert payload["main_greeting"] == (
         "Thank you for calling Call Surge Demo. I am Jordan. What is up?"
@@ -69,8 +70,8 @@ def test_recording_disclosure_always_after_main_greeting(monkeypatch):
             "greeting": "Thank you for calling {business_name}. What is up?",
         },
     )
-    monkeypatch.setattr(main, "_call_recording_enabled_for_tenant", lambda _t: True)
-    monkeypatch.setattr(main, "_tenant_for_call_recording", lambda: {"client_id": "test"})
+    monkeypatch.setattr(voice_service, "_call_recording_enabled_for_tenant", lambda _t: True)
+    monkeypatch.setattr(voice_service, "_tenant_for_call_recording", lambda: {"client_id": "test"})
     text = main.get_greeting_text()
     assert "What is up?" in text
     assert text.endswith(main.RECORDING_DISCLOSURE_TEXT)

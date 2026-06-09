@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import main
+import voice_service
 
 
 @pytest.fixture
@@ -29,8 +30,8 @@ def voice_cache_env(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr("runtime.USE_DB", False)
-    monkeypatch.setattr(main, "_call_recording_enabled_for_tenant", lambda _t: True)
-    monkeypatch.setattr(main, "_tenant_for_call_recording", lambda: None)
+    monkeypatch.setattr(voice_service, "_call_recording_enabled_for_tenant", lambda _t: True)
+    monkeypatch.setattr(voice_service, "_tenant_for_call_recording", lambda: None)
     return cid
 
 

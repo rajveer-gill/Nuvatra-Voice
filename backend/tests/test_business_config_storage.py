@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import main
+import voice_service
 
 
 @pytest.fixture
@@ -75,7 +76,7 @@ def test_greeting_cache_key_uses_resolved_spoken_text(monkeypatch):
         "_tenant_for_call_recording",
         lambda: {"name": "From Admin Tenant", "client_id": "ands-test"},
     )
-    monkeypatch.setattr(main, "_call_recording_enabled_for_tenant", lambda _t: False)
+    monkeypatch.setattr(voice_service, "_call_recording_enabled_for_tenant", lambda _t: False)
     key = main._greeting_audio_cache_key("ands-test")
     assert key[0] == "ands-test"
     assert "From Admin Tenant" in key[1]
