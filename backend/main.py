@@ -141,13 +141,8 @@ from booking_fields import (
 )
 
 
-def _public_base_url() -> str:
-    """HTTPS origin Twilio can reach for webhooks (use NGROK_URL or PUBLIC_BASE_URL)."""
-    return (
-        (os.getenv("NGROK_URL") or os.getenv("PUBLIC_BASE_URL") or "")
-        .strip()
-        .rstrip("/")
-    )
+# _public_base_url now lives in deps (cross-cutting webhook/url helper); re-export.
+from deps import _public_base_url  # noqa: E402,F401
 
 
 def _derived_public_base_from_request(request: Request) -> str:

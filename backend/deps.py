@@ -34,6 +34,15 @@ except ImportError:  # pragma: no cover
     TWILIO_AVAILABLE = False
 
 
+def _public_base_url() -> str:
+    """HTTPS origin Twilio can reach for webhooks (use NGROK_URL or PUBLIC_BASE_URL)."""
+    return (
+        (os.getenv("NGROK_URL") or os.getenv("PUBLIC_BASE_URL") or "")
+        .strip()
+        .rstrip("/")
+    )
+
+
 def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
     """Validate X-Twilio-Signature so only Twilio can trigger webhooks."""
     allow_insecure = (os.getenv("ALLOW_INSECURE_WEBHOOKS") or "").strip().lower() in (
