@@ -1627,3 +1627,28 @@ async def get_active_calls(_: str = Depends(deps.require_admin)):
             for sid, call_data in runtime.call_store.sessions.items()
         ],
     }
+
+
+# ===== Twilio Media Streams websocket =====
+
+
+@router.websocket("/api/phone/media")
+async def phone_media_websocket(websocket: WebSocket):
+    """Twilio Media Streams → Deepgram Nova-2 live STT (when VOICE_STT_PROVIDER=deepgram)."""
+    if not TWILIO_AVAILABLE or not runtime.twilio_client:
+        await websocket.close(code=1011)
+        return
+    from voice.media_ws import handle_phone_media_websocket
+
+    await handle_phone_media_websocket(websocket, runtime.twilio_client)
+
+
+@router.post("/api/phone/stream")
+async def handle_media_stream(request: Request):
+    """
+    Legacy placeholder. Real-time media uses WebSocket ``GET /api/phone/media`` (Twilio Media Streams).
+    """
+    return {
+        "message": "Use WebSocket wss://…/api/phone/media for Twilio Media Streams (VOICE_STT_PROVIDER=deepgram).",
+        "websocket_path": "/api/phone/media",
+    }
