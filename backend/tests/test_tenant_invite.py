@@ -4,6 +4,7 @@ import os
 import pytest
 
 from database import (
+    db_tenant_create,
     db_tenant_invite_upsert,
     db_tenant_invite_consume,
     db_tenant_invite_delete,
@@ -20,7 +21,14 @@ def test_normalize_invite_email():
 
 def test_invite_upsert_consume_delete():
     init_db()
-    tid = "00000000-0000-0000-0000-000000000099"
+    # tenant_invites.tenant_id has a FK to tenants(id), so create a real tenant
+    # first (self-contained — earlier this relied on leftover/seed data).
+    tenant = db_tenant_create(
+        client_id="invite-test-spa",
+        name="Invite Test",
+        twilio_phone_number="+15555550199",
+    )
+    tid = tenant["id"]
     email = "invite-test@example.com"
     db_tenant_invite_delete(email)
     assert db_tenant_invite_upsert(email, tid) is True
