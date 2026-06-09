@@ -1,15 +1,16 @@
-"""Analytics & call-log reporting (plan-gated reads).
+"""Analytics & call-log reporting (plan-gated reads) + the call-recording proxy.
 
-The call-recording proxy route (/api/analytics/calls/{call_sid}/recording) stays in
-main for now — it shares the Twilio media-fetch/SSRF helpers with the phone code and
-moves with the phone domain.
+The recording proxy (/api/analytics/calls/{call_sid}/recording) streams MP3s from Twilio
+via voice_service's SSRF-guarded fetch; the read routes report on the call log.
 """
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -19,11 +20,15 @@ import config_service
 import database
 import deps
 import runtime
+import voice_service
 
 try:
     from plans import get_plan_limits
 except ImportError:  # pragma: no cover - plans module always present in practice
     get_plan_limits = None  # type: ignore
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 router = APIRouter()
 
@@ -262,4 +267,39 @@ async def get_analytics_export(
         content=buf.getvalue(),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=call_log.csv"},
+    )
+
+
+# ===== call-recording proxy (moved from main) =====
+
+@router.get("/api/analytics/calls/{call_sid}/recording")
+async def get_call_recording_audio(
+    call_sid: str,
+    tenant: Optional[dict] = Depends(deps.require_tenant),
+    _: None = Depends(deps.require_active_subscription),
+):
+    """Stream call recording (MP3) from Twilio using server-side credentials; tenant must own the call."""
+    if not tenant or not runtime.USE_DB:
+        raise HTTPException(status_code=404, detail="Recording not available")
+    if not voice_service._call_recording_enabled_for_tenant(tenant):
+        raise HTTPException(status_code=404, detail="Recording not available")
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        raise HTTPException(
+            status_code=503, detail="Recording playback is not configured"
+        )
+    row = database.db_call_log_get_by_call_sid(tenant["client_id"], call_sid)
+    if not row or not row.get("recording_url"):
+        raise HTTPException(status_code=404, detail="Recording not available")
+    code, data = await asyncio.to_thread(
+        voice_service._fetch_twilio_recording_bytes, row["recording_url"]
+    )
+    if code != 200:
+        raise HTTPException(status_code=502, detail="Could not fetch recording")
+    return Response(
+        content=data,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": f'inline; filename="{call_sid}.mp3"',
+            "Cache-Control": "private, max-age=300",
+        },
     )

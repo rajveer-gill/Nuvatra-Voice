@@ -584,6 +584,7 @@ from routers import admin as admin_router
 from routers import sms as sms_router
 from routers import phone as phone_router
 from routers import business as business_router
+from routers import core as core_router
 
 app.include_router(health_router.router)
 app.include_router(leads_router.router)
@@ -598,6 +599,7 @@ app.include_router(admin_router.router)
 app.include_router(sms_router.router)
 app.include_router(phone_router.router)
 app.include_router(business_router.router)
+app.include_router(core_router.router)
 
 # The inbound-SMS handler + its SMS-only helpers now live in routers/sms; re-export so
 # tests that inspect main.handle_incoming_sms or import _is_sms_confirmation keep working.
@@ -1021,25 +1023,6 @@ def get_greeting_text() -> str:
     return payload["spoken_text"]
 
 
-class ConversationRequest(BaseModel):
-    message: str
-    session_id: str
-    conversation_history: Optional[List[dict]] = []
-
-
-class ConversationResponse(BaseModel):
-    response: str
-    action: Optional[str] = None
-    data: Optional[dict] = None
-
-
-class MessageRequest(BaseModel):
-    caller_name: str
-    caller_phone: str
-    message: str
-    urgency: str = "normal"
-
-
 
 
 
@@ -1070,208 +1053,12 @@ def _normalize_admin_phone(value: str) -> str:
 
 
 
-@app.get("/api/me/access")
-async def me_access(request: Request):
-    """
-    Debug helper for dashboard access issues: shows which Clerk user is signed in,
-    which emails Clerk has on file, and whether a tenant membership exists in the DB.
-    """
-    token = get_bearer_token(request)
-    if not token:
-        return {"signed_in": False}
-    try:
-        user_id, jwt_tid = verify_clerk_token(token)
-    except HTTPException:
-        return {"signed_in": False, "token_invalid": True}
-    _ensure_db_ready()
-    tenant = db_tenant_get_for_user(user_id) if runtime.USE_DB else None
-    link = _clerk_fetch_user_link(user_id) if runtime.USE_DB else None
-    memberships = db_tenant_memberships_for_user(user_id) if runtime.USE_DB else []
-    admin_ids = [
-        x.strip()
-        for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
-        if x.strip()
-    ]
-    primary_email = ((link or {}).get("emails") or [None])[0]
-    pending_invite_tid = (
-        db_tenant_invite_peek(primary_email) if runtime.USE_DB and primary_email else None
-    )
-    diagnosis = _membership_diagnosis(user_id, jwt_tid, link, tenant, memberships)
-    return {
-        "signed_in": True,
-        "user_id": user_id,
-        "is_admin": user_id in admin_ids,
-        "jwt_metadata_tenant_id": jwt_tid,
-        "clerk_api_tenant_id": (link or {}).get("tenant_id"),
-        "clerk_emails": (link or {}).get("emails") or [],
-        "db_tenant_client_id": (tenant or {}).get("client_id"),
-        "db_tenant_id": (tenant or {}).get("id"),
-        "db_tenant_name": (tenant or {}).get("name"),
-        "has_tenant_membership": tenant is not None,
-        "db_memberships": memberships,
-        "pending_invite_for_primary_email": pending_invite_tid,
-        "diagnosis": diagnosis,
-    }
-
-
 @app.get("/api/debug/cors")
 async def debug_cors():
     """No-auth endpoint to verify CORS config on deployed backend. e.g. curl https://your-api/api/debug/cors"""
     return {"allowed_origins": allowed_origins}
 
 
-@app.post("/api/conversation", response_model=ConversationResponse)
-async def handle_conversation(
-    request: ConversationRequest, _: None = Depends(require_active_subscription)
-):
-    try:
-        # Always include booked slots so the AI knows which times are taken and avoids double-booking
-        system_content = get_system_prompt(include_booked_slots=True)
-        messages = [{"role": "system", "content": system_content}]
-        if request.conversation_history:
-            messages.extend(request.conversation_history)
-        messages.append({"role": "user", "content": request.message})
-
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo", messages=messages, temperature=0.7, max_tokens=200
-        )
-
-        ai_response = response.choices[0].message.content
-        action = None
-        data = None
-
-        # BOOKING: create appointment from AI output if present
-        booking = parse_booking(ai_response)
-        if booking:
-            booking, repairs, reject = _prepare_parsed_booking(booking)
-            if reject:
-                system_info(
-                    "chat_booking_line_rejected",
-                    reason=reject,
-                    repairs=repairs or None,
-                )
-                booking = None
-            elif repairs:
-                system_info("chat_booking_line_repaired", repairs=repairs)
-        if booking:
-            ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(
-                booking
-            )
-            if not ok_booking:
-                apt = None
-            else:
-                if canonical_service:
-                    booking["reason"] = canonical_service
-                apt = _create_appointment_from_booking(booking)
-            if apt:
-                ai_response = f"You're all set! We have you down for {apt['date']} at {_hhmm_to_ampm(apt.get('time', '') or '')}. The store will confirm shortly."
-                action = "schedule_appointment"
-                data = {"appointment_id": apt["id"]}
-            else:
-                ctx = booking_context_from_business(get_business_info())
-                name_ok = bool((booking.get("name") or "").strip())
-                date_ok = is_valid_booking_date(booking.get("date"))
-                time_ok = looks_like_booking_time(booking.get("time"), ctx)
-                if not ok_booking:
-                    ai_response = (
-                        fail_msg
-                        or "Before I can book this, please choose a stylist and service."
-                    )
-                elif not name_ok:
-                    ai_response = "I'd love to book that for you—what's your name?"
-                elif not date_ok or not time_ok:
-                    ai_response = "I need the date and time again to confirm—which day and time would you like?"
-                else:
-                    ai_response = "That time slot just got booked. Would you like to try another time or another day?"
-
-        ai_response = _strip_booking_directive_for_voice(ai_response or "")
-        if (
-            "schedule" in request.message.lower()
-            or "appointment" in request.message.lower()
-        ):
-            action = action or "schedule_appointment"
-        elif (
-            "message" in request.message.lower()
-            or "leave a message" in request.message.lower()
-        ):
-            action = "take_message"
-        elif (
-            "transfer" in request.message.lower()
-            or "department" in request.message.lower()
-        ):
-            action = "route_call"
-
-        return ConversationResponse(response=ai_response, action=action, data=data)
-
-    except Exception as e:
-        raise _server_error("conversation endpoint failed", e)
-
-
-def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
-    """Send submitted/confirmed email when enabled and provider is configured."""
-    if not _appointment_email_enabled():
-        return False
-    from email_notify import format_appointment_email, send_appointment_email
-
-    email = (apt.get("email") or "").strip()
-    if not email:
-        return False
-    business_name = (get_business_info().get("name") or "us").strip()
-    subject, html, text = format_appointment_email(
-        kind=kind,
-        business_name=business_name,
-        customer_name=(apt.get("name") or "").strip(),
-        date=apt.get("date") or "",
-        time_ampm=_hhmm_to_ampm(apt.get("time") or ""),
-        service=(apt.get("reason") or "").strip(),
-    )
-    ok = send_appointment_email(
-        to=email, subject=subject, html_body=html, text_body=text
-    )
-    from observability import email_hint_for_log
-
-    system_info(
-        "appointment_email_notification",
-        apt_id=apt.get("id"),
-        kind=kind,
-        sent=ok,
-        email_hint=email_hint_for_log(email),
-    )
-    return ok
-
-
-@app.post("/api/messages")
-async def create_message(
-    message: MessageRequest, _: None = Depends(require_active_subscription)
-):
-    try:
-        data = {
-            "caller_name": message.caller_name,
-            "caller_phone": message.caller_phone,
-            "message": message.message,
-            "urgency": message.urgency,
-            "status": "unread",
-        }
-        if runtime.USE_DB:
-            message_data = db_messages_insert(data)
-        else:
-            message_data = {
-                "id": len(messages) + 1,
-                **data,
-                "created_at": datetime.now().isoformat(),
-            }
-            messages.append(message_data)
-        return {"success": True, "message": message_data}
-    except Exception as e:
-        raise _server_error("create message failed", e)
-
-
-
-
-@app.get("/api/messages")
-async def get_messages(_: None = Depends(require_active_subscription)):
-    lst = db_messages_get_all() if runtime.USE_DB else messages
-    return {"messages": lst}
 
 
 # Required and recommended fields so the AI receptionist can relay accurate info (any business type)
@@ -1281,39 +1068,6 @@ async def get_messages(_: None = Depends(require_active_subscription)):
 from staff_transfers import (
     TransferTarget,
 )  # noqa: E402 — after StaffMember; shared with PATCH validation
-
-
-@app.get("/api/analytics/calls/{call_sid}/recording")
-async def get_call_recording_audio(
-    call_sid: str,
-    tenant: Optional[dict] = Depends(require_tenant),
-    _: None = Depends(require_active_subscription),
-):
-    """Stream call recording (MP3) from Twilio using server-side credentials; tenant must own the call."""
-    if not tenant or not runtime.USE_DB:
-        raise HTTPException(status_code=404, detail="Recording not available")
-    if not _call_recording_enabled_for_tenant(tenant):
-        raise HTTPException(status_code=404, detail="Recording not available")
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        raise HTTPException(
-            status_code=503, detail="Recording playback is not configured"
-        )
-    row = db_call_log_get_by_call_sid(tenant["client_id"], call_sid)
-    if not row or not row.get("recording_url"):
-        raise HTTPException(status_code=404, detail="Recording not available")
-    code, data = await asyncio.to_thread(
-        _fetch_twilio_recording_bytes, row["recording_url"]
-    )
-    if code != 200:
-        raise HTTPException(status_code=502, detail="Could not fetch recording")
-    return Response(
-        content=data,
-        media_type="audio/mpeg",
-        headers={
-            "Content-Disposition": f'inline; filename="{call_sid}.mp3"',
-            "Cache-Control": "private, max-age=300",
-        },
-    )
 
 
 # Phone call runtime state — runtime.call_store now lives in runtime (shared singleton). These

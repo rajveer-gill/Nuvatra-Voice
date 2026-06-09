@@ -750,3 +750,49 @@ async def admin_add_tenant_member(
         request=request,
     )
     return {"success": True, **link}
+
+
+# ===== access-debug route (moved from main; uses _membership_diagnosis) =====
+
+@router.get("/api/me/access")
+async def me_access(request: Request):
+    """
+    Debug helper for dashboard access issues: shows which Clerk user is signed in,
+    which emails Clerk has on file, and whether a tenant membership exists in the DB.
+    """
+    token = deps.get_bearer_token(request)
+    if not token:
+        return {"signed_in": False}
+    try:
+        user_id, jwt_tid = deps.verify_clerk_token(token)
+    except HTTPException:
+        return {"signed_in": False, "token_invalid": True}
+    deps._ensure_db_ready()
+    tenant = database.db_tenant_get_for_user(user_id) if runtime.USE_DB else None
+    link = deps._clerk_fetch_user_link(user_id) if runtime.USE_DB else None
+    memberships = database.db_tenant_memberships_for_user(user_id) if runtime.USE_DB else []
+    admin_ids = [
+        x.strip()
+        for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
+        if x.strip()
+    ]
+    primary_email = ((link or {}).get("emails") or [None])[0]
+    pending_invite_tid = (
+        database.db_tenant_invite_peek(primary_email) if runtime.USE_DB and primary_email else None
+    )
+    diagnosis = _membership_diagnosis(user_id, jwt_tid, link, tenant, memberships)
+    return {
+        "signed_in": True,
+        "user_id": user_id,
+        "is_admin": user_id in admin_ids,
+        "jwt_metadata_tenant_id": jwt_tid,
+        "clerk_api_tenant_id": (link or {}).get("tenant_id"),
+        "clerk_emails": (link or {}).get("emails") or [],
+        "db_tenant_client_id": (tenant or {}).get("client_id"),
+        "db_tenant_id": (tenant or {}).get("id"),
+        "db_tenant_name": (tenant or {}).get("name"),
+        "has_tenant_membership": tenant is not None,
+        "db_memberships": memberships,
+        "pending_invite_for_primary_email": pending_invite_tid,
+        "diagnosis": diagnosis,
+    }
