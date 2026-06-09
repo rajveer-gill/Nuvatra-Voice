@@ -26,6 +26,12 @@ try:
 except ImportError:  # pragma: no cover
     get_plan_limits = None  # type: ignore
 
+try:
+    from twilio.request_validator import RequestValidator as _RequestValidator  # noqa: F401
+    TWILIO_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    TWILIO_AVAILABLE = False
+
 logger = logging.getLogger("nuvatra")
 
 # Self-computed (same value as main/config_service) so voice_service has no main dependency.
@@ -412,3 +418,75 @@ def _greeting_audio_cache_key(client_id: str) -> tuple:
         (payload.get("voice") or "fable").strip(),
         speed_key,
     )
+
+
+# ===== STT provider selection (cut 3) =====
+
+
+def _voice_stt_use_deepgram() -> bool:
+    """Nova-2 live STT via Twilio Media Streams when env and credentials are present."""
+    try:
+        from voice.stt_runtime import deepgram_stt_active
+    except ImportError:
+        return False
+    return deepgram_stt_active(
+        twilio_available=TWILIO_AVAILABLE, twilio_client=runtime.twilio_client
+    )
+
+
+def uses_non_latin_script(language_name: str) -> bool:
+    """
+    Check if a language uses a non-Latin script (where Twilio transcription struggles).
+    Returns True for languages like Japanese, Punjabi, Chinese, Arabic, Hindi, etc.
+    """
+    non_latin_languages = {
+        "Japanese",
+        "Punjabi",
+        "Chinese",
+        "Hindi",
+        "Arabic",
+        "Russian",
+        "Korean",
+        "Thai",
+        "Vietnamese",
+        "Bengali",
+        "Tamil",
+        "Telugu",
+        "Gujarati",
+        "Kannada",
+        "Malayalam",
+        "Marathi",
+        "Urdu",
+        "Hebrew",
+        "Greek",
+        "Georgian",
+        "Armenian",
+        "Khmer",
+        "Lao",
+        "Myanmar",
+        "Tibetan",
+        "Mongolian",
+        "Nepali",
+        "Sinhala",
+    }
+    return language_name in non_latin_languages
+
+
+def _text_looks_latin(text: str) -> bool:
+    """True when transcript is mostly basic Latin letters (English booking phrases, names, etc.)."""
+    letters = [c for c in (text or "") if c.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for c in letters if ord(c) < 128)
+    return latin / len(letters) >= 0.85
+
+
+def _conversation_prefers_english_stt(call_data: dict) -> bool:
+    """Use Deepgram/Gather English path when recent caller speech is Latin script."""
+    lang = (call_data.get("detected_language") or "English").strip()
+    if lang == "English" or not uses_non_latin_script(lang):
+        return True
+    for msg in reversed(call_data.get("conversation_history") or []):
+        if msg.get("role") == "user":
+            return _text_looks_latin(str(msg.get("content") or ""))
+    return False

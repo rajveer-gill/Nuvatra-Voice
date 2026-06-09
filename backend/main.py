@@ -705,17 +705,6 @@ elif not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
     print("WARNING: Twilio credentials not found - phone features will be disabled")
 
 
-def _voice_stt_use_deepgram() -> bool:
-    """Nova-2 live STT via Twilio Media Streams when env and credentials are present."""
-    try:
-        from voice.stt_runtime import deepgram_stt_active
-    except ImportError:
-        return False
-    return deepgram_stt_active(
-        twilio_available=TWILIO_AVAILABLE, twilio_client=runtime.twilio_client
-    )
-
-
 # Project root (parent of backend) for client configs
 PROJECT_ROOT = _backend_dir.parent
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
@@ -904,6 +893,11 @@ from voice_service import (  # noqa: E402,F401
     _warm_client_voice_cache_async,
     _warm_auxiliary_voice_cache_async,
     _greeting_audio_cache_key,
+    # STT provider selection (cut 3)
+    _voice_stt_use_deepgram,
+    uses_non_latin_script,
+    _text_looks_latin,
+    _conversation_prefers_english_stt,
 )
 
 # Business-config loading/normalization now lives in config_service; re-export so
@@ -2028,44 +2022,6 @@ def _create_appointment_from_booking(
     return appointment_data
 
 
-def uses_non_latin_script(language_name: str) -> bool:
-    """
-    Check if a language uses a non-Latin script (where Twilio transcription struggles).
-    Returns True for languages like Japanese, Punjabi, Chinese, Arabic, Hindi, etc.
-    """
-    non_latin_languages = {
-        "Japanese",
-        "Punjabi",
-        "Chinese",
-        "Hindi",
-        "Arabic",
-        "Russian",
-        "Korean",
-        "Thai",
-        "Vietnamese",
-        "Bengali",
-        "Tamil",
-        "Telugu",
-        "Gujarati",
-        "Kannada",
-        "Malayalam",
-        "Marathi",
-        "Urdu",
-        "Hebrew",
-        "Greek",
-        "Georgian",
-        "Armenian",
-        "Khmer",
-        "Lao",
-        "Myanmar",
-        "Tibetan",
-        "Mongolian",
-        "Nepali",
-        "Sinhala",
-    }
-    return language_name in non_latin_languages
-
-
 def get_twilio_language_code(language_name: str) -> str:
     """
     Map language name to Twilio language code for speech recognition.
@@ -2734,26 +2690,6 @@ Respond with just the language name, nothing else."""
 
     # Default to English if detection fails
     return "English"
-
-
-def _text_looks_latin(text: str) -> bool:
-    """True when transcript is mostly basic Latin letters (English booking phrases, names, etc.)."""
-    letters = [c for c in (text or "") if c.isalpha()]
-    if not letters:
-        return True
-    latin = sum(1 for c in letters if ord(c) < 128)
-    return latin / len(letters) >= 0.85
-
-
-def _conversation_prefers_english_stt(call_data: dict) -> bool:
-    """Use Deepgram/Gather English path when recent caller speech is Latin script."""
-    lang = (call_data.get("detected_language") or "English").strip()
-    if lang == "English" or not uses_non_latin_script(lang):
-        return True
-    for msg in reversed(call_data.get("conversation_history") or []):
-        if msg.get("role") == "user":
-            return _text_looks_latin(str(msg.get("content") or ""))
-    return False
 
 
 def get_system_prompt(
