@@ -680,32 +680,11 @@ sys.stdout.flush()
 GOT_IT_PHRASE = "Got it, one moment."
 ONE_MOMENT_PHRASE = "One moment."
 
-# Lazy OpenAI client — created on first use so import doesn't block port binding
-_openai_client = None
-
-
-class _LazyOpenAIClient:
-    """Proxy that creates the real OpenAI client on first attribute access."""
-
-    def __getattr__(self, name):
-        global _openai_client
-        if _openai_client is None:
-            print("[INIT] Creating OpenAI client (lazy)...")
-            _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            print("[OK] OpenAI client created successfully")
-        return getattr(_openai_client, name)
-
-
-client = _LazyOpenAIClient()
-
-
-def _ensure_openai_client():
-    """Eagerly create the client if not yet initialized."""
-    global _openai_client
-    if _openai_client is None:
-        print("[INIT] Creating OpenAI client...")
-        _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        print("[OK] OpenAI client created successfully")
+# The lazy OpenAI client now lives in runtime (so booking/voice/SMS modules can share
+# it). Re-export `client` (a stable proxy instance) and _ensure_openai_client so main's
+# many `client.…` calls and tests patching main.client keep resolving. New code outside
+# main should prefer runtime.client / runtime._ensure_openai_client().
+from runtime import client, _ensure_openai_client  # noqa: E402,F401
 
 
 print("[INIT] Initializing Twilio...", flush=True)

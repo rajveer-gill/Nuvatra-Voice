@@ -16,7 +16,10 @@ and would silently miss the startup flip. Tests patch ``runtime.USE_DB``.
 
 from __future__ import annotations
 
+import os
 from typing import List
+
+import openai
 
 # In-memory appointment/message stores — the fallback used ONLY when USE_DB is
 # False (local/dev with no Postgres). main.py aliases its module globals to these
@@ -38,4 +41,35 @@ _db_imported: bool = False
 # Twilio is unavailable / unconfigured). Shared by main's phone code and
 # sms_service.send_sms — read as runtime.twilio_client so both see the same object.
 twilio_client = None
+
+# Lazy OpenAI client — created on first use so import doesn't block port binding.
+# `client` is a stable proxy instance (created once, never reassigned), so other
+# modules may `from runtime import client` safely OR use runtime.client; the real
+# SDK object lives behind it in `_openai_client` and is created on first access.
+# Both the proxy and _ensure_openai_client() mutate the same runtime._openai_client.
+_openai_client = None
+
+
+class _LazyOpenAIClient:
+    """Proxy that creates the real OpenAI client on first attribute access."""
+
+    def __getattr__(self, name):
+        global _openai_client
+        if _openai_client is None:
+            print("[INIT] Creating OpenAI client (lazy)...")
+            _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            print("[OK] OpenAI client created successfully")
+        return getattr(_openai_client, name)
+
+
+client = _LazyOpenAIClient()
+
+
+def _ensure_openai_client():
+    """Eagerly create the client if not yet initialized."""
+    global _openai_client
+    if _openai_client is None:
+        print("[INIT] Creating OpenAI client...")
+        _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        print("[OK] OpenAI client created successfully")
 
