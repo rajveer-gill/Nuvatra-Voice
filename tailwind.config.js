@@ -19,11 +19,16 @@ module.exports = {
         shimmer: {
           '100%': { transform: 'translateX(100%)' },
         },
+        'gradient-x': {
+          '0%, 100%': { 'background-position': '0% 50%' },
+          '50%': { 'background-position': '100% 50%' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 0.5s ease-out both',
         'fade-in-up': 'fade-in-up 0.55s ease-out both',
         shimmer: 'shimmer 1.2s ease-in-out infinite',
+        'gradient-x': 'gradient-x 6s ease infinite',
       },
       fontFamily: {
         sans: ['var(--font-dm-sans)', 'system-ui', 'sans-serif'],

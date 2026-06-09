@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import Image from 'next/image'
 import { AuthMainFade } from '@/components/AuthMainFade'
+import { AuroraBackground } from '@/components/motion'
 
 export default function AuthShell({
   children,
@@ -11,8 +12,9 @@ export default function AuthShell({
   headingId?: string
 }) {
   return (
-    <div className="relative min-h-dvh bg-zinc-950">
+    <div className="relative min-h-dvh overflow-hidden bg-zinc-950">
       <div className="pointer-events-none absolute inset-0 bg-call-surge-mesh" aria-hidden />
+      <AuroraBackground />
       <div className="relative mx-auto flex min-h-dvh max-w-lg flex-col px-4 pb-16 pt-24 md:pt-28">
         <Link
           href="/"

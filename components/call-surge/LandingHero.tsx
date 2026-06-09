@@ -50,7 +50,7 @@ export function LandingHero() {
           variants={item}
         >
           Turn every ring into{' '}
-          <span className="bg-gradient-to-r from-cyan-300 via-white to-violet-300 bg-clip-text text-transparent">
+          <span className="bg-gradient-to-r from-cyan-300 via-white to-violet-300 bg-[length:200%_auto] bg-clip-text text-transparent animate-gradient-x motion-reduce:animate-none">
             revenue
           </span>
           .
