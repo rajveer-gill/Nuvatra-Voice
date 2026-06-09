@@ -44,7 +44,7 @@ def test_text_to_speech_accepts_valid_payload_returns_audio(client):
     app.dependency_overrides[require_tenant] = _active_tenant
     mock_speech = MagicMock()
     mock_speech.content = FAKE_MP3_BYTES
-    with patch("main.client") as mock_client:
+    with patch("runtime.client") as mock_client:
         mock_client.audio.speech.create.return_value = mock_speech
         try:
             resp = client.post(
@@ -71,7 +71,7 @@ def test_text_to_speech_all_voices_accepted(client):
     app.dependency_overrides[require_tenant] = _active_tenant
     mock_speech = MagicMock()
     mock_speech.content = FAKE_MP3_BYTES
-    with patch("main.client") as mock_client:
+    with patch("runtime.client") as mock_client:
         mock_client.audio.speech.create.return_value = mock_speech
         try:
             for voice in TTS_VOICES:
@@ -90,7 +90,7 @@ def test_text_to_speech_speed_clamped(client):
     app.dependency_overrides[require_tenant] = _active_tenant
     mock_speech = MagicMock()
     mock_speech.content = FAKE_MP3_BYTES
-    with patch("main.client") as mock_client:
+    with patch("runtime.client") as mock_client:
         mock_client.audio.speech.create.return_value = mock_speech
         try:
             resp = client.post(
