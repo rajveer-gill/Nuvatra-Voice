@@ -447,3 +447,42 @@ def get_client_data_dir() -> Optional[Path]:
     d = PROJECT_ROOT / "clients" / cid
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ===== staff-roster / voice-readiness checks (business-config derived) =====
+
+
+def get_staff_phone_by_name(name: str) -> Optional[str]:
+    """Return E.164 for a plan-authorized transfer destination by name (not the full staff roster)."""
+    from staff_transfers import get_transfer_phone_by_name
+
+    return get_transfer_phone_by_name(name, get_business_info())
+
+
+def staff_on_roster(info: Optional[dict] = None) -> List[dict]:
+    """Staff rows with a display name (required for calendar booking / AI roster)."""
+    data = info if info is not None else get_business_info()
+    out: List[dict] = []
+    for s in data.get("staff") or []:
+        if not isinstance(s, dict):
+            continue
+        name = (s.get("name") or "").strip()
+        if name:
+            out.append(s)
+    return out
+
+
+def staff_roster_ready_for_booking(info: Optional[dict] = None) -> bool:
+    """True when at least one named team member is on the roster."""
+    return len(staff_on_roster(info)) >= 1
+
+
+def forwarding_phone_ready(info: Optional[dict] = None) -> bool:
+    """True when store forwarding phone is configured for live handoffs."""
+    data = info if info is not None else get_business_info()
+    return bool((data.get("forwarding_phone") or "").strip())
+
+
+def voice_receptionist_ready(info: Optional[dict] = None) -> bool:
+    """True when both team roster and store phone are configured for full AI receptionist calls."""
+    return staff_roster_ready_for_booking(info) and forwarding_phone_ready(info)
