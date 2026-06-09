@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { motion, useReducedMotion } from 'framer-motion'
 import { Sparkles } from 'lucide-react'
 import { HeroPrimaryCTA } from '@/components/call-surge/LandingCTAs'
+import { AuroraBackground } from '@/components/motion'
 
 export function LandingHero() {
   const reduce = useReducedMotion()
@@ -30,10 +31,7 @@ export function LandingHero() {
   return (
     <section id="hero" className="relative overflow-hidden pt-24 pb-16 px-4 md:pt-28 md:pb-24">
       <div className="pointer-events-none absolute inset-0 bg-call-surge-mesh" aria-hidden />
-      <div
-        className="pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[min(140%,900px)] -translate-x-1/2 rounded-full bg-gradient-to-b from-cyan-500/25 via-indigo-600/15 to-transparent blur-3xl motion-safe-transition"
-        aria-hidden
-      />
+      <AuroraBackground />
       <motion.div
         className="relative mx-auto max-w-5xl text-center"
         variants={container}
