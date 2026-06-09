@@ -9,8 +9,10 @@ qualified (database / config_service / deps / plans) per the strangler-fig disci
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -21,6 +23,7 @@ import database
 import runtime
 import deps
 from observability import voice_info, voice_trace, voice_warning
+from security.redaction import mask_phone_e164
 from voice_preview import add_sentence_pauses
 from voice.call_session_store import MemoryCallSessionStore
 
@@ -543,3 +546,136 @@ def _get_client_id_from_call(request: Request) -> Optional[str]:
             str((runtime.call_store.get(call_sid) or {}).get("client_id") or "").strip() or None
         )
     return None
+
+
+# ===== call log (cut 5; in-memory + file/DB persistence) =====
+
+call_log_entries = {}  # call_sid -> {from_number, to_number, start_iso, outcome, ...}
+
+CALL_LOG_MAX_ENTRIES = 5000
+
+
+def call_log_start(call_sid: str, from_number: str, to_number: str):
+    """Record call start. Outcome set when we forward or in status callback."""
+    call_log_entries[call_sid] = {
+        "call_sid": call_sid,
+        "from_number": from_number,
+        "to_number": to_number,
+        "start_iso": datetime.now().isoformat(),
+        "outcome": None,
+        "end_iso": None,
+        "duration_sec": None,
+        "category": None,
+        "recording_sid": None,
+        "recording_url": None,
+        "recording_duration_sec": None,
+        "recording_status": None,
+        "call_summary": None,
+    }
+    deps.audit_log(
+        "voice",
+        "call_started",
+        resource_type="call",
+        resource_id=call_sid,
+        client_id=database._client_id() if runtime.USE_DB else None,
+        details={
+            "from_masked": mask_phone_e164(from_number or ""),
+            "to_masked": mask_phone_e164(to_number or ""),
+        },
+    )
+
+
+def call_log_merge_recording(call_sid: str, **kwargs) -> None:
+    """Merge recording / summary fields into in-memory call log entry."""
+    ent = call_log_entries.get(call_sid)
+    if not ent:
+        return
+    for k, v in kwargs.items():
+        if v is not None:
+            ent[k] = v
+
+
+def _file_call_log_merge_recording(call_sid: str, **kwargs) -> None:
+    """Best-effort merge into clients/<id>/call_log.json when not using DB."""
+    data_dir = config_service.get_client_data_dir()
+    if not data_dir:
+        return
+    path = data_dir / "call_log.json"
+    log_list: List[dict] = []
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                log_list = json.load(f)
+        except Exception:
+            return
+    for e in reversed(log_list):
+        if e.get("call_sid") == call_sid:
+            for k, v in kwargs.items():
+                if v is not None:
+                    e[k] = v
+            break
+    else:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(log_list, f, indent=2)
+    except Exception as ex:
+        print(f"Failed to merge recording into file call log: {ex}")
+
+
+def call_log_set_outcome(call_sid: str, outcome: str):
+    """Set outcome: 'forwarded', 'answered_by_ai', 'missed', 'error', 'no-answer'."""
+    if call_sid in call_log_entries:
+        call_log_entries[call_sid]["outcome"] = outcome
+
+
+def call_log_end(call_sid: str):
+    """Write completed call to persistent log and remove from in-memory."""
+    if call_sid not in call_log_entries:
+        return
+    entry = call_log_entries[call_sid].copy()
+    entry["end_iso"] = datetime.now().isoformat()
+    start_s = entry.get("start_iso")
+    if start_s:
+        try:
+            start_dt = datetime.fromisoformat(start_s.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(entry["end_iso"].replace("Z", "+00:00"))
+            entry["duration_sec"] = int((end_dt - start_dt).total_seconds())
+        except Exception:
+            pass
+    if not entry.get("outcome"):
+        entry["outcome"] = "answered_by_ai"
+    deps.audit_log(
+        "voice",
+        "call_ended",
+        resource_type="call",
+        resource_id=call_sid,
+        client_id=database._client_id() if runtime.USE_DB else None,
+        details={
+            "outcome": entry.get("outcome"),
+            "duration_sec": entry.get("duration_sec"),
+            "recording_status": entry.get("recording_status"),
+        },
+    )
+    if runtime.USE_DB:
+        database.db_call_log_append(entry)
+    else:
+        data_dir = config_service.get_client_data_dir()
+        if data_dir:
+            path = data_dir / "call_log.json"
+            log_list = []
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        log_list = json.load(f)
+                except Exception:
+                    pass
+            log_list.append(entry)
+            if len(log_list) > CALL_LOG_MAX_ENTRIES:
+                log_list = log_list[-CALL_LOG_MAX_ENTRIES:]
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(log_list, f, indent=2)
+            except Exception as e:
+                print(f"Failed to save call log: {e}")
+    del call_log_entries[call_sid]
