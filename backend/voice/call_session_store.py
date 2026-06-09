@@ -494,10 +494,17 @@ def reset_call_session_store_for_tests(store: Optional[CallSessionStore] = None)
     """Test helper to inject or reset the global store and rebind main.py aliases."""
     global _store
     _store = store if store is not None else MemoryCallSessionStore()
+    # call_store now lives in runtime (shared by main's phone routes + voice_service's
+    # call-session helpers); main keeps active_calls/response_status as aliases.
+    try:
+        import runtime
+
+        runtime.call_store = _store
+    except ImportError:
+        pass
     try:
         import main as m
 
-        m.call_store = _store
         m.active_calls = _store.sessions
         m.response_status = _store.response_status
     except ImportError:

@@ -1,6 +1,7 @@
 """Voice session persistence and Redis fail-closed behavior."""
 
 import pytest
+import runtime
 
 from voice.call_sid import SAMPLE_CALL_SID
 from voice.call_session_store import MemoryCallSessionStore, reset_call_session_store_for_tests
@@ -12,7 +13,7 @@ def test_persist_call_session_skips_after_cleanup(monkeypatch):
 
     store = MagicMock()
     store.exists.return_value = False
-    monkeypatch.setattr(m, "call_store", store)
+    monkeypatch.setattr(runtime, "call_store", store)
     m._persist_call_session(SAMPLE_CALL_SID, {"client_id": "ghost"})
     store.save.assert_not_called()
     store.exists.assert_called_once()
@@ -23,9 +24,9 @@ def test_merge_call_session_persists_outcome():
 
     reset_call_session_store_for_tests(MemoryCallSessionStore())
     sid = SAMPLE_CALL_SID
-    m.call_store.create(sid, {"client_id": "t1"})
+    runtime.call_store.create(sid, {"client_id": "t1"})
     m._merge_call_session(sid, {"outcome": "forwarded"})
-    assert m.call_store.get(sid)["outcome"] == "forwarded"
+    assert runtime.call_store.get(sid)["outcome"] == "forwarded"
 
 
 def test_validate_booking_anyone_without_staff_field(monkeypatch):

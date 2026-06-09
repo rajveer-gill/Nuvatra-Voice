@@ -14,12 +14,15 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
+from fastapi import Request
+
 import config_service
 import database
 import runtime
 import deps
 from observability import voice_info, voice_trace, voice_warning
 from voice_preview import add_sentence_pauses
+from voice.call_session_store import MemoryCallSessionStore
 
 try:
     from plans import get_plan_limits
@@ -490,3 +493,53 @@ def _conversation_prefers_english_stt(call_data: dict) -> bool:
         if msg.get("role") == "user":
             return _text_looks_latin(str(msg.get("content") or ""))
     return False
+
+
+# ===== call-session context (cut 4; uses runtime.call_store) =====
+
+
+def _persist_call_session(call_sid: str, data: Optional[dict] = None) -> None:
+    """Write session back to Redis after in-place mutations (no-op for memory store)."""
+    if isinstance(runtime.call_store, MemoryCallSessionStore):
+        return
+    sid = (call_sid or "").strip()
+    if not sid or not runtime.call_store.exists(sid):
+        return
+    payload = data if data is not None else runtime.call_store.get(sid)
+    if payload is not None:
+        runtime.call_store.save(sid, payload)
+
+
+def _merge_call_session(call_sid: str, updates: dict[str, Any]) -> None:
+    """Persist partial session updates (safe on Redis and memory)."""
+    if not call_sid or not updates:
+        return
+    runtime.call_store.merge_session(call_sid, updates)
+
+
+def _call_sid_from_form(form_data: Any) -> str:
+    """Normalize Twilio CallSid from webhook form body; empty string if invalid."""
+    from voice.call_sid import normalize_call_sid
+
+    return normalize_call_sid(str(form_data.get("CallSid") or "").strip())
+
+
+def _restore_call_context(call_sid: str) -> bool:
+    """Restore request client_id from call session for downstream phone handlers. Returns True if found."""
+    if call_sid and runtime.call_store.exists(call_sid):
+        cid = str((runtime.call_store.get(call_sid) or {}).get("client_id") or "").strip()
+        if not cid:
+            return False
+        database.set_request_client_id(cid)
+        return True
+    return False
+
+
+def _get_client_id_from_call(request: Request) -> Optional[str]:
+    """Resolve client_id from call_sid query param (call session)."""
+    call_sid = request.query_params.get("call_sid")
+    if call_sid and runtime.call_store.exists(call_sid):
+        return (
+            str((runtime.call_store.get(call_sid) or {}).get("client_id") or "").strip() or None
+        )
+    return None

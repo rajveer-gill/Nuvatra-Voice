@@ -893,6 +893,12 @@ from voice_service import (  # noqa: E402,F401
     uses_non_latin_script,
     _text_looks_latin,
     _conversation_prefers_english_stt,
+    # call-session context (cut 4)
+    _persist_call_session,
+    _merge_call_session,
+    _call_sid_from_form,
+    _restore_call_context,
+    _get_client_id_from_call,
 )
 
 # Business-config loading/normalization now lives in config_service; re-export so
@@ -3531,42 +3537,10 @@ async def text_to_speech(
         raise _server_error("text-to-speech failed", e)
 
 
-# Phone call runtime state (memory or Redis via call_session_store)
-call_store = get_call_session_store()
-
-
-def _persist_call_session(call_sid: str, data: Optional[dict] = None) -> None:
-    """Write session back to Redis after in-place mutations (no-op for memory store)."""
-    if isinstance(call_store, MemoryCallSessionStore):
-        return
-    sid = (call_sid or "").strip()
-    if not sid or not call_store.exists(sid):
-        return
-    payload = data if data is not None else call_store.get(sid)
-    if payload is not None:
-        call_store.save(sid, payload)
-
-
-def _merge_call_session(call_sid: str, updates: dict[str, Any]) -> None:
-    """Persist partial session updates (safe on Redis and memory)."""
-    if not call_sid or not updates:
-        return
-    call_store.merge_session(call_sid, updates)
-
-
-def _call_sid_from_form(form_data: Any) -> str:
-    """Normalize Twilio CallSid from webhook form body; empty string if invalid."""
-    from voice.call_sid import normalize_call_sid
-
-    return normalize_call_sid(str(form_data.get("CallSid") or "").strip())
-
-
-if isinstance(call_store, MemoryCallSessionStore):
-    active_calls = call_store.sessions
-    response_status = call_store.response_status
-else:
-    active_calls = call_store.sessions
-    response_status = call_store.response_status
+# Phone call runtime state — runtime.call_store now lives in runtime (shared singleton). These
+# alias its session/status dicts (same objects, only mutated) for main's phone routes.
+active_calls = runtime.call_store.sessions
+response_status = runtime.call_store.response_status
 
 _background_tasks: set[asyncio.Task] = set()
 
@@ -3593,34 +3567,13 @@ def cleanup_call_runtime_state(call_sid: str) -> None:
     """Clear per-call runtime state deterministically."""
     if not call_sid:
         return
-    call_store.cleanup_call(call_sid)
-
-
-def _restore_call_context(call_sid: str) -> bool:
-    """Restore request client_id from call session for downstream phone handlers. Returns True if found."""
-    if call_sid and call_store.exists(call_sid):
-        cid = str((call_store.get(call_sid) or {}).get("client_id") or "").strip()
-        if not cid:
-            return False
-        set_request_client_id(cid)
-        return True
-    return False
+    runtime.call_store.cleanup_call(call_sid)
 
 
 # Fallback when OpenAI/TTS fails - play this so caller does not get dead air
 TTS_FALLBACK_TEXT = (
     "We're experiencing a brief technical issue. Please try again in a moment."
 )
-
-
-def _get_client_id_from_call(request: Request) -> Optional[str]:
-    """Resolve client_id from call_sid query param (call session)."""
-    call_sid = request.query_params.get("call_sid")
-    if call_sid and call_store.exists(call_sid):
-        return (
-            str((call_store.get(call_sid) or {}).get("client_id") or "").strip() or None
-        )
-    return None
 
 
 def _summarize_call_recording_sync(
@@ -4191,9 +4144,9 @@ async def handle_incoming_call(request: Request):
             voice_debug(
                 "incoming_deepgram_twiml_ready",
                 call_sid=call_sid,
-                media_stream_gen=call_store.get_media_stream_max_gen(call_sid),
+                media_stream_gen=runtime.call_store.get_media_stream_max_gen(call_sid),
                 has_public_base_url=bool(
-                    (call_store.get(call_sid) or {}).get("twilio_public_base_url")
+                    (runtime.call_store.get(call_sid) or {}).get("twilio_public_base_url")
                 ),
             )
             return Response(content=str(response), media_type="application/xml")
@@ -4640,7 +4593,7 @@ async def handle_no_speech(request: Request):
         if call_data.get("awaiting_caller_reply"):
             from voice.twiml_stt import empty_retry_twiml
 
-            call_store.merge_session(call_sid, {"awaiting_caller_reply": False})
+            runtime.call_store.merge_session(call_sid, {"awaiting_caller_reply": False})
             voice_respond_branch(
                 "no_speech_post_ai_reprompt",
                 call_sid=call_sid or "",
@@ -4790,7 +4743,7 @@ async def respond_with_audio(request: Request):
                             call_state=active_calls.get(call_sid, {}),
                         )
                         if call_sid:
-                            call_store.merge_session(
+                            runtime.call_store.merge_session(
                                 call_sid, {"awaiting_caller_reply": True}
                             )
                 except Exception as e:

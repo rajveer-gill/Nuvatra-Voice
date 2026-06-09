@@ -73,3 +73,11 @@ def _ensure_openai_client():
         _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         print("[OK] OpenAI client created successfully")
 
+
+# Per-call session store (Redis when REDIS_URL set, else in-memory) — a stable
+# singleton created once at import. Shared by main's phone routes and voice_service's
+# call-session helpers; always read as runtime.call_store so both see the same store.
+from voice.call_session_store import get_call_session_store as _get_call_session_store
+
+call_store = _get_call_session_store()
+
