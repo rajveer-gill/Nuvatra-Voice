@@ -101,6 +101,17 @@ connection follow the *request context*, not the thread:
 This is the **highest-blast-radius change in the codebase** (every endpoint's DB
 access). Do NOT rush it — it requires the load test below.
 
+**Caveat discovered (read before implementing):** a ContextVar correctly follows
+*async* tasks, but `run_in_threadpool` (used for sync `def` handlers) runs in a
+*copied* context — mutations there do NOT propagate back to the caller, so an outer
+(middleware) release won't see a connection acquired inside the threadpool. So the
+connection must be **acquired AND released within the same execution unit** (e.g. a
+single dependency whose setup and teardown both run in-context, or the handler
+itself), not split across a copied-context boundary. If that proves fiddly, the
+clean answer is **asyncpg + an async pool** (connection naturally bound to the async
+task; no thread games). Decide async-driver vs contextvar at the start of step 3 —
+the reproduction test (step 2) is the correctness gate either way.
+
 ## Local validation runbook (ready now)
 
 - Throwaway Postgres: `docker run -d --name csurge-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=postgres -p 5432:5432 postgres:16`
