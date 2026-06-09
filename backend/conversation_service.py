@@ -10,18 +10,31 @@ main and calls these via re-export. Cross-module helpers are module-qualified
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import quote
 from typing import List, Optional
 
 import booking_service
+import caller_memory
 import config_service
 import database
 import runtime
 import sms_service
-from observability import system_info
+import voice_service
+from observability import (
+    name_initial_for_log,
+    sms_info,
+    system_info,
+    voice_call_phase,
+    voice_debug,
+    voice_forward,
+    voice_info,
+    voice_warning,
+)
 from booking_fields import (
     assistant_asked_service_recently,
     booking_context_from_business,
@@ -749,3 +762,447 @@ def get_system_prompt(
     if after_hours:
         prompt = f"{prompt}\n\n{after_hours}"
     return prompt
+
+
+# ===== AI conversation turn (the voice/SMS response generator) =====
+
+
+async def generate_response_async(
+    call_sid: str, call_data: dict, detected_lang: str, base_url: str
+):
+    """
+    Background task to generate GPT response and TTS audio.
+    Updates runtime.call_store.response_status when ready.
+    """
+    try:
+        # Keep tenant context so SMS and DB use correct client_id (async runs outside request)
+        database.set_request_client_id(call_data.get("client_id") or database._client_id())
+        fn_refresh = (call_data.get("from_number") or "").strip()
+        if fn_refresh:
+            call_data["caller_memory"] = caller_memory.refresh_caller_memory_for_prompt(
+                fn_refresh, call_data.get("client_id")
+            )
+        voice_info(
+            "generate_response_start",
+            call_sid=call_sid,
+            from_number=call_data.get("from_number") or None,
+            client_id=call_data.get("client_id") or None,
+        )
+
+        # Always include booked slots (skip cache so prompt and is_slot_available see same data—avoids "available" then "booked")
+        messages = [
+            {
+                "role": "system",
+                "content": get_system_prompt(
+                    detected_lang,
+                    call_data.get("caller_memory"),
+                    include_booked_slots=True,
+                    skip_slots_cache=True,
+                ),
+            }
+        ]
+        messages.extend(call_data["conversation_history"])
+        nudge = _voice_booking_nudge_message(call_data["conversation_history"])
+        if nudge:
+            messages.append({"role": "system", "content": nudge})
+            voice_info(
+                "voice_booking_nudge_injected",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                user_turns=_count_booking_user_turns(call_data["conversation_history"]),
+            )
+
+        ai_response = runtime.client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            temperature=0.8,
+            max_tokens=200,
+            stream=False,
+        )
+
+        ai_text = ai_response.choices[0].message.content
+        voice_debug("gpt_reply", call_sid=call_sid, reply_preview=(ai_text or "")[:80])
+        booking = parse_booking(ai_text)
+        if booking:
+            booking, repairs, reject = _prepare_parsed_booking(
+                booking,
+                caller_memory=call_data.get("caller_memory"),
+            )
+            if reject:
+                system_info(
+                    "voice_booking_line_rejected",
+                    call_sid=call_sid,
+                    reason=reject,
+                    repairs=repairs or None,
+                )
+                booking = None
+            elif repairs:
+                system_info(
+                    "voice_booking_line_repaired",
+                    call_sid=call_sid,
+                    repairs=repairs,
+                )
+        if not booking and _should_attempt_voice_booking_extraction(
+            call_data.get("conversation_history"), ai_text or ""
+        ):
+            extracted = await asyncio.to_thread(
+                _extract_booking_line_from_conversation,
+                call_data.get("conversation_history") or [],
+                caller_memory=call_data.get("caller_memory"),
+            )
+            if extracted:
+                booking = extracted
+                voice_info(
+                    "voice_booking_extracted_retry",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                )
+        # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
+        if booking:
+            fail_msg = None
+            if not config_service.staff_roster_ready_for_booking():
+                ai_text = (
+                    "I'm not able to book appointments until the business adds team members to their roster online. "
+                    "Let me connect you with the store."
+                )
+            else:
+                try:
+                    from_num = call_data.get("from_number") or ""
+                    to_num = call_data.get("to_number") or ""
+                    cid_raw = call_data.get("client_id") or ""
+                    from observability import name_initial_for_log
+
+                    system_info(
+                        "voice_booking_line_parsed",
+                        name_initial=name_initial_for_log(booking.get("name")),
+                        date=booking.get("date"),
+                        time=booking.get("time"),
+                        from_number=from_num or None,
+                        to_number=to_num or None,
+                        client_id=cid_raw or None,
+                    )
+                    # Use caller's phone from Twilio when available (don't require asking)
+                    if from_num:
+                        booking["phone"] = (
+                            booking.get("phone") or ""
+                        ).strip() or from_num
+                    cid = (call_data.get("client_id") or "").strip() or None
+                    ok_booking, fail_msg, _, canonical_service = (
+                        _validate_booking_requirements(
+                            booking,
+                            conversation_history=call_data.get("conversation_history"),
+                        )
+                    )
+                    if not ok_booking:
+                        ai_text = (
+                            fail_msg
+                            or "I need your stylist and service before I can book that."
+                        )
+                        apt = None
+                    else:
+                        if canonical_service:
+                            booking["reason"] = canonical_service
+                        apt = _create_appointment_from_booking(
+                            booking,
+                            client_id_override=cid,
+                            reserve_slot_immediately=False,
+                            caller_memory=call_data.get("caller_memory"),
+                        )
+                    if apt:
+                        call_data["appointment_created"] = True
+                        if not (apt.get("phone") or "").strip() and call_data.get(
+                            "from_number"
+                        ):
+                            apt["phone"] = call_data["from_number"]
+                            if runtime.USE_DB and apt.get("id"):
+                                try:
+                                    database.db_appointments_update(
+                                        apt["id"], phone=apt["phone"]
+                                    )
+                                except Exception:
+                                    pass
+                        thanks_msg = booking_service._format_appointment_details_confirmation_sms(apt)
+                        to_number_sms = (
+                            (call_data.get("from_number") or "").strip()
+                            or (apt.get("phone") or "").strip()
+                            or ""
+                        )
+                        from_number_sms = (
+                            call_data.get("to_number") or ""
+                        ).strip() or None
+                        if not from_number_sms and cid and runtime.USE_DB:
+                            tenant_row = database.db_tenant_get_by_client_id(cid)
+                            if tenant_row:
+                                from_number_sms = (
+                                    tenant_row.get("twilio_phone_number") or ""
+                                ).strip()
+                                sms_info(
+                                    "confirmation_sms_from_tenant_lookup", client_id=cid
+                                )
+                            else:
+                                sms_info(
+                                    "confirmation_sms_tenant_missing_for_from_override",
+                                    client_id=cid,
+                                )
+                        if not from_number_sms:
+                            from_number_sms = booking_service._tenant_sms_from_number()
+                        sms_info(
+                            "post_booking_confirmation_dispatch",
+                            client_id=cid,
+                            to_set=bool(to_number_sms),
+                            from_set=bool(from_number_sms),
+                        )
+                        if to_number_sms:
+                            ok = sms_service.send_sms(
+                                to_number_sms,
+                                thanks_msg,
+                                from_override=from_number_sms or None,
+                            )
+                            sms_info(
+                                "post_booking_confirmation_sms",
+                                client_id=cid,
+                                to_number=to_number_sms,
+                                from_number=from_number_sms,
+                                success=ok,
+                            )
+                            if ok:
+                                if runtime.USE_DB and cid and apt.get("id"):
+                                    try:
+                                        database.db_sms_session_upsert(
+                                            to_number_sms,
+                                            cid,
+                                            [
+                                                {
+                                                    "role": "assistant",
+                                                    "content": (
+                                                        "Appointment details sent by text. "
+                                                        "Reply YES or CONFIRM when everything looks right."
+                                                    ),
+                                                }
+                                            ],
+                                            int(apt["id"]),
+                                        )
+                                        sms_info(
+                                            "post_booking_sms_session_linked",
+                                            client_id=cid,
+                                            apt_id=apt.get("id"),
+                                        )
+                                    except Exception as sess_err:
+                                        logger.warning(
+                                            "post_booking_sms_session_link_failed apt_id=%s: %s",
+                                            apt.get("id"),
+                                            sess_err,
+                                            exc_info=True,
+                                        )
+                                ai_text = (
+                                    "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
+                                    "The time is not finalized until you confirm by text."
+                                )
+                            else:
+                                ai_text = "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
+                        else:
+                            sms_info(
+                                "post_booking_confirmation_skipped",
+                                reason="no_caller_phone",
+                                client_id=cid,
+                            )
+                            ai_text = "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
+                        fn_mem = (call_data.get("from_number") or "").strip()
+                        if fn_mem:
+                            dp = {
+                                "last_voice_booking_date": apt.get("date"),
+                                "last_voice_booking_time": apt.get("time"),
+                                "last_service": (
+                                    (apt.get("reason") or "").strip()[:120] or None
+                                ),
+                            }
+                            em_patch = (apt.get("email") or "").strip()
+                            if em_patch:
+                                dp["email_on_file"] = em_patch
+                            dp = {k: v for k, v in dp.items() if v}
+                            try:
+                                caller_memory.update_caller_memory(
+                                    fn_mem,
+                                    name=(apt.get("name") or "").strip() or None,
+                                    last_reason="appointment details texted (pending SMS confirmation)",
+                                    increment_count=False,
+                                    data_patch=dp if dp else None,
+                                )
+                                if call_sid:
+                                    voice_service._merge_call_session(
+                                        call_sid,
+                                        {
+                                            "caller_memory": caller_memory.get_caller_memory(
+                                                fn_mem
+                                            )
+                                        },
+                                    )
+                            except Exception:
+                                pass
+                    else:
+                        ctx = booking_context_from_business(config_service.get_business_info())
+                        name_ok = bool((booking.get("name") or "").strip())
+                        date_ok = is_valid_booking_date(booking.get("date"))
+                        time_ok = looks_like_booking_time(booking.get("time"), ctx)
+                        if fail_msg:
+                            reason = "missing_required_booking_fields"
+                        else:
+                            reason = (
+                                "slot_taken"
+                                if (name_ok and date_ok and time_ok)
+                                else ("no_name" if not name_ok else "no_date_time")
+                            )
+                        system_info(
+                            "voice_booking_not_created",
+                            reason=reason,
+                            name_ok=name_ok,
+                            date_ok=date_ok,
+                            time_ok=time_ok,
+                        )
+                        if fail_msg:
+                            ai_text = fail_msg
+                        elif not name_ok:
+                            ai_text = "I'd love to book that for you—what's your name?"
+                        elif not date_ok or not time_ok:
+                            ai_text = "I need the date and time again to confirm—which day and time would you like?"
+                        else:
+                            ai_text = "That time slot just got booked. Would you like to try another time or another day?"
+                except Exception as e:
+                    logger.exception(
+                        "voice_booking_or_sms_failed call_sid=%s: %s", call_sid, e
+                    )
+                    ai_text = "We've got your request. If you don't get a confirmation text in a moment, please call back—we'll have your details."
+        elif _conversation_suggests_booking(call_data.get("conversation_history")):
+            user_turns = _count_booking_user_turns(
+                call_data.get("conversation_history")
+            )
+            if user_turns >= 2:
+                system_info(
+                    "voice_booking_intent_no_marker",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                    user_turns=user_turns,
+                    reply_len=len(ai_text or ""),
+                )
+            call_data["booking_intent"] = True
+
+        if (
+            not booking
+            and not call_data.get("appointment_created")
+            and _ai_implies_committed_booking(ai_text or "")
+        ):
+            system_info(
+                "voice_booking_false_verbal_confirm",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+            )
+            ai_text = (
+                "I'm still putting your visit together—I haven't locked in the time yet. "
+                "Let me confirm the details with you first, then I'll text you to confirm."
+            )
+
+        # Never send BOOKING: machine line to TTS or conversation history
+        ai_text = _strip_booking_directive_for_voice(ai_text or "")
+        if not ai_text:
+            ai_text = "Thanks—we've noted that. Let us know if you need anything else."
+
+        # Add AI response to conversation
+        ai_message = {"role": "assistant", "content": ai_text}
+        call_data["conversation_history"].append(ai_message)
+        voice_service._persist_call_session(call_sid, call_data)
+
+        # Pro: Staff transfer - AI may respond with TRANSFER_TO: Name
+        transfer_name = voice_service.parse_transfer_to(ai_text)
+        if transfer_name:
+            staff_phone = config_service.get_staff_phone_by_name(transfer_name)
+            if staff_phone:
+                voice_forward(
+                    "staff_transfer_by_name",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                    forward_kind="staff_named",
+                    staff_name=transfer_name,
+                )
+                call_data["outcome"] = "forwarded"
+                voice_service.call_log_set_outcome(call_sid, "forwarded")
+                runtime.call_store.response_status[call_sid] = {
+                    "status": "forward",
+                    "audio_url": None,
+                    "ai_text": ai_text,
+                    "forwarding_phone": staff_phone,
+                }
+                return
+            voice_warning(
+                "staff_transfer_name_not_found",
+                call_sid=call_sid,
+                client_id_prefix=str(call_data.get("client_id") or "")[:12],
+                staff_name=transfer_name[:80],
+            )
+
+        # Check if user wants to talk to a real person - forward if needed
+        if voice_service.should_forward_to_human(
+            "",
+            ai_text,
+            call_sid=call_sid,
+            client_id=str(call_data.get("client_id") or ""),
+        ):
+            forwarding_phone = config_service.get_business_info().get("forwarding_phone")
+            if forwarding_phone:
+                voice_forward(
+                    "ai_transfer_intent_in_reply",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                    forward_kind="fallback",
+                    has_fallback_configured=True,
+                )
+                call_data["outcome"] = "forwarded"
+                voice_service.call_log_set_outcome(call_sid, "forwarded")
+                runtime.call_store.response_status[call_sid] = {
+                    "status": "forward",
+                    "audio_url": None,
+                    "ai_text": ai_text,
+                    "forwarding_phone": forwarding_phone,
+                }
+                return
+
+        # Generate TTS audio URL
+        ai_text_encoded = quote(ai_text)
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={config_service.get_tts_voice()}"
+
+        # Mark as ready
+        runtime.call_store.response_status[call_sid] = {
+            "status": "ready",
+            "audio_url": tts_audio_url,
+            "ai_text": ai_text,
+        }
+        voice_call_phase(
+            "gpt_response_ready",
+            call_sid=call_sid,
+            client_id=str(call_data.get("client_id") or ""),
+            reply_len=len(ai_text or ""),
+        )
+
+    except Exception as e:
+        voice_warning(
+            "gpt_response_failed",
+            call_sid=call_sid,
+            client_id_prefix=str(call_data.get("client_id") or "")[:12],
+            error_type=type(e).__name__,
+        )
+        logger.exception("generate_response_async failed call_sid=%s", call_sid)
+        # Graceful fallback: play fallback message so caller does not get dead air
+        fallback_encoded = quote(voice_service.TTS_FALLBACK_TEXT)
+        fallback_tts_url = f"{base_url}/api/phone/tts-audio?text={fallback_encoded}&voice={config_service.get_tts_voice()}"
+        runtime.call_store.response_status[call_sid] = {
+            "status": "ready",
+            "audio_url": fallback_tts_url,
+            "ai_text": voice_service.TTS_FALLBACK_TEXT,
+            "error": type(e).__name__,
+        }
+        voice_info(
+            "gpt_response_fallback_tts",
+            call_sid=call_sid,
+            client_id_prefix=str(call_data.get("client_id") or "")[:12],
+        )
+    finally:
+        voice_service._persist_call_session(call_sid, call_data)

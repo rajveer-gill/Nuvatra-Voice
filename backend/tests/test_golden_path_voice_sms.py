@@ -4,15 +4,19 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import main
+import database
+import conversation_service
+import config_service
+import sms_service
 
 
 def test_generate_response_async_links_sms_session_on_booking(monkeypatch):
     """Happy path: BOOKING line creates appointment and links SMS session."""
     linked = []
     monkeypatch.setattr("runtime.USE_DB", True)
-    monkeypatch.setattr(main, "staff_roster_ready_for_booking", lambda info=None: True)
+    monkeypatch.setattr(config_service, "staff_roster_ready_for_booking", lambda info=None: True)
     monkeypatch.setattr(
-        main,
+        conversation_service,
         "_create_appointment_from_booking",
         lambda booking, client_id_override=None, reserve_slot_immediately=True, **kwargs: {
             "id": 99,
@@ -23,9 +27,9 @@ def test_generate_response_async_links_sms_session_on_booking(monkeypatch):
             "status": "pending_customer",
         },
     )
-    monkeypatch.setattr(main, "send_sms", lambda *a, **k: True)
+    monkeypatch.setattr(sms_service, "send_sms", lambda *a, **k: True)
     monkeypatch.setattr(
-        main,
+        database,
         "db_sms_session_upsert",
         lambda phone, cid, messages, appointment_id=None: linked.append(appointment_id),
     )
