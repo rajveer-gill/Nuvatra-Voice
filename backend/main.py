@@ -5844,6 +5844,11 @@ async def handle_incoming_call(request: Request):
 
         return Response(content=str(response), media_type="application/xml")
 
+    except HTTPException:
+        # Intentional HTTP responses (e.g. 403 invalid-signature) must propagate —
+        # the catch-all below would otherwise swallow them into a 200 fallback TwiML,
+        # defeating the webhook signature gate.
+        raise
     except Exception as e:
         voice_warning(
             "incoming_call_failed",
