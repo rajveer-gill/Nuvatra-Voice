@@ -5,6 +5,8 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import main
+import database
+import booking_service
 
 
 def test_supersede_cancels_pending_customer_same_slot():
@@ -21,10 +23,10 @@ def test_supersede_cancels_pending_customer_same_slot():
     updated = []
 
     with patch("runtime.USE_DB", True), patch.object(
-        main, "_appointment_rows_for_calendar_merge", return_value=rows
-    ), patch.object(main, "db_appointments_update", side_effect=lambda aid, **kw: updated.append((aid, kw))), patch.object(
-        main, "release_slot"
-    ), patch.object(main, "get_db_client_id", return_value="test"):
+        booking_service, "_appointment_rows_for_calendar_merge", return_value=rows
+    ), patch.object(database, "db_appointments_update", side_effect=lambda aid, **kw: updated.append((aid, kw))), patch.object(
+        booking_service, "release_slot"
+    ), patch.object(database, "_client_id", return_value="test"):
         n = main._supersede_pending_customer_drafts_for_slot(
             "2026-06-01",
             "14:00",
@@ -51,10 +53,10 @@ def test_supersede_cancels_pending_review_receptionist_same_caller():
     ]
     updated = []
     with patch("runtime.USE_DB", True), patch.object(
-        main, "_appointment_rows_for_calendar_merge", return_value=rows
-    ), patch.object(main, "db_appointments_update", side_effect=lambda aid, **kw: updated.append((aid, kw))), patch.object(
-        main, "release_slot"
-    ), patch.object(main, "get_db_client_id", return_value="test"):
+        booking_service, "_appointment_rows_for_calendar_merge", return_value=rows
+    ), patch.object(database, "db_appointments_update", side_effect=lambda aid, **kw: updated.append((aid, kw))), patch.object(
+        booking_service, "release_slot"
+    ), patch.object(database, "_client_id", return_value="test"):
         n = main._supersede_pending_customer_drafts_for_slot(
             "2026-06-01",
             "14:00",
@@ -79,8 +81,8 @@ def test_supersede_skips_manual_pending_review():
         }
     ]
     with patch("runtime.USE_DB", True), patch.object(
-        main, "_appointment_rows_for_calendar_merge", return_value=rows
-    ), patch.object(main, "db_appointments_update") as upd:
+        booking_service, "_appointment_rows_for_calendar_merge", return_value=rows
+    ), patch.object(database, "db_appointments_update") as upd:
         n = main._supersede_pending_customer_drafts_for_slot(
             "2026-06-01",
             "14:00",

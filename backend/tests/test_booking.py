@@ -87,7 +87,7 @@ def test_strip_booking_directive_for_voice():
 
 def test_validate_booking_requires_stylist_when_staff_configured(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "s1", "name": "Mia"}],
             "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
@@ -104,7 +104,7 @@ def test_validate_booking_requires_stylist_when_staff_configured(monkeypatch):
 
 def test_validate_booking_requires_known_service_when_services_configured(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "s1", "name": "Mia"}],
             "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
@@ -121,7 +121,7 @@ def test_validate_booking_requires_known_service_when_services_configured(monkey
 
 def test_validate_booking_normalizes_service_name(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "s1", "name": "Mia"}],
             "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
@@ -139,7 +139,7 @@ def test_validate_booking_normalizes_service_name(monkeypatch):
 
 def test_validate_booking_rejects_auto_stylist_without_caller_choice(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
             "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
@@ -159,7 +159,7 @@ def test_validate_booking_accepts_stylist_when_caller_named_one(monkeypatch):
         "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
         "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
     }
-    monkeypatch.setattr("main.get_business_info", lambda: biz)
+    monkeypatch.setattr("config_service.get_business_info", lambda: biz)
     history = [
         {"role": "user", "content": "Book a haircut with B tomorrow at 2pm, I'm Sam"},
     ]
@@ -174,7 +174,7 @@ def test_validate_booking_accepts_stylist_when_caller_named_one(monkeypatch):
 
 def test_validate_booking_accepts_any_stylist_phrase(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
             "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
@@ -203,7 +203,7 @@ def test_voice_booking_nudge_after_three_turns():
 
 def test_voice_booking_nudge_prioritizes_stylist_before_service(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
             "services": [{"id": "svc1", "name": "Short Cut", "price": 20, "duration_minutes": 30}],
@@ -225,7 +225,7 @@ def test_voice_booking_nudge_prioritizes_stylist_before_service(monkeypatch):
 
 def test_voice_booking_nudge_stylist_at_two_turns(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "s1", "name": "A"}, {"id": "s2", "name": "B"}],
             "services": [{"id": "svc1", "name": "Short Cut", "price": 20, "duration_minutes": 30}],
@@ -251,7 +251,7 @@ def test_ai_implies_committed_booking_detects_false_confirm():
 
 def test_should_attempt_voice_booking_extraction_on_scheduled_wording(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "j1", "name": "Jake"}],
             "services": [{"id": "s1", "name": "Long Cut"}],
@@ -271,7 +271,7 @@ def test_validate_booking_does_not_repeat_service_when_user_answered(monkeypatch
         "staff": [{"id": "j1", "name": "Jake"}],
         "services": [{"id": "s1", "name": "Long Cut", "price": 45, "duration_minutes": 45}],
     }
-    monkeypatch.setattr("main.get_business_info", lambda: biz)
+    monkeypatch.setattr("config_service.get_business_info", lambda: biz)
     history = [
         {"role": "user", "content": "Book with Jake tomorrow at 3"},
         {"role": "assistant", "content": "Which service would you like with Jake? Short Cut or Long Cut."},
@@ -308,7 +308,7 @@ def test_extract_booking_rejects_misaligned_time(monkeypatch):
 
     monkeypatch.setattr("main.client.chat.completions.create", fake_create)
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "j1", "name": "Jake"}],
             "services": [{"id": "s1", "name": "Long Cut"}],
@@ -339,7 +339,7 @@ def test_extract_booking_line_from_conversation(monkeypatch):
 
     monkeypatch.setattr("main.client.chat.completions.create", fake_create)
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {
             "staff": [{"id": "j1", "name": "Jake"}],
             "services": [{"id": "s1", "name": "Long Cut"}],
@@ -361,7 +361,7 @@ def test_extract_booking_line_from_conversation(monkeypatch):
 
 def test_apply_booking_customer_name_replaces_stylist_with_memory(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {"staff": [{"id": "s1", "name": "Tom"}]},
     )
     booking = {"name": "Tom", "staff": "Tom"}
@@ -371,7 +371,7 @@ def test_apply_booking_customer_name_replaces_stylist_with_memory(monkeypatch):
 
 def test_apply_booking_customer_name_clears_stylist_without_memory(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {"staff": [{"id": "s1", "name": "Tom"}]},
     )
     booking = {"name": "Tom", "staff": "Tom"}
@@ -411,7 +411,7 @@ def test_validate_booking_rejects_same_day_after_hours(monkeypatch):
         "services": [{"id": "s1", "name": "Haircut"}],
         "staff": [{"id": "j1", "name": "Jake"}],
     }
-    monkeypatch.setattr("main.get_business_info", lambda: biz)
+    monkeypatch.setattr("config_service.get_business_info", lambda: biz)
     fixed = datetime(2026, 6, 4, 18, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
     monkeypatch.setattr(
         "business_hours.business_local_now", lambda info, now=None: fixed

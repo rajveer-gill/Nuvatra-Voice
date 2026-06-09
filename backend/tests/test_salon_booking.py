@@ -1,3 +1,5 @@
+import runtime
+import config_service
 """Tests for salon/chair booking helpers: parse_booking, normalization, preview decline, polish."""
 from unittest.mock import MagicMock, patch
 
@@ -49,7 +51,7 @@ def test_normalize_rules_caps_count():
 
 
 def test_polish_owner_decline_sms_fallback_on_openai_error():
-    with patch("main.client") as mock_client:
+    with patch("runtime.client") as mock_client:
         mock_client.chat.completions.create.side_effect = RuntimeError("no network")
         out = polish_owner_decline_sms(
             "We're booked at 2pm",
@@ -73,7 +75,7 @@ def test_preview_decline_sms_returns_polished_message(client):
     mock_resp = MagicMock()
     mock_resp.choices = [MagicMock(message=MagicMock(content="Hi — we can't do 2pm. Want 4pm?"))]
     try:
-        with patch("main.client") as mock_client:
+        with patch("runtime.client") as mock_client:
             mock_client.chat.completions.create.return_value = mock_resp
             resp = client.post(
                 "/api/appointments/preview-decline-sms",
