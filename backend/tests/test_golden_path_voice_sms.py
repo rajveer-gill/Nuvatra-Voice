@@ -4,6 +4,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import main
+from routers import phone as phone_router
 import database
 import conversation_service
 import config_service
@@ -65,7 +66,7 @@ def test_incoming_call_resolves_tenant_by_to_number(monkeypatch):
     """Contract: incoming handler uses db_tenant_get_by_phone for tenant resolution."""
     import inspect
 
-    source = inspect.getsource(main.handle_incoming_call)
+    source = inspect.getsource(phone_router.handle_incoming_call)
     assert "db_tenant_get_by_phone" in source
     assert "tenant_resolved_by_to_number" in source or "tenant_not_resolved" in source
 

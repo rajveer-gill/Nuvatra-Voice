@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+import deps
 from auth import verify_clerk_token
 
 
@@ -40,7 +41,7 @@ def test_call_runtime_cleanup_clears_response_status():
 
 
 def test_phone_status_rejects_invalid_signature(monkeypatch):
-    monkeypatch.setattr(main, "_validate_twilio_webhook", lambda req, data: False)
+    monkeypatch.setattr(deps, "_validate_twilio_webhook", lambda req, data: False)
     client = TestClient(main.app)
     resp = client.post("/api/phone/status", data={"CallSid": "CAx", "CallStatus": "completed"})
     assert resp.status_code == 403

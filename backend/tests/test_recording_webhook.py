@@ -1,5 +1,8 @@
 """Tests for Twilio recording-complete webhook and authenticated recording playback."""
 import pytest
+import voice_service
+import deps
+import database
 from fastapi.testclient import TestClient
 
 from main import app
@@ -16,11 +19,11 @@ def _tenant_pro():
 
 
 def test_recording_complete_persists_and_returns_200(client, monkeypatch):
-    monkeypatch.setattr("main._validate_twilio_webhook", lambda req, d: True)
+    monkeypatch.setattr("deps._validate_twilio_webhook", lambda req, d: True)
     monkeypatch.setenv("CALL_SUMMARY_ENABLED", "false")
     monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main.active_calls", {})
-    monkeypatch.setattr("main._call_recording_enabled_for_tenant", lambda tenant: True)
+    monkeypatch.setattr("voice_service._call_recording_enabled_for_tenant", lambda tenant: True)
 
     updates = []
 
@@ -28,8 +31,8 @@ def test_recording_complete_persists_and_returns_200(client, monkeypatch):
         updates.append({"call_sid": call_sid, "client_id": client_id, **kw})
         return True
 
-    monkeypatch.setattr("main.db_call_log_update_recording", fake_upsert)
-    monkeypatch.setattr("main.db_call_log_get_client_id_by_call_sid", lambda sid: "test-spa")
+    monkeypatch.setattr("database.db_call_log_update_recording", fake_upsert)
+    monkeypatch.setattr("database.db_call_log_get_client_id_by_call_sid", lambda sid: "test-spa")
 
     resp = client.post(
         "/api/phone/recording-complete",
@@ -51,7 +54,7 @@ def test_recording_complete_persists_and_returns_200(client, monkeypatch):
 
 
 def test_recording_complete_invalid_signature_403(client, monkeypatch):
-    monkeypatch.setattr("main._validate_twilio_webhook", lambda req, d: False)
+    monkeypatch.setattr("deps._validate_twilio_webhook", lambda req, d: False)
     resp = client.post(
         "/api/phone/recording-complete",
         data={"CallSid": "CAx", "RecordingStatus": "completed"},
@@ -66,7 +69,7 @@ def test_recording_playback_404_when_no_row(client, monkeypatch):
     monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr("main.TWILIO_ACCOUNT_SID", "ACxxx")
     monkeypatch.setattr("main.TWILIO_AUTH_TOKEN", "token")
-    monkeypatch.setattr("main.db_call_log_get_by_call_sid", lambda cid, sid: None)
+    monkeypatch.setattr("database.db_call_log_get_by_call_sid", lambda cid, sid: None)
     try:
         resp = client.get("/api/analytics/calls/CAnotfound/recording")
         assert resp.status_code == 404
@@ -82,7 +85,7 @@ def test_recording_playback_404_when_no_recording_url(client, monkeypatch):
     monkeypatch.setattr("main.TWILIO_ACCOUNT_SID", "ACxxx")
     monkeypatch.setattr("main.TWILIO_AUTH_TOKEN", "token")
     monkeypatch.setattr(
-        "main.db_call_log_get_by_call_sid",
+        "database.db_call_log_get_by_call_sid",
         lambda cid, sid: {"call_sid": sid, "recording_url": None, "client_id": cid},
     )
     try:

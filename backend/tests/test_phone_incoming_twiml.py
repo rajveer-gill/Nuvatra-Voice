@@ -1,6 +1,8 @@
 """Regression: inbound TwiML must nest greeting <Play> inside <Gather> for reliable audio."""
 
 import os
+import deps
+import config_service
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,9 +16,9 @@ def phone_client(monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://voice.example.test")
     import main
 
-    monkeypatch.setattr(main, "_validate_twilio_webhook", lambda _r, _d: True)
+    monkeypatch.setattr(deps, "_validate_twilio_webhook", lambda _r, _d: True)
     monkeypatch.setattr("runtime.USE_DB", False)
-    monkeypatch.setattr(main, "voice_receptionist_ready", lambda info=None: True)
+    monkeypatch.setattr(config_service, "voice_receptionist_ready", lambda info=None: True)
     return TestClient(main.app)
 
 

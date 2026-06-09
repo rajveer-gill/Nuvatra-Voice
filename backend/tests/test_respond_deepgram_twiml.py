@@ -1,6 +1,9 @@
 """Contract: respond_with_audio uses Connect+Stream for Latin follow-up turns when Deepgram STT is active."""
 
 import pytest
+import voice_service
+import deps
+import config_service
 from fastapi.testclient import TestClient
 
 
@@ -14,9 +17,9 @@ def deepgram_respond_client(monkeypatch):
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     import main
 
-    monkeypatch.setattr(main, "_voice_stt_use_deepgram", lambda: True)
+    monkeypatch.setattr(voice_service, "_voice_stt_use_deepgram", lambda: True)
     monkeypatch.setattr("runtime.twilio_client", object(), raising=False)
-    monkeypatch.setattr(main, "_validate_twilio_webhook", lambda _r, _d: True)
+    monkeypatch.setattr(deps, "_validate_twilio_webhook", lambda _r, _d: True)
     return TestClient(main.app)
 
 
@@ -35,8 +38,8 @@ def test_respond_ready_twiml_uses_deepgram_streams_not_gather(deepgram_respond_c
         "status": "ready",
         "audio_url": "https://voice.example.test/api/phone/tts-audio?text=hi",
     }
-    monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
-    monkeypatch.setattr(main, "get_business_info", lambda: {"forwarding_phone": ""})
+    monkeypatch.setattr(config_service, "get_tts_voice", lambda: "fable")
+    monkeypatch.setattr(config_service, "get_business_info", lambda: {"forwarding_phone": ""})
 
     resp = deepgram_respond_client.post(
         "/api/phone/respond",
@@ -67,8 +70,8 @@ def test_respond_ready_twiml_handles_null_detected_language(deepgram_respond_cli
         "status": "ready",
         "audio_url": "https://voice.example.test/api/phone/tts-audio?text=hi",
     }
-    monkeypatch.setattr(main, "get_tts_voice", lambda: "fable")
-    monkeypatch.setattr(main, "get_business_info", lambda: {"forwarding_phone": ""})
+    monkeypatch.setattr(config_service, "get_tts_voice", lambda: "fable")
+    monkeypatch.setattr(config_service, "get_business_info", lambda: {"forwarding_phone": ""})
 
     resp = deepgram_respond_client.post(
         "/api/phone/respond",

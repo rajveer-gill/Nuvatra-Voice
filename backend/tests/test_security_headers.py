@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+import deps
 from fastapi import Response
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -74,7 +75,7 @@ def test_cors_preflight_includes_security_headers():
 
 
 def test_twilio_status_403_includes_security_headers(monkeypatch):
-    monkeypatch.setattr("main._validate_twilio_webhook", lambda req, data: False)
+    monkeypatch.setattr("deps._validate_twilio_webhook", lambda req, data: False)
     client = TestClient(app)
     resp = client.post("/api/phone/status", data={"CallSid": "CAx", "CallStatus": "completed"})
     assert resp.status_code == 403

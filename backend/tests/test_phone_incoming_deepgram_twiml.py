@@ -1,6 +1,9 @@
 """Contract: inbound TwiML uses Connect+Stream when Deepgram STT is active."""
 
 import pytest
+import voice_service
+import deps
+import config_service
 import runtime
 from fastapi.testclient import TestClient
 
@@ -16,11 +19,11 @@ def deepgram_phone_client(monkeypatch):
     monkeypatch.setenv("MEDIA_STREAM_SIGNING_SECRET", "unit-test-media-hmac")
     import main
 
-    monkeypatch.setattr(main, "_voice_stt_use_deepgram", lambda: True)
+    monkeypatch.setattr(voice_service, "_voice_stt_use_deepgram", lambda: True)
     monkeypatch.setattr("runtime.twilio_client", object(), raising=False)
-    monkeypatch.setattr(main, "_validate_twilio_webhook", lambda _r, _d: True)
+    monkeypatch.setattr(deps, "_validate_twilio_webhook", lambda _r, _d: True)
     monkeypatch.setattr("runtime.USE_DB", False)
-    monkeypatch.setattr(main, "voice_receptionist_ready", lambda info=None: True)
+    monkeypatch.setattr(config_service, "voice_receptionist_ready", lambda info=None: True)
     return TestClient(main.app)
 
 
