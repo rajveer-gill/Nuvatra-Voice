@@ -436,3 +436,14 @@ def get_tts_speed() -> float:
         return max(0.25, min(4.0, s))
     except (TypeError, ValueError):
         return 1.0
+
+
+def get_client_data_dir() -> Optional[Path]:
+    """Path to the client data directory (call_log, caller_memory on local/file mode).
+    None when there's no real client_id."""
+    cid = database._client_id()
+    if not cid or cid == "default":
+        return None
+    d = PROJECT_ROOT / "clients" / cid
+    d.mkdir(parents=True, exist_ok=True)
+    return d

@@ -955,6 +955,7 @@ from config_service import (  # noqa: E402,F401
     get_business_info,
     get_tts_voice,
     get_tts_speed,
+    get_client_data_dir,
 )
 
 
@@ -1481,14 +1482,6 @@ def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
     )
 
 
-def get_client_data_dir() -> Optional[Path]:
-    """Return Path to client data directory (for call_log, caller_memory). None if no client_id."""
-    cid = get_db_client_id()
-    if not cid or cid == "default":
-        return None
-    d = PROJECT_ROOT / "clients" / cid
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 def normalize_phone(phone: str) -> str:
