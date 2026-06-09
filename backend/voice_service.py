@@ -16,7 +16,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import Request
 
@@ -24,7 +24,7 @@ import config_service
 import database
 import runtime
 import deps
-from observability import voice_info, voice_trace, voice_warning
+from observability import mask_phone, voice_forward, voice_info, voice_trace, voice_warning
 from security.redaction import mask_phone_e164
 from voice_preview import add_sentence_pauses
 from voice.call_session_store import MemoryCallSessionStore
@@ -36,8 +36,10 @@ except ImportError:  # pragma: no cover
 
 try:
     from twilio.request_validator import RequestValidator as _RequestValidator  # noqa: F401
+    from twilio.twiml.voice_response import VoiceResponse
     TWILIO_AVAILABLE = True
 except ImportError:  # pragma: no cover
+    VoiceResponse = None  # type: ignore
     TWILIO_AVAILABLE = False
 
 logger = logging.getLogger("nuvatra")
@@ -817,3 +819,339 @@ async def _schedule_recording_summary(
         )
     except Exception:
         logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
+
+
+# ===== voice call flow: TwiML handoffs, forwarding, language detection (cut 7) =====
+
+
+def setup_transfers_to_store_after_message(info: Optional[dict] = None) -> bool:
+    """
+    True when inbound calls should play the setup message then dial the store:
+    store phone is set but the team roster is not ready yet.
+    """
+    data = info if info is not None else config_service.get_business_info()
+    return config_service.forwarding_phone_ready(data) and not config_service.staff_roster_ready_for_booking(data)
+
+
+def setup_not_ready_call_message(info: Optional[dict] = None) -> str:
+    """Spoken when the AI receptionist is not fully configured (before optional store transfer)."""
+    data = info if info is not None else config_service.get_business_info()
+    roster_ok = config_service.staff_roster_ready_for_booking(data)
+    phone_ok = config_service.forwarding_phone_ready(data)
+    if not roster_ok and phone_ok:
+        return (
+            "Sorry, your AI receptionist cannot work until the owner adds team members "
+            "to their roster online. I will transfer you to the store now."
+        )
+    if not roster_ok and not phone_ok:
+        return (
+            "Sorry, I won't be able to function until the owner updates their settings online, "
+            "including team members on the roster and a store phone number."
+        )
+    if not phone_ok:
+        return (
+            "Sorry, I won't be able to function until the owner adds a store phone number "
+            "and completes their setup online."
+        )
+    return ""
+
+
+def _normalize_dial_number(forwarding_phone: str) -> str:
+    clean = "".join(c for c in (forwarding_phone or "") if c.isdigit() or c == "+")
+    if not clean.startswith("+"):
+        if len(clean) == 10:
+            clean = f"+1{clean}"
+        elif len(clean) == 11 and clean.startswith("1"):
+            clean = f"+{clean}"
+        else:
+            clean = f"+1{clean}"
+    return clean
+
+
+def append_dial_forwarding_only(response: VoiceResponse, forwarding_phone: str) -> None:
+    """Dial the store after a custom message (no extra 'please hold' TTS)."""
+    clean_phone = _normalize_dial_number(forwarding_phone)
+    voice_trace("dial_forwarding_only", dial_to=mask_phone(clean_phone))
+    response.dial(clean_phone, timeout=30, record=False)
+    response.say(
+        "I'm sorry, no one is available right now. Please try again later or leave a message.",
+        voice="alice",
+    )
+    response.hangup()
+
+
+def twiml_setup_not_ready_handoff(
+    base_url: str, biz_info: dict, call_sid: str = ""
+) -> VoiceResponse:
+    """
+    Play setup-not-ready message. Transfer to the store only when store phone is set but roster is not
+    (roster-only gap). If store phone is missing, end the call after the message.
+    """
+    response = VoiceResponse()
+    message = setup_not_ready_call_message(biz_info)
+    if message:
+        msg_encoded = quote(message)
+        response.play(
+            f"{base_url}/api/phone/tts-audio?text={msg_encoded}&voice={config_service.get_tts_voice()}"
+        )
+    forwarding_phone = (biz_info.get("forwarding_phone") or "").strip()
+    if setup_transfers_to_store_after_message(biz_info) and forwarding_phone:
+        append_dial_forwarding_only(response, forwarding_phone)
+        if call_sid:
+            call_log_set_outcome(call_sid, "forwarded")
+    else:
+        response.say(
+            "Please ask the business to complete their setup online. Goodbye.",
+            voice="alice",
+        )
+        response.hangup()
+        if call_sid:
+            call_log_set_outcome(call_sid, "error")
+    return response
+
+
+def twiml_roster_not_ready_handoff(
+    base_url: str, biz_info: dict, call_sid: str = ""
+) -> VoiceResponse:
+    """Backward-compatible alias for setup-not-ready handoff TwiML."""
+    return twiml_setup_not_ready_handoff(base_url, biz_info, call_sid=call_sid)
+
+
+def parse_transfer_to(ai_text: str) -> Optional[str]:
+    """If AI responded with TRANSFER_TO: Name, return the name; else None."""
+    if not ai_text:
+        return None
+    t = ai_text.strip()
+    prefix = "TRANSFER_TO:"
+    if t.upper().startswith(prefix):
+        return t[len(prefix) :].strip()
+    return None
+
+
+def get_twilio_language_code(language_name: str) -> str:
+    """
+    Map language name to Twilio language code for speech recognition.
+    Returns Twilio language code (e.g., 'es-ES', 'en-US', 'hi-IN').
+    Defaults to 'en-US' if language not supported.
+    """
+    lang = language_name
+    if lang is None or (isinstance(lang, str) and not lang.strip()):
+        lang = "English"
+    elif not isinstance(lang, str):
+        lang = str(lang)
+    language_map = {
+        "English": "en-US",
+        "Spanish": "es-ES",
+        "French": "fr-FR",
+        "German": "de-DE",
+        "Italian": "it-IT",
+        "Portuguese": "pt-PT",
+        "Chinese": "zh-CN",
+        "Japanese": "ja-JP",
+        "Korean": "ko-KR",
+        "Hindi": "hi-IN",
+        "Punjabi": "pa-IN",  # Punjabi (Gurmukhi)
+        "Arabic": "ar-SA",
+        "Russian": "ru-RU",
+        "Dutch": "nl-NL",
+        "Polish": "pl-PL",
+        "Turkish": "tr-TR",
+        "Swedish": "sv-SE",
+        "Norwegian": "nb-NO",
+        "Danish": "da-DK",
+        "Finnish": "fi-FI",
+        "Greek": "el-GR",
+        "Czech": "cs-CZ",
+        "Romanian": "ro-RO",
+        "Hungarian": "hu-HU",
+        "Thai": "th-TH",
+        "Vietnamese": "vi-VN",
+        "Indonesian": "id-ID",
+        "Malay": "ms-MY",
+    }
+
+    # Try exact match first
+    if lang in language_map:
+        return language_map[lang]
+
+    # Try case-insensitive match
+    for key, code in language_map.items():
+        if key.lower() == lang.lower():
+            return code
+
+    # Default to English if not found
+    return "en-US"
+
+
+def should_forward_to_human(
+    user_input: str,
+    ai_response: str,
+    *,
+    call_sid: str = "",
+    client_id: str = "",
+) -> bool:
+    """
+    Detect if the user wants to talk to a real person or if we should forward the call.
+    Checks both user input and AI response for forwarding signals.
+    """
+    if not user_input:
+        return False
+
+    user_lower = user_input.lower()
+    ai_lower = ai_response.lower() if ai_response else ""
+
+    # Keywords that indicate user wants to talk to a person
+    forward_keywords = [
+        "talk to a person",
+        "speak to someone",
+        "talk to someone",
+        "real person",
+        "human",
+        "agent",
+        "representative",
+        "transfer me",
+        "connect me",
+        "forward me",
+        "can i speak to",
+        "i want to speak to",
+        "let me talk to",
+        "put me through",
+        "i need to talk to",
+        "operator",
+        "manager",
+        "supervisor",
+    ]
+
+    # Check user input
+    for keyword in forward_keywords:
+        if keyword in user_lower:
+            voice_forward(
+                "caller_requested_human",
+                call_sid=call_sid,
+                client_id=client_id,
+                forward_kind="fallback",
+                matched_keyword=keyword,
+                input_len=len(user_input or ""),
+            )
+            return True
+
+    # Check AI response for forwarding signals (AI might detect intent)
+    if "transfer" in ai_lower and ("you" in ai_lower or "connect" in ai_lower):
+        voice_forward(
+            "ai_transfer_intent_in_reply",
+            call_sid=call_sid,
+            client_id=client_id,
+            forward_kind="fallback",
+            reply_preview=(ai_response or "")[:80],
+        )
+        return True
+
+    return False
+
+
+def append_forward_call_verbs(
+    response: VoiceResponse,
+    forwarding_phone: str,
+    base_url: str,
+    detected_lang: str = "English",
+) -> None:
+    """Append handoff TTS, Dial, and no-answer fallback to an existing TwiML response."""
+    if detected_lang == "Spanish":
+        message = "Conectándote con alguien ahora. Por favor espera."
+    elif detected_lang == "French":
+        message = "Je vous connecte maintenant. Veuillez patienter."
+    else:
+        message = "Connecting you with someone now. Please hold."
+
+    message_encoded = quote(message)
+    tts_url = (
+        f"{base_url}/api/phone/tts-audio?text={message_encoded}&voice={config_service.get_tts_voice()}"
+    )
+    response.play(tts_url)
+
+    clean_phone = "".join(c for c in forwarding_phone if c.isdigit() or c == "+")
+    if not clean_phone.startswith("+"):
+        if len(clean_phone) == 10:
+            clean_phone = f"+1{clean_phone}"
+        elif len(clean_phone) == 11 and clean_phone.startswith("1"):
+            clean_phone = f"+{clean_phone}"
+        else:
+            clean_phone = f"+1{clean_phone}"
+
+    voice_trace("dial_fallback_appended", dial_to=mask_phone(clean_phone))
+    response.dial(clean_phone, timeout=30, record=False)
+    response.say(
+        "I'm sorry, no one is available right now. Please try again later or leave a message.",
+        voice="alice",
+    )
+    response.hangup()
+
+
+def forward_call_to_business(
+    forwarding_phone: str, base_url: str, detected_lang: str = "English"
+) -> VoiceResponse:
+    """
+    Forward the call to the business's actual phone number using Twilio Dial.
+    """
+    response = VoiceResponse()
+    append_forward_call_verbs(response, forwarding_phone, base_url, detected_lang)
+    return response
+
+
+def detect_language(text: str) -> str:
+    """
+    Detect the language of the input text using OpenAI's intelligence.
+    Returns language name in English (e.g., 'Spanish', 'Punjabi', 'English', 'French', etc.).
+    This function is called on EVERY speech input to support dynamic language switching.
+    Relies on OpenAI to detect any language automatically - no hardcoded word lists.
+    """
+    if not text or len(text.strip()) < 3:
+        return "English"
+
+    # Use OpenAI to detect language - it can detect any language automatically
+    try:
+        # No detection without an OpenAI key (runtime.client is a lazy proxy, never None).
+        if not os.getenv("OPENAI_API_KEY"):
+            return "English"
+
+        # Use OpenAI to intelligently detect the language
+        # This works for any language, not just hardcoded ones
+        detection_prompt = f"""Detect the language of this text and respond with ONLY the language name in English (e.g., 'Spanish', 'Punjabi', 'English', 'French', 'German', 'Chinese', 'Hindi', 'Italian', 'Portuguese', 'Japanese', 'Korean', 'Arabic', 'Russian', etc.). 
+
+Text: {text[:200]}
+
+Respond with just the language name, nothing else."""
+
+        detection_response = runtime.client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": detection_prompt}],
+            max_tokens=15,
+            temperature=0,  # Low temperature for consistent language detection
+        )
+        detected_lang = detection_response.choices[0].message.content.strip()
+
+        # Clean up response (remove quotes, extra words, periods)
+        detected_lang = (
+            detected_lang.replace('"', "").replace("'", "").replace(".", "").strip()
+        )
+
+        # Extract just the language name (in case GPT adds extra text)
+        # Take the first word which should be the language name
+        detected_lang = (
+            detected_lang.split()[0] if detected_lang.split() else detected_lang
+        )
+
+        # Capitalize first letter (e.g., "spanish" -> "Spanish")
+        if detected_lang:
+            detected_lang = detected_lang.capitalize()
+
+        if detected_lang and len(detected_lang) < 30:  # Sanity check
+            return detected_lang
+    except Exception as e:
+        print(f"Language detection error: {e}")
+        import traceback
+
+        traceback.print_exc()
+
+    # Default to English if detection fails
+    return "English"
