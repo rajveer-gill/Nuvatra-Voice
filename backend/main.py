@@ -662,6 +662,7 @@ from routers import provisioning as provisioning_router
 from routers import admin_audit as admin_audit_router
 from routers import billing as billing_router
 from routers import analytics as analytics_router
+from routers import appointments as appointments_router
 
 app.include_router(health_router.router)
 app.include_router(leads_router.router)
@@ -671,6 +672,7 @@ app.include_router(provisioning_router.router)
 app.include_router(admin_audit_router.router)
 app.include_router(billing_router.router)
 app.include_router(analytics_router.router)
+app.include_router(appointments_router.router)
 
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
@@ -1370,27 +1372,6 @@ class ConversationResponse(BaseModel):
     response: str
     action: Optional[str] = None
     data: Optional[dict] = None
-
-
-class AppointmentRequest(BaseModel):
-    name: str
-    email: str = ""
-    phone: str
-    date: str
-    time: str
-    reason: str
-    source: Optional[str] = "manual"  # "receptionist" | "manual"
-    staff_id: Optional[str] = None  # stylist UUID from Settings staff list
-
-
-class AppointmentUpdate(BaseModel):
-    status: Optional[str] = None
-    date: Optional[str] = None
-    time: Optional[str] = None
-    reason: Optional[str] = None
-    name: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
 
 
 class AppointmentRejectBody(BaseModel):
@@ -4497,178 +4478,6 @@ def _maybe_handle_staff_sms_approval(
     return False
 
 
-@app.post("/api/appointments")
-async def create_appointment(
-    appointment: AppointmentRequest,
-    tenant: Optional[dict] = Depends(require_active_subscription),
-):
-    cid = _bind_tenant_db_context(tenant)
-    try:
-        source = (appointment.source or "manual").strip().lower()
-        if source not in ("receptionist", "manual"):
-            source = "manual"
-        status = "pending_review" if source == "receptionist" else "pending"
-        date = (appointment.date or "").strip()
-        time = (appointment.time or "").strip()
-        staff_key = _optional_staff_id_validated(appointment.staff_id)
-        duration_min = _appointment_duration_minutes(
-            {"reason": appointment.reason or ""}
-        )
-        if date and time:
-            if not is_slot_available(
-                date, time, duration_min, staff_key
-            ):
-                raise HTTPException(
-                    status_code=409, detail="That time slot is already booked."
-                )
-        appointment_data = {
-            "name": appointment.name,
-            "email": appointment.email or "",
-            "phone": appointment.phone or "",
-            "date": date,
-            "time": time,
-            "reason": appointment.reason or "",
-            "source": source,
-            "status": status,
-            "staff_id": staff_key,
-            "client_id": cid,
-        }
-        if runtime.USE_DB:
-            row = db_appointments_insert(appointment_data)
-            appointment_id = row["id"]
-        else:
-            appointment_id = len(appointments) + 1
-            appointment_data["id"] = appointment_id
-            appointment_data["created_at"] = datetime.now().isoformat()
-            appointments.append(appointment_data)
-        if date and time:
-            reserve_slot(
-                date, time, appointment_id, duration_min, staff_key
-            )
-        appointment_data["id"] = appointment_id
-        appointment_data.setdefault("created_at", datetime.now().isoformat())
-        return {"success": True, "appointment": appointment_data}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise _server_error("create appointment failed", e)
-
-
-@app.get("/api/appointments")
-async def get_appointments(
-    tenant: Optional[dict] = Depends(require_active_subscription),
-):
-    cid = _bind_tenant_db_context(tenant)
-    orphans_removed = _reconcile_booked_slots_orphans() if runtime.USE_DB else 0
-    lst = db_appointments_get_all(client_id=cid) if runtime.USE_DB else appointments
-    for a in lst:
-        a.setdefault("source", "manual")
-        a.setdefault("status", "pending")
-    holds = _voice_calendar_holds() if runtime.USE_DB else []
-    diag = db_appointments_diagnostics(cid) if runtime.USE_DB else {}
-    twilio_on_tenant = ((tenant or {}).get("twilio_phone_number") or "").strip() or None
-    system_info(
-        "appointments_list_loaded",
-        client_id=cid,
-        count=len(lst),
-        calendar_holds=len(holds),
-        orphans_removed=orphans_removed,
-        likely_client_id_mismatch=bool(diag.get("likely_mismatch")),
-        env_client_id=diag.get("env_client_id"),
-        env_appointment_count=diag.get("env_client_id_appointment_count"),
-        twilio_phone_configured=bool(twilio_on_tenant),
-    )
-    if runtime.USE_DB and holds and not lst:
-        system_info(
-            "appointments_list_empty_but_calendar_holds",
-            client_id=cid,
-            hold_count=len(holds),
-            orphans_removed=orphans_removed,
-            sample_hold=holds[0] if holds else None,
-        )
-    return {
-        "appointments": lst,
-        "client_id": cid,
-        "calendar_holds": holds,
-        "orphan_slots_removed": orphans_removed,
-        "diagnostics": diag,
-        "twilio_phone_number": twilio_on_tenant,
-    }
-
-
-@app.get("/api/appointments/diagnostics")
-async def get_appointments_diagnostics(
-    tenant: Optional[dict] = Depends(require_active_subscription),
-):
-    """Tenant-scoped appointment debug snapshot (for dashboard troubleshooting)."""
-    cid = _bind_tenant_db_context(tenant)
-    holds = _voice_calendar_holds() if runtime.USE_DB else []
-    diag = db_appointments_diagnostics(cid) if runtime.USE_DB else {}
-    return {
-        "client_id": cid,
-        "twilio_phone_number": ((tenant or {}).get("twilio_phone_number") or "").strip()
-        or None,
-        "calendar_holds": holds,
-        **diag,
-    }
-
-
-@app.get("/api/appointments/calendar")
-async def appointments_calendar(
-    date_from: str,
-    date_to: str,
-    staff_id: Optional[str] = None,
-    tenant: Optional[dict] = Depends(require_active_subscription),
-):
-    """Return active appointments for calendar grid (excludes cancelled/rejected)."""
-    if not runtime.USE_DB:
-        return {"events": []}
-    cid = _bind_tenant_db_context(tenant)
-    events = db_appointments_in_date_range(date_from, date_to, staff_id, client_id=cid)
-    slots_by_apt = _booked_slot_duration_by_appointment_id()
-    services = get_business_info().get("services") or []
-    enriched = []
-    for apt in events:
-        dm = _duration_minutes_for_appointment(apt, slots_by_apt, services)
-        enriched.append({**apt, "duration_minutes": dm})
-    return {"events": enriched}
-
-
-@app.patch("/api/appointments/{appointment_id}")
-async def update_appointment(
-    appointment_id: int,
-    update: AppointmentUpdate,
-    tenant: Optional[dict] = Depends(require_active_subscription),
-):
-    """Update appointment status or details. Used by the appointments frontend."""
-    cid = _bind_tenant_db_context(tenant)
-    kwargs = {}
-    if update.status is not None:
-        kwargs["status"] = update.status
-    if update.date is not None:
-        kwargs["date"] = update.date
-    if update.time is not None:
-        kwargs["time"] = update.time
-    if update.reason is not None:
-        kwargs["reason"] = update.reason
-    if update.name is not None:
-        kwargs["name"] = update.name
-    if update.email is not None:
-        kwargs["email"] = update.email
-    if update.phone is not None:
-        kwargs["phone"] = update.phone
-    if runtime.USE_DB and kwargs:
-        apt = db_appointments_update(appointment_id, client_id=cid, **kwargs)
-        if apt:
-            return {"success": True, "appointment": apt}
-    else:
-        for i, apt in enumerate(appointments):
-            if apt["id"] == appointment_id:
-                apt.update(kwargs)
-                return {"success": True, "appointment": apt}
-    raise HTTPException(status_code=404, detail="Appointment not found")
-
-
 def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
     """Send submitted/confirmed email when enabled and provider is configured."""
     if not _appointment_email_enabled():
@@ -4702,53 +4511,9 @@ def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
     return ok
 
 
-@app.post("/api/appointments/{appointment_id}/accept")
-async def accept_appointment(
-    appointment_id: int,
-    request: Request,
-    tenant: Optional[dict] = Depends(require_active_subscription),
-):
-    """Store accepted: mark appointment accepted and send confirmation SMS to customer."""
-    cid = _bind_tenant_db_context(tenant)
-    apt = (
-        db_appointments_get_by_id(appointment_id, client_id=cid)
-        if runtime.USE_DB
-        else next((a for a in appointments if a["id"] == appointment_id), None)
-    )
-    if not apt:
-        system_info(
-            "appointment_accept_not_found",
-            appointment_id=appointment_id,
-            client_id=cid,
-        )
-        raise HTTPException(status_code=404, detail="Appointment not found")
-    if str(apt.get("status") or "") != "pending_review":
-        raise HTTPException(
-            status_code=400, detail="Appointment is not awaiting approval"
-        )
-    if runtime.USE_DB:
-        apt = (
-            db_appointments_update(appointment_id, status="accepted", client_id=cid)
-            or apt
-        )
-    else:
-        apt["status"] = "accepted"
-    audit_log(
-        "user",
-        "appointment_accepted",
-        resource_type="appointment",
-        resource_id=str(appointment_id),
-        details={"date": apt.get("date"), "time": apt.get("time")},
-        request=request,
-    )
-    business_name = get_business_info().get("name", "us")
-    date = apt.get("date", "")
-    time_ampm = _hhmm_to_ampm(apt.get("time") or "")
-    msg = f"Your appointment at {business_name} is confirmed for {date} at {time_ampm}. Reply if you need to change."
-    send_sms(apt.get("phone") or "", msg, from_override=_tenant_sms_from_number())
-    return {"success": True, "appointment": apt}
-
-
+# AI-polished decline/cancel routes — stay in main until the OpenAI client lifts into
+# runtime (they call polish_owner_*_sms, which uses the shared client). The CRUD +
+# accept routes live in routers/appointments.py. See BOOKING-SERVICE-EXTRACTION.md.
 @app.post("/api/appointments/{appointment_id}/reject")
 async def reject_appointment(
     appointment_id: int,
