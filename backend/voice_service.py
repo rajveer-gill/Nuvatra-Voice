@@ -8,26 +8,38 @@ qualified (database / config_service / deps / plans) per the strangler-fig disci
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+from pathlib import Path
 from typing import List, Optional
 
 import config_service
 import database
-import deps
 import runtime
-from observability import voice_info, voice_trace
+import deps
+from observability import voice_info, voice_trace, voice_warning
+from voice_preview import add_sentence_pauses
 
 try:
     from plans import get_plan_limits
 except ImportError:  # pragma: no cover
     get_plan_limits = None  # type: ignore
 
+logger = logging.getLogger("nuvatra")
+
+# Self-computed (same value as main/config_service) so voice_service has no main dependency.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 
 RECORDING_DISCLOSURE_TEXT = "This call may be recorded for quality and training."
 
 DEFAULT_GREETING_TEMPLATE = (
     "Thank you for calling {business_name}. How can I help you today?"
 )
+
+GOT_IT_PHRASE = "Got it, one moment."
+ONE_MOMENT_PHRASE = "One moment."
 
 
 def _greeting_debug_enabled() -> bool:
@@ -211,3 +223,192 @@ def _log_greeting_debug(
     voice_trace(event, **fields)
     if _greeting_debug_enabled():
         voice_info(event, **fields)
+
+
+# ===== TTS synthesis + audio cache (cut 2) =====
+
+
+def _got_it_cache_key(client_id: str) -> tuple:
+    info = config_service.get_business_info()
+    try:
+        speed_key = round(float(info.get("speed", 1.0)), 2)
+    except (TypeError, ValueError):
+        speed_key = 1.0
+    return (
+        client_id,
+        GOT_IT_PHRASE,
+        (config_service.get_tts_voice() or "fable").strip(),
+        speed_key,
+    )
+
+
+def _one_moment_cache_key(client_id: str) -> tuple:
+    info = config_service.get_business_info()
+    try:
+        speed_key = round(float(info.get("speed", 1.0)), 2)
+    except (TypeError, ValueError):
+        speed_key = 1.0
+    return (
+        client_id,
+        ONE_MOMENT_PHRASE,
+        (config_service.get_tts_voice() or "fable").strip(),
+        speed_key,
+    )
+
+
+def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
+    runtime._ensure_openai_client()
+    resp = runtime.client.audio.speech.create(
+        model="tts-1-hd",
+        voice=voice,
+        input=add_sentence_pauses(text),
+        speed=max(0.25, min(4.0, float(speed))),
+    )
+    return resp.content
+
+
+def _ensure_greeting_audio_cached(client_id: str) -> bool:
+    """Ensure greeting clip exists in cache; synthesize on miss. Returns True when cached."""
+    from voice.tts_cache import get_cached, put_cached
+
+    cid = (client_id or "").strip()
+    if not cid or cid == "default":
+        return False
+    database.set_request_client_id(cid)
+    greeting_key = _greeting_audio_cache_key(cid)
+    if get_cached(PROJECT_ROOT, "greeting", greeting_key):
+        return True
+    info = config_service.get_business_info()
+    tenant = _tenant_for_call_recording()
+    payload = build_phone_greeting_payload(info, tenant)
+    voice = (payload.get("voice") or config_service.get_tts_voice() or "fable").strip()
+    speed = config_service.get_tts_speed()
+    data = _synthesize_tts_clip(payload["spoken_text"], voice=voice, speed=speed)
+    put_cached(PROJECT_ROOT, "greeting", greeting_key, data)
+    voice_info(
+        "greeting_audio_prewarmed",
+        client_id_prefix=cid[:12],
+        voice=voice,
+        bytes=len(data),
+    )
+    return True
+
+
+def _warm_auxiliary_voice_cache(client_id: str) -> None:
+    """Pre-generate got-it and one-moment clips (non-blocking for call answer)."""
+    from voice.tts_cache import get_cached, put_cached
+
+    cid = (client_id or "").strip()
+    if not cid or cid == "default":
+        return
+    database.set_request_client_id(cid)
+    got_it_key = _got_it_cache_key(cid)
+    if not get_cached(PROJECT_ROOT, "got_it", got_it_key):
+        voice = got_it_key[2]
+        speed = got_it_key[3]
+        data = _synthesize_tts_clip(GOT_IT_PHRASE, voice=voice, speed=speed)
+        put_cached(PROJECT_ROOT, "got_it", got_it_key, data)
+        voice_info(
+            "got_it_audio_prewarmed",
+            client_id_prefix=cid[:12],
+            voice=voice,
+            bytes=len(data),
+        )
+    one_moment_key = _one_moment_cache_key(cid)
+    if not get_cached(PROJECT_ROOT, "one_moment", one_moment_key):
+        voice = one_moment_key[2]
+        speed = one_moment_key[3]
+        data = _synthesize_tts_clip(ONE_MOMENT_PHRASE, voice=voice, speed=speed)
+        put_cached(PROJECT_ROOT, "one_moment", one_moment_key, data)
+        voice_info(
+            "one_moment_audio_prewarmed",
+            client_id_prefix=cid[:12],
+            voice=voice,
+            bytes=len(data),
+        )
+
+
+def warm_client_voice_cache(client_id: str) -> None:
+    """Pre-generate greeting, got-it, and one-moment clips for a tenant."""
+    cid = (client_id or "").strip()
+    if not cid or cid == "default":
+        return
+    try:
+        _ensure_greeting_audio_cached(cid)
+        _warm_auxiliary_voice_cache(cid)
+    except Exception as e:
+        voice_warning(
+            "voice_cache_prewarm_failed",
+            client_id_prefix=cid[:12],
+            error_type=type(e).__name__,
+        )
+        logger.warning(
+            "warm_client_voice_cache failed client_id=%s: %s", cid, e, exc_info=True
+        )
+
+
+def _warm_all_tenant_voice_caches() -> None:
+    """Prewarm voice clips at startup.
+
+    Single-tenant/dev: warm the one configured runtime.client (cheap). Multi-tenant:
+    sweeping every tenant at boot is O(tenants × 3 TTS calls) and does not scale
+    (minutes of OpenAI calls at 60+ tenants, blocking nothing but burning quota
+    and a worker). It is therefore LAZY by default — greeting/got-it/one-moment
+    clips synthesize on the first call and are re-warmed on config save. Set
+    VOICE_PREWARM_ALL_TENANTS=1 to opt into the full boot sweep for small fleets.
+    """
+    if not runtime.USE_DB:
+        cid = (CLIENT_ID or "").strip()
+        if cid and cid != "default":
+            warm_client_voice_cache(cid)
+        return
+    if (os.getenv("VOICE_PREWARM_ALL_TENANTS") or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        logger.info(
+            "voice_cache_startup_prewarm skipped (lazy; set VOICE_PREWARM_ALL_TENANTS=1 to enable)"
+        )
+        return
+    try:
+        tenants = database.db_tenant_list_all()
+    except Exception as e:
+        logger.warning("voice_cache_startup_prewarm list failed: %s", e)
+        return
+    for tenant in tenants:
+        cid = (tenant.get("client_id") or "").strip()
+        phone = (tenant.get("twilio_phone_number") or "").strip()
+        if not cid or not phone:
+            continue
+        try:
+            warm_client_voice_cache(cid)
+        except Exception as e:
+            logger.warning(
+                "voice_cache_startup_prewarm failed client_id=%s: %s", cid, e
+            )
+
+
+async def _warm_client_voice_cache_async(client_id: str) -> None:
+    await asyncio.to_thread(warm_client_voice_cache, client_id)
+
+
+async def _warm_auxiliary_voice_cache_async(client_id: str) -> None:
+    await asyncio.to_thread(_warm_auxiliary_voice_cache, client_id)
+
+
+def _greeting_audio_cache_key(client_id: str) -> tuple:
+    """Cache key from fully resolved spoken text (includes tenant name fallback for placeholders)."""
+    info = config_service.get_business_info()
+    tenant = _tenant_for_call_recording()
+    payload = build_phone_greeting_payload(info, tenant)
+    try:
+        speed_key = round(float(info.get("speed", 1.0)), 2)
+    except (TypeError, ValueError):
+        speed_key = 1.0
+    return (
+        client_id,
+        payload["spoken_text"],
+        (payload.get("voice") or "fable").strip(),
+        speed_key,
+    )

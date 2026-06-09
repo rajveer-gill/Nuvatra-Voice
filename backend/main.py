@@ -675,9 +675,6 @@ from routers.sms import (  # noqa: E402,F401
 print(f"[INIT] Python {sys.version.split()[0]}, openai=={openai.__version__}")
 sys.stdout.flush()
 
-GOT_IT_PHRASE = "Got it, one moment."
-ONE_MOMENT_PHRASE = "One moment."
-
 # The lazy OpenAI client now lives in runtime (so booking/voice/SMS modules can share
 # it). Re-export `client` (a stable proxy instance) and _ensure_openai_client so main's
 # many `client.…` calls and tests patching main.client keep resolving. New code outside
@@ -894,6 +891,19 @@ from voice_service import (  # noqa: E402,F401
     _resolve_greeting_business_name,
     build_phone_greeting_payload,
     _log_greeting_debug,
+    # TTS synthesis + audio cache (cut 2)
+    GOT_IT_PHRASE,
+    ONE_MOMENT_PHRASE,
+    _got_it_cache_key,
+    _one_moment_cache_key,
+    _synthesize_tts_clip,
+    _ensure_greeting_audio_cached,
+    _warm_auxiliary_voice_cache,
+    warm_client_voice_cache,
+    _warm_all_tenant_voice_caches,
+    _warm_client_voice_cache_async,
+    _warm_auxiliary_voice_cache_async,
+    _greeting_audio_cache_key,
 )
 
 # Business-config loading/normalization now lives in config_service; re-export so
@@ -1008,175 +1018,6 @@ def invalidate_voice_cache(client_id: Optional[str] = None) -> None:
         from voice.tts_cache import clear_all_memory
 
         clear_all_memory()
-
-
-def _got_it_cache_key(client_id: str) -> tuple:
-    info = get_business_info()
-    try:
-        speed_key = round(float(info.get("speed", 1.0)), 2)
-    except (TypeError, ValueError):
-        speed_key = 1.0
-    return (
-        client_id,
-        GOT_IT_PHRASE,
-        (get_tts_voice() or "fable").strip(),
-        speed_key,
-    )
-
-
-def _one_moment_cache_key(client_id: str) -> tuple:
-    info = get_business_info()
-    try:
-        speed_key = round(float(info.get("speed", 1.0)), 2)
-    except (TypeError, ValueError):
-        speed_key = 1.0
-    return (
-        client_id,
-        ONE_MOMENT_PHRASE,
-        (get_tts_voice() or "fable").strip(),
-        speed_key,
-    )
-
-
-def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
-    _ensure_openai_client()
-    resp = client.audio.speech.create(
-        model="tts-1-hd",
-        voice=voice,
-        input=add_sentence_pauses(text),
-        speed=max(0.25, min(4.0, float(speed))),
-    )
-    return resp.content
-
-
-def _ensure_greeting_audio_cached(client_id: str) -> bool:
-    """Ensure greeting clip exists in cache; synthesize on miss. Returns True when cached."""
-    from voice.tts_cache import get_cached, put_cached
-
-    cid = (client_id or "").strip()
-    if not cid or cid == "default":
-        return False
-    set_request_client_id(cid)
-    greeting_key = _greeting_audio_cache_key(cid)
-    if get_cached(PROJECT_ROOT, "greeting", greeting_key):
-        return True
-    info = get_business_info()
-    tenant = _tenant_for_call_recording()
-    payload = build_phone_greeting_payload(info, tenant)
-    voice = (payload.get("voice") or get_tts_voice() or "fable").strip()
-    speed = get_tts_speed()
-    data = _synthesize_tts_clip(payload["spoken_text"], voice=voice, speed=speed)
-    put_cached(PROJECT_ROOT, "greeting", greeting_key, data)
-    voice_info(
-        "greeting_audio_prewarmed",
-        client_id_prefix=cid[:12],
-        voice=voice,
-        bytes=len(data),
-    )
-    return True
-
-
-def _warm_auxiliary_voice_cache(client_id: str) -> None:
-    """Pre-generate got-it and one-moment clips (non-blocking for call answer)."""
-    from voice.tts_cache import get_cached, put_cached
-
-    cid = (client_id or "").strip()
-    if not cid or cid == "default":
-        return
-    set_request_client_id(cid)
-    got_it_key = _got_it_cache_key(cid)
-    if not get_cached(PROJECT_ROOT, "got_it", got_it_key):
-        voice = got_it_key[2]
-        speed = got_it_key[3]
-        data = _synthesize_tts_clip(GOT_IT_PHRASE, voice=voice, speed=speed)
-        put_cached(PROJECT_ROOT, "got_it", got_it_key, data)
-        voice_info(
-            "got_it_audio_prewarmed",
-            client_id_prefix=cid[:12],
-            voice=voice,
-            bytes=len(data),
-        )
-    one_moment_key = _one_moment_cache_key(cid)
-    if not get_cached(PROJECT_ROOT, "one_moment", one_moment_key):
-        voice = one_moment_key[2]
-        speed = one_moment_key[3]
-        data = _synthesize_tts_clip(ONE_MOMENT_PHRASE, voice=voice, speed=speed)
-        put_cached(PROJECT_ROOT, "one_moment", one_moment_key, data)
-        voice_info(
-            "one_moment_audio_prewarmed",
-            client_id_prefix=cid[:12],
-            voice=voice,
-            bytes=len(data),
-        )
-
-
-def warm_client_voice_cache(client_id: str) -> None:
-    """Pre-generate greeting, got-it, and one-moment clips for a tenant."""
-    cid = (client_id or "").strip()
-    if not cid or cid == "default":
-        return
-    try:
-        _ensure_greeting_audio_cached(cid)
-        _warm_auxiliary_voice_cache(cid)
-    except Exception as e:
-        voice_warning(
-            "voice_cache_prewarm_failed",
-            client_id_prefix=cid[:12],
-            error_type=type(e).__name__,
-        )
-        logger.warning(
-            "warm_client_voice_cache failed client_id=%s: %s", cid, e, exc_info=True
-        )
-
-
-def _warm_all_tenant_voice_caches() -> None:
-    """Prewarm voice clips at startup.
-
-    Single-tenant/dev: warm the one configured client (cheap). Multi-tenant:
-    sweeping every tenant at boot is O(tenants × 3 TTS calls) and does not scale
-    (minutes of OpenAI calls at 60+ tenants, blocking nothing but burning quota
-    and a worker). It is therefore LAZY by default — greeting/got-it/one-moment
-    clips synthesize on the first call and are re-warmed on config save. Set
-    VOICE_PREWARM_ALL_TENANTS=1 to opt into the full boot sweep for small fleets.
-    """
-    if not runtime.USE_DB:
-        cid = (CLIENT_ID or "").strip()
-        if cid and cid != "default":
-            warm_client_voice_cache(cid)
-        return
-    if (os.getenv("VOICE_PREWARM_ALL_TENANTS") or "").strip().lower() not in (
-        "1",
-        "true",
-        "yes",
-    ):
-        logger.info(
-            "voice_cache_startup_prewarm skipped (lazy; set VOICE_PREWARM_ALL_TENANTS=1 to enable)"
-        )
-        return
-    try:
-        tenants = db_tenant_list_all()
-    except Exception as e:
-        logger.warning("voice_cache_startup_prewarm list failed: %s", e)
-        return
-    for tenant in tenants:
-        cid = (tenant.get("client_id") or "").strip()
-        phone = (tenant.get("twilio_phone_number") or "").strip()
-        if not cid or not phone:
-            continue
-        try:
-            warm_client_voice_cache(cid)
-        except Exception as e:
-            logger.warning(
-                "voice_cache_startup_prewarm failed client_id=%s: %s", cid, e
-            )
-
-
-async def _warm_client_voice_cache_async(client_id: str) -> None:
-    await asyncio.to_thread(warm_client_voice_cache, client_id)
-
-
-async def _warm_auxiliary_voice_cache_async(client_id: str) -> None:
-    await asyncio.to_thread(_warm_auxiliary_voice_cache, client_id)
 
 
 async def _startup_prewarm_voice_caches() -> None:
@@ -3934,23 +3775,6 @@ async def _schedule_recording_summary(
         )
     except Exception:
         logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
-
-
-def _greeting_audio_cache_key(client_id: str) -> tuple:
-    """Cache key from fully resolved spoken text (includes tenant name fallback for placeholders)."""
-    info = get_business_info()
-    tenant = _tenant_for_call_recording()
-    payload = build_phone_greeting_payload(info, tenant)
-    try:
-        speed_key = round(float(info.get("speed", 1.0)), 2)
-    except (TypeError, ValueError):
-        speed_key = 1.0
-    return (
-        client_id,
-        payload["spoken_text"],
-        (payload.get("voice") or "fable").strip(),
-        speed_key,
-    )
 
 
 @app.get("/api/phone/greeting-audio")

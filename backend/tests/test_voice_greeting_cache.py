@@ -13,7 +13,7 @@ import voice_service
 
 @pytest.fixture
 def voice_cache_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(voice_service, "PROJECT_ROOT", tmp_path)
     cid = "cache-tenant"
     cfg_path = tmp_path / "clients" / cid / "config.json"
     cfg_path.parent.mkdir(parents=True)
@@ -43,7 +43,7 @@ def test_ensure_greeting_audio_cached_skips_resynthesis(voice_cache_env, monkeyp
         calls["n"] += 1
         return b"mp3-bytes"
 
-    monkeypatch.setattr(main, "_synthesize_tts_clip", fake_synthesize)
+    monkeypatch.setattr(voice_service, "_synthesize_tts_clip", fake_synthesize)
     main.set_request_client_id(cid)
 
     assert main._ensure_greeting_audio_cached(cid) is True

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import main
+import config_service
 import voice_service
 
 
@@ -61,7 +62,7 @@ def test_save_raw_client_config_writes_db_and_file(client_config_dir, monkeypatc
 
 def test_greeting_cache_key_uses_resolved_spoken_text(monkeypatch):
     monkeypatch.setattr(
-        main,
+        config_service,
         "get_business_info",
         lambda: {
             "name": "",
@@ -72,7 +73,7 @@ def test_greeting_cache_key_uses_resolved_spoken_text(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        main,
+        voice_service,
         "_tenant_for_call_recording",
         lambda: {"name": "From Admin Tenant", "client_id": "ands-test"},
     )
