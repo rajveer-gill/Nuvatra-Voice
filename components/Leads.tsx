@@ -2,7 +2,10 @@
 
 import { useState, useEffect } from 'react'
 import { Users } from 'lucide-react'
+import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient } from '@/lib/api'
+import { Skeleton } from '@/components/ui/Skeleton'
+import { Reveal } from '@/components/motion'
 
 interface Lead {
   id: number
@@ -15,11 +18,13 @@ interface Lead {
 
 export default function Leads() {
   const api = useApiClient()
+  const reduce = useReducedMotion()
   const [leads, setLeads] = useState<Lead[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.get('/api/leads')
+    api
+      .get('/api/leads')
       .then((res) => setLeads(res.data?.leads || []))
       .catch(() => setLeads([]))
       .finally(() => setLoading(false))
@@ -27,14 +32,20 @@ export default function Leads() {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600" />
+      <div className="rounded-lg bg-white p-6 shadow-md">
+        <Skeleton className="h-6 w-32" />
+        <Skeleton className="mt-3 h-4 w-72" />
+        <div className="mt-5 space-y-2">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="rounded-lg bg-white p-6 text-gray-900 shadow-md">
+    <Reveal className="rounded-lg bg-white p-6 text-gray-900 shadow-md">
       <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
         <Users className="w-5 h-5 mr-2 text-primary-600" />
         Leads
@@ -54,9 +65,18 @@ export default function Leads() {
                 <th className="text-left py-3 px-4 font-semibold text-gray-800">Date</th>
               </tr>
             </thead>
-            <tbody>
+            <motion.tbody
+              initial={reduce ? false : 'hidden'}
+              animate="visible"
+              variants={{ visible: { transition: { staggerChildren: 0.04, delayChildren: 0.05 } } }}
+            >
               {leads.map((lead) => (
-                <tr key={lead.id} className="border-b border-gray-200 hover:bg-gray-50">
+                <motion.tr
+                  key={lead.id}
+                  variants={{ hidden: { opacity: 0 }, visible: { opacity: 1 } }}
+                  transition={{ duration: 0.3, ease: 'easeOut' }}
+                  className="border-b border-gray-200 hover:bg-gray-50"
+                >
                   <td className="py-3 px-4 font-medium">{lead.name || '—'}</td>
                   <td className="py-3 px-4">{lead.phone}</td>
                   <td className="max-w-xs truncate py-3 px-4">{lead.reason || '—'}</td>
@@ -68,12 +88,12 @@ export default function Leads() {
                   <td className="py-3 px-4 text-sm text-gray-800">
                     {lead.created_at ? new Date(lead.created_at).toLocaleDateString() : '—'}
                   </td>
-                </tr>
+                </motion.tr>
               ))}
-            </tbody>
+            </motion.tbody>
           </table>
         </div>
       )}
-    </div>
+    </Reveal>
   )
 }
