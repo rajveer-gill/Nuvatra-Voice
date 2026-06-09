@@ -39,7 +39,7 @@ def test_stripe_webhook_returns_200_with_valid_mock(client):
             "subscription": "sub_123",
             "metadata": {"tenant_id": "00000000-0000-0000-0000-000000000001", "plan": "starter"},
         }
-        with patch("main.stripe") as mock_stripe:
+        with patch("routers.billing.stripe") as mock_stripe:
             if mock_stripe is None:
                 pytest.skip("stripe not installed")
             mock_stripe.Webhook.construct_event.return_value = mock_event
