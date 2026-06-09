@@ -1,5 +1,6 @@
 """Calendar event duration from booked_slots and service menu."""
 import main
+import config_service
 
 
 def test_duration_from_booked_slot_when_no_service_match():
@@ -28,7 +29,7 @@ def test_duration_default_when_unknown():
 
 def test_booking_duration_from_service_menu(monkeypatch):
     monkeypatch.setattr(
-        main,
+        config_service,
         "get_business_info",
         lambda: {
             "services": [{"name": "Long Cut", "duration_minutes": 45}],

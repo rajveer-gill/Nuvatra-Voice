@@ -381,7 +381,7 @@ def test_apply_booking_customer_name_clears_stylist_without_memory(monkeypatch):
 
 def test_format_confirmation_sms_shows_customer_and_stylist(monkeypatch):
     monkeypatch.setattr(
-        "main.get_business_info",
+        "config_service.get_business_info",
         lambda: {"staff": [{"id": "s1", "name": "Tom"}]},
     )
     msg = _format_appointment_details_confirmation_sms(
