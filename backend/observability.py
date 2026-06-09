@@ -19,6 +19,7 @@ Phone numbers are masked in log lines (security.redaction).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -31,6 +32,11 @@ _log = logging.getLogger("nuvatra")
 
 def _truthy(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stable_sha256(text: str) -> str:
+    """Deterministic hex digest (idempotency keys, dedup, log correlation)."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
 OBS_VERBOSE: bool = _truthy("OBS_VERBOSE")

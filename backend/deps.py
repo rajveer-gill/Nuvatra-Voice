@@ -24,7 +24,31 @@ import database
 import runtime
 from auth import get_bearer_token, verify_clerk_token
 from observability import usage_warning
+from security.webhooks import validate_twilio_webhook as validate_twilio_signature
 from subscription_access import get_tenant_subscription_state
+
+try:
+    from twilio.request_validator import RequestValidator as _RequestValidator  # noqa: F401
+    TWILIO_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    TWILIO_AVAILABLE = False
+
+
+def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
+    """Validate X-Twilio-Signature so only Twilio can trigger webhooks."""
+    allow_insecure = (os.getenv("ALLOW_INSECURE_WEBHOOKS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    strict_required = bool(runtime.USE_DB) and not allow_insecure
+    return validate_twilio_signature(
+        request,
+        form_data,
+        auth_token=os.getenv("TWILIO_AUTH_TOKEN"),
+        twilio_available=TWILIO_AVAILABLE,
+        strict_required=strict_required,
+    )
 
 
 def _settings_load_debug_enabled() -> bool:

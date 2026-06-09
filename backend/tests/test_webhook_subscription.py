@@ -72,7 +72,11 @@ def webhook_client(monkeypatch):
     monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
     import main
 
+    # Phone handler (still in main) resolves _validate_twilio_webhook via main's re-export;
+    # the SMS handler (routers/sms) resolves it via deps. Patch both so the bypass reaches
+    # whichever handler the test exercises.
     monkeypatch.setattr(main, "_validate_twilio_webhook", lambda _r, _d: True)
+    monkeypatch.setattr("deps._validate_twilio_webhook", lambda _r, _d: True)
     monkeypatch.setattr(main, "TWILIO_AVAILABLE", True)
     if main.VoiceResponse is None:
         pytest.skip("Twilio not installed")
@@ -128,8 +132,8 @@ def test_sms_incoming_expired_sends_polite_message(webhook_client, monkeypatch):
         "created_at": past,
     }
     monkeypatch.setattr("runtime.USE_DB", True)
-    monkeypatch.setattr(main, "db_tenant_get_by_phone", lambda _p: tenant)
-    monkeypatch.setattr(main, "send_sms", capture_send)
+    monkeypatch.setattr("database.db_tenant_get_by_phone", lambda _p: tenant)
+    monkeypatch.setattr("sms_service.send_sms", capture_send)
     resp = webhook_client.post(
         "/api/sms/incoming",
         data={
