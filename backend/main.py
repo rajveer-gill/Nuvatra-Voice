@@ -975,9 +975,11 @@ def _stable_sha256(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
-# In-memory fallback when no database (dev / testing)
-appointments: List[dict] = []
-messages: List[dict] = []
+# In-memory fallback when no database (dev / testing). Aliased to the runtime
+# lists (same objects) so routers can share them via runtime.appointments/messages
+# without importing main. Only mutated, never reassigned — alias stays valid.
+appointments: List[dict] = runtime.appointments
+messages: List[dict] = runtime.messages
 
 
 

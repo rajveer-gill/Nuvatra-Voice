@@ -16,6 +16,16 @@ and would silently miss the startup flip. Tests patch ``runtime.USE_DB``.
 
 from __future__ import annotations
 
+from typing import List
+
+# In-memory appointment/message stores — the fallback used ONLY when USE_DB is
+# False (local/dev with no Postgres). main.py aliases its module globals to these
+# exact list objects, so the (future) analytics/appointments routers can share
+# the same data via runtime.appointments / runtime.messages. Only ever mutated
+# (.append/.extend), never reassigned — so the alias stays valid.
+appointments: List[dict] = []
+messages: List[dict] = []
+
 # True once init_db() has successfully connected. Written by the startup paths in
 # main.py (init_db_background) and deps._ensure_db_ready; read across the app.
 USE_DB: bool = False
