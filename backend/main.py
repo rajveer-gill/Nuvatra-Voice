@@ -4077,21 +4077,6 @@ class AdminResendInviteRequest(BaseModel):
     email: str
 
 
-class AdminBulkTenantRow(BaseModel):
-    client_id: str = Field(..., min_length=2, max_length=120)
-    name: str = Field(..., min_length=1, max_length=200)
-    twilio_phone_number: str = Field(..., min_length=7, max_length=30)
-    email: EmailStr
-    business_vertical: str = "salon_chair"
-
-
-class AdminBulkCreateTenantsRequest(BaseModel):
-    rows: List[AdminBulkTenantRow] = Field(
-        default_factory=list, min_length=1, max_length=500
-    )
-    dry_run: bool = False
-
-
 class AdminLegalHoldRequest(BaseModel):
     client_id: str = Field(..., min_length=1, max_length=120)
     reason: Optional[str] = Field(default=None, max_length=2000)
@@ -4449,124 +4434,16 @@ async def admin_list_tenants(_: str = Depends(require_admin)):
     return {"tenants": enriched, "db_enabled": True}
 
 
-@app.post("/api/admin/tenants/bulk")
-async def admin_bulk_create_tenants(
-    req: AdminBulkCreateTenantsRequest,
-    request: Request,
-    admin_user_id: str = Depends(require_admin),
-):
-    """Bulk create tenants with validation and idempotency checks."""
-    if not runtime.USE_DB:
-        raise HTTPException(
-            status_code=503, detail="Database required for multi-tenant"
-        )
-    seen_client_ids: set[str] = set()
-    seen_phones: set[str] = set()
-    results: list[dict] = []
-    created = 0
-    skipped = 0
-    errors = 0
-    for row in req.rows:
-        cid = (row.client_id or "").strip()
-        normalized_phone = _normalize_admin_phone(row.twilio_phone_number)
-        email = str(row.email).strip().lower()
-        if cid in seen_client_ids:
-            results.append(
-                {
-                    "client_id": cid,
-                    "status": "error",
-                    "reason": "duplicate_client_id_in_payload",
-                }
-            )
-            errors += 1
-            continue
-        seen_client_ids.add(cid)
-        if normalized_phone in seen_phones:
-            results.append(
-                {
-                    "client_id": cid,
-                    "status": "error",
-                    "reason": "duplicate_twilio_phone_in_payload",
-                }
-            )
-            errors += 1
-            continue
-        seen_phones.add(normalized_phone)
-
-        existing_by_id = db_tenant_get_by_client_id(cid)
-        existing_by_phone = db_tenant_get_by_phone(normalized_phone)
-        if existing_by_id or existing_by_phone:
-            skipped += 1
-            results.append(
-                {
-                    "client_id": cid,
-                    "status": "skipped",
-                    "reason": "tenant_exists",
-                    "existing_tenant_id": (
-                        existing_by_id or existing_by_phone or {}
-                    ).get("id"),
-                }
-            )
-            continue
-
-        if req.dry_run:
-            results.append({"client_id": cid, "status": "validated"})
-            continue
-
-        bv = (row.business_vertical or "salon_chair").strip()
-        if bv not in ALLOWED_BUSINESS_VERTICALS:
-            results.append(
-                {
-                    "client_id": cid,
-                    "status": "error",
-                    "reason": "invalid_business_vertical",
-                }
-            )
-            errors += 1
-            continue
-        tenant = db_tenant_create(cid, row.name.strip(), normalized_phone, "free", bv)
-        if not tenant:
-            results.append(
-                {"client_id": cid, "status": "error", "reason": "create_failed"}
-            )
-            errors += 1
-            continue
-        cfg = _default_client_config_data(cid, tenant.get("plan") or "free")
-        save_raw_client_config(cid, cfg)
-        link = _clerk_link_email_to_tenant(email, tenant["id"])
-        created += 1
-        results.append(
-            {
-                "client_id": cid,
-                "status": "created",
-                "tenant_id": tenant["id"],
-                "invite_sent": bool(link.get("invite_sent")),
-                "user_relinked": bool(link.get("user_relinked")),
-            }
-        )
-        audit_log(
-            "admin",
-            "tenant_created_bulk",
-            actor_id=admin_user_id,
-            resource_type="tenant",
-            resource_id=tenant["id"],
-            client_id=tenant["client_id"],
-            details={
-                "email": email,
-                "invite_sent": bool(link.get("invite_sent")),
-                "user_relinked": bool(link.get("user_relinked")),
-            },
-            request=request,
-        )
-
-    return {
-        "success": True,
-        "dry_run": req.dry_run,
-        "created": created,
-        "skipped": skipped,
-        "errors": errors,
-        "results": results,
-    }
+@app.post("/api/admin/tenants/bulk", deprecated=True)
+async def admin_bulk_create_tenants(_admin: str = Depends(require_admin)):
+    """Deprecated. The synchronous bulk-create timed out and left tenants
+    half-provisioned at scale. Use the background provisioning pipeline:
+    POST /api/admin/provisioning/jobs (idempotent, resumable, auto-purchases
+    Twilio numbers)."""
+    raise HTTPException(
+        status_code=410,
+        detail="Deprecated. Use POST /api/admin/provisioning/jobs for bulk onboarding.",
+    )
 
 
 @app.get("/api/admin/ops/self-check")
