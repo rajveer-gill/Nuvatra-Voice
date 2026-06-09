@@ -61,17 +61,39 @@ def _get_conn():
         return None
     conn = getattr(_thread_local, "conn", None)
     if conn is not None and not conn.closed:
-        return conn
+        return conn  # already validated earlier this request
     pool = _ensure_pool()
     if not pool:
         return None
-    try:
-        conn = pool.getconn()
-        _thread_local.conn = conn
-        return conn
-    except Exception as e:
-        _log.warning("db_pool_getconn_failed: %s", e)
-        return None
+    # Pool pre-ping: a pooled connection may have been dropped server-side while
+    # idle (Render Starter Postgres closes idle conns), and psycopg2's conn.closed
+    # won't catch that. Validate with a cheap SELECT 1 on checkout; if it's dead,
+    # discard and try one more. Runs once per request — the live connection is then
+    # cached in _thread_local for the rest of the request's queries.
+    last_err = None
+    for _ in range(2):
+        try:
+            conn = pool.getconn()
+        except Exception as e:
+            _log.warning("db_pool_getconn_failed: %s", e)
+            return None
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            _thread_local.conn = conn
+            return conn
+        except Exception as e:
+            last_err = e
+            try:
+                pool.putconn(conn, close=True)
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    _log.warning("db_get_conn_preping_failed: %s", last_err)
+    return None
 
 
 def db_release_thread_connection() -> None:

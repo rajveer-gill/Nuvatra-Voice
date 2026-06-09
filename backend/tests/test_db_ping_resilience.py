@@ -36,3 +36,42 @@ def test_db_ping_ok_first_try(monkeypatch):
     good = MagicMock()
     monkeypatch.setattr(database, "_get_conn", lambda: good)
     assert database.db_ping() is True
+
+
+def test_get_conn_prepings_and_replaces_stale_pool_connection(monkeypatch):
+    """_get_conn validates a pooled connection (SELECT 1) and, if it's a dead
+    idle connection, discards it (putconn close=True) and borrows a fresh one."""
+    dead = MagicMock()
+    dead.closed = False
+    dead.cursor.return_value.execute.side_effect = OSError("server closed the connection")
+    good = MagicMock()
+    good.closed = False
+    pool = MagicMock()
+    pool.getconn.side_effect = [dead, good]
+
+    monkeypatch.setattr(database, "_use_db", True)
+    monkeypatch.setattr(database, "_ensure_pool", lambda: pool)
+    database._thread_local.conn = None
+
+    try:
+        result = database._get_conn()
+        assert result is good
+        pool.putconn.assert_called_once_with(dead, close=True)
+    finally:
+        database._thread_local.conn = None
+
+
+def test_get_conn_returns_none_when_all_pool_connections_stale(monkeypatch):
+    dead = MagicMock()
+    dead.closed = False
+    dead.cursor.return_value.execute.side_effect = OSError("server closed")
+    pool = MagicMock()
+    pool.getconn.return_value = dead
+
+    monkeypatch.setattr(database, "_use_db", True)
+    monkeypatch.setattr(database, "_ensure_pool", lambda: pool)
+    database._thread_local.conn = None
+    try:
+        assert database._get_conn() is None
+    finally:
+        database._thread_local.conn = None
