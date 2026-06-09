@@ -9,12 +9,14 @@ qualified (database / config_service / deps / plans) per the strangler-fig disci
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import urlparse
 
 from fastapi import Request
 
@@ -43,6 +45,8 @@ logger = logging.getLogger("nuvatra")
 # Self-computed (same value as main/config_service) so voice_service has no main dependency.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 RECORDING_DISCLOSURE_TEXT = "This call may be recorded for quality and training."
 
@@ -679,3 +683,125 @@ def call_log_end(call_sid: str):
             except Exception as e:
                 print(f"Failed to save call log: {e}")
     del call_log_entries[call_sid]
+
+
+# ===== call recording: SSRF-guarded fetch + Whisper/GPT summary (cut 6) =====
+
+
+def _is_trusted_twilio_media_url(url: str) -> bool:
+    """True only for https URLs on a Twilio-owned host.
+
+    Recording/media URLs arrive in webhook bodies, which an attacker could forge
+    if a signature check is ever bypassed. We never attach Twilio credentials to
+    any other host — this is the SSRF / credential-exfil trust boundary, enforced
+    at every credentialed fetch site below.
+    """
+    try:
+        parsed = urlparse((url or "").strip())
+    except Exception:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return host == "twilio.com" or host.endswith(".twilio.com")
+
+
+def _fetch_twilio_recording_bytes(recording_url: str) -> tuple:
+    import httpx
+
+    if not _is_trusted_twilio_media_url(recording_url):
+        logger.error("[Recording] Refusing to fetch recording from untrusted host")
+        return 0, b""
+    r = httpx.get(
+        recording_url,
+        auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+        timeout=120.0,
+    )
+    return r.status_code, r.content
+
+
+def _summarize_call_recording_sync(
+    call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]
+) -> None:
+    """Download Twilio recording, Whisper transcribe, short GPT summary; persist call_summary."""
+    if not recording_url or not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        return
+    if not _is_trusted_twilio_media_url(recording_url):
+        logger.error(
+            "[Recording] Refusing summary fetch from untrusted host call_sid=%s",
+            call_sid,
+        )
+        return
+    try:
+        cap = int(os.getenv("CALL_SUMMARY_MAX_DURATION_SEC", "1800"))
+    except ValueError:
+        cap = 1800
+    if duration_sec is not None and duration_sec > cap:
+        logger.info(
+            "[Recording] Skip summary (duration %s sec > cap %s)", duration_sec, cap
+        )
+        return
+    if (os.getenv("TWILIO_INTELLIGENCE_SERVICE_SID") or "").strip():
+        logger.info(
+            "[Recording] TWILIO_INTELLIGENCE_SERVICE_SID is set; Phase 1 still uses OpenAI Whisper+GPT"
+        )
+    try:
+        import httpx
+
+        with httpx.Client(timeout=120.0) as http:
+            r = http.get(recording_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+        if r.status_code != 200:
+            logger.error(
+                "[Recording] Download failed status=%s call_sid=%s",
+                r.status_code,
+                call_sid,
+            )
+            return
+        audio_data = r.content
+        runtime._ensure_openai_client()
+        bio = io.BytesIO(audio_data)
+        bio.name = "recording.mp3"
+        transcript = runtime.client.audio.transcriptions.create(model="whisper-1", file=bio)
+        text = (getattr(transcript, "text", None) or "").strip()
+        if not text:
+            return
+        resp = runtime.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Summarize this phone call in 2–4 clear sentences for a business owner dashboard. Mention caller intent (e.g. appointment, question, complaint) if clear. Be factual; do not invent details.",
+                },
+                {"role": "user", "content": text[:12000]},
+            ],
+            max_tokens=350,
+            temperature=0.3,
+        )
+        summary = (resp.choices[0].message.content or "").strip()
+        if not summary:
+            return
+        database.set_request_client_id(client_id)
+        if runtime.USE_DB:
+            database.db_call_log_update_summary(call_sid, client_id, summary)
+        call_log_merge_recording(call_sid, call_summary=summary)
+        if not runtime.USE_DB:
+            _file_call_log_merge_recording(call_sid, call_summary=summary)
+    except Exception:
+        logger.exception("[Recording] Summarize failed call_sid=%s", call_sid)
+
+
+async def _schedule_recording_summary(
+    call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]
+) -> None:
+    try:
+        await asyncio.to_thread(
+            _summarize_call_recording_sync,
+            call_sid,
+            client_id,
+            recording_url,
+            duration_sec,
+        )
+    except Exception:
+        logger.exception("[Recording] Summary task failed call_sid=%s", call_sid)
