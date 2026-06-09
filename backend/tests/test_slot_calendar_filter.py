@@ -1,6 +1,8 @@
 """booked_slots rows must not block the calendar unless the appointment still holds the slot."""
 from unittest.mock import patch
 
+import database
+import booking_service
 from main import _booked_slot_rows_that_hold_calendar, is_slot_available, _invalidate_booked_slots_cache
 
 
@@ -49,8 +51,8 @@ def test_booked_slot_pending_review_kept():
 
 
 def test_is_slot_available_ignores_stale_row_for_pending_customer():
-    with patch("main._load_booked_slots") as load, patch("runtime.USE_DB", True), patch(
-        "main.db_appointments_get_all"
+    with patch("booking_service._load_booked_slots") as load, patch("runtime.USE_DB", True), patch(
+        "database.db_appointments_get_all"
     ) as ga:
         load.return_value = [
             {
@@ -75,8 +77,8 @@ def test_is_slot_available_ignores_stale_row_for_pending_customer():
 
 
 def test_is_slot_available_orphan_booked_slot_ignored():
-    with patch("main._load_booked_slots") as load, patch("runtime.USE_DB", True), patch(
-        "main.db_appointments_get_all"
+    with patch("booking_service._load_booked_slots") as load, patch("runtime.USE_DB", True), patch(
+        "database.db_appointments_get_all"
     ) as ga:
         load.return_value = [
             {

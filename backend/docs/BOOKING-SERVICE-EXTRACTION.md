@@ -10,7 +10,19 @@ style (same discipline as `config_service`/`sms_service`/`clerk_service`).
   from main. Two monkeypatches retargeted (`main.get_business_info` → `config_service.get_business_info`).
   Full unit suite green (380 passed / 10 skipped).
 
-## Next — Cut 2: the stateful slot/calendar engine
+- [x] **Cut 2 — stateful slot/calendar engine** (this commit). 21 functions + 3 module vars
+  (`_CALENDAR_HOLDING_STATUSES`, `_booked_slots_cache`, `_BOOKED_SLOTS_CACHE_TTL_SEC`). Bodies
+  qualified to `runtime.appointments`, `database.db_*`/`database._client_id`, `config_service.*`;
+  `observability.system_debug/info` imported by name. Re-exported from main so the staying
+  booking-creation/voice/SMS callers resolve. Retargeted patches in test_booked_slots_prompt
+  (`_get_all_booked_slots_merged`, `datetime`, `get_db_client_id`→`database._client_id`,
+  `get_business_info`→`config_service`) and test_slot_calendar_filter (`_load_booked_slots`,
+  `db_appointments_get_all`→`database`). test_appointment_cancel patches stay on `main` (the
+  cancel route is main-resident, so the re-export rebind reaches it). Verified BOTH gates:
+  unit 380 passed / 10 skipped; **DB-integration 384 passed / 1 xfailed** (real Postgres,
+  exercises `db_booked_slots_*`). Route set unchanged (82). main.py 8562 -> 8084.
+
+## (historical) Cut 2 plan — the stateful slot/calendar engine
 
 ### Set to MOVE (closed; verify with the AST script in /tmp/extract_booking.py, just swap the name list)
 State + const: `_booked_slots_cache` (module dict), `_invalidate_booked_slots_cache`,

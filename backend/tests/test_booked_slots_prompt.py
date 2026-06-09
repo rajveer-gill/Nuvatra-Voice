@@ -4,13 +4,16 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import main
+import database
+import config_service
+import booking_service
 
 
 def test_multi_staff_prompt_keeps_stylist_availability_separate(monkeypatch):
     tomorrow = "2026-06-05"
-    monkeypatch.setattr(main, "get_db_client_id", lambda: "salon-test")
+    monkeypatch.setattr(database, "_client_id", lambda: "salon-test")
     monkeypatch.setattr(
-        main,
+        config_service,
         "get_business_info",
         lambda: {
             "staff": [
@@ -29,8 +32,8 @@ def test_multi_staff_prompt_keeps_stylist_availability_separate(monkeypatch):
         {"date": tomorrow, "time": "16:00", "staff_id": "sara-id"},
         {"date": tomorrow, "time": "17:00", "staff_id": "sara-id"},
     ]
-    with patch("main._get_all_booked_slots_merged", return_value=slots), patch(
-        "main.datetime"
+    with patch("booking_service._get_all_booked_slots_merged", return_value=slots), patch(
+        "booking_service.datetime"
     ) as dt_mod:
         dt_mod.now.return_value = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
         main._invalidate_booked_slots_cache()
@@ -44,15 +47,15 @@ def test_multi_staff_prompt_keeps_stylist_availability_separate(monkeypatch):
 
 
 def test_single_staff_prompt_unchanged_shape(monkeypatch):
-    monkeypatch.setattr(main, "get_db_client_id", lambda: "solo")
+    monkeypatch.setattr(database, "_client_id", lambda: "solo")
     monkeypatch.setattr(
-        main,
+        config_service,
         "get_business_info",
         lambda: {"staff": [{"id": "solo-id", "name": "Jamie"}]},
     )
     slots = [{"date": "2026-06-05", "time": "14:00", "staff_id": "solo-id"}]
-    with patch("main._get_all_booked_slots_merged", return_value=slots), patch(
-        "main.datetime"
+    with patch("booking_service._get_all_booked_slots_merged", return_value=slots), patch(
+        "booking_service.datetime"
     ) as dt_mod:
         dt_mod.now.return_value = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
         main._invalidate_booked_slots_cache()

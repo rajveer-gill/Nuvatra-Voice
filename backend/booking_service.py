@@ -15,6 +15,11 @@ from typing import List, Optional
 from fastapi import HTTPException
 
 import config_service
+import database
+import runtime
+import json
+from datetime import datetime, timezone
+from observability import system_debug, system_info
 
 DEFAULT_SLOT_DURATION_MINUTES = 30
 
@@ -226,3 +231,481 @@ def _appointment_email_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+# ===== stateful slot/calendar engine (cut 2) =====
+
+_CALENDAR_HOLDING_STATUSES = frozenset(
+    {"accepted", "confirmed", "completed", "pending", "pending_review"}
+)
+
+_booked_slots_cache: dict = {}
+
+_BOOKED_SLOTS_CACHE_TTL_SEC = (
+    10  # Short TTL so "available" and actual check stay in sync
+)
+
+
+def _tenant_sms_from_number() -> Optional[str]:
+    """Outbound SMS From: tenant's Twilio number in DB, else business config phone (non-DB). None → send_sms uses TWILIO_SMS_FROM."""
+    if runtime.USE_DB:
+        cid = database._client_id()
+        if cid and cid != "default":
+            tenant = database.db_tenant_get_by_client_id(cid)
+            if tenant:
+                n = (tenant.get("twilio_phone_number") or "").strip()
+                if n:
+                    return n
+    phone = (config_service.get_business_info().get("phone") or "").strip()
+    return phone or None
+
+def _booked_slot_duration_by_appointment_id() -> dict[int, int]:
+    out: dict[int, int] = {}
+    for s in _load_booked_slots():
+        try:
+            aid = int(s.get("appointment_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not aid:
+            continue
+        try:
+            dm = int(s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES)
+        except (TypeError, ValueError):
+            dm = DEFAULT_SLOT_DURATION_MINUTES
+        out[aid] = max(5, min(dm, 480))
+    return out
+
+def _load_booked_slots() -> List[dict]:
+    """Load booked slots from client data dir. Each entry: {date, time, appointment_id, duration_minutes?}."""
+    if runtime.USE_DB:
+        return database.db_booked_slots_load()
+    data_dir = config_service.get_client_data_dir()
+    if not data_dir:
+        return []
+    path = data_dir / "booked_slots.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_booked_slots(slots: List[dict]) -> None:
+    if runtime.USE_DB:
+        database.db_booked_slots_save(slots)
+        return
+    data_dir = config_service.get_client_data_dir()
+    if not data_dir:
+        return
+    path = data_dir / "booked_slots.json"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(slots, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save booked_slots: {e}")
+
+def _staff_slot_key(sid: Optional[str]) -> str:
+    s = (sid or "").strip()
+    return s if s else "__unassigned__"
+
+def _staff_label_for_slot_key(staff_key: str, id_to_name: dict[str, str]) -> str:
+    if staff_key == "__unassigned__":
+        return "Unassigned"
+    return id_to_name.get(staff_key, staff_key)
+
+def _appointment_rows_for_calendar_merge() -> List[dict]:
+    if runtime.USE_DB:
+        return database.db_appointments_get_all()
+    return list(runtime.appointments)
+
+def _appointment_by_id_map(rows: List[dict]) -> dict[int, dict]:
+    m: dict[int, dict] = {}
+    for a in rows:
+        aid = a.get("id")
+        if aid is None:
+            continue
+        try:
+            m[int(aid)] = a
+        except (TypeError, ValueError):
+            continue
+    return m
+
+def _booked_slot_rows_that_hold_calendar(
+    raw_slots: List[dict], apt_by_id: dict[int, dict]
+) -> List[dict]:
+    """Keep persisted booked_slots entries only when the linked appointment still holds the slot."""
+    kept: List[dict] = []
+    for s in raw_slots:
+        aid = s.get("appointment_id")
+        if aid is None:
+            continue
+        try:
+            aid_int = int(aid)
+        except (TypeError, ValueError):
+            continue
+        apt = apt_by_id.get(aid_int)
+        if not apt:
+            continue
+        st = (apt.get("status") or "").strip()
+        if st not in _CALENDAR_HOLDING_STATUSES:
+            continue
+        kept.append(s)
+    return kept
+
+def _get_all_booked_slots_merged() -> List[dict]:
+    """Merge booked_slots table with appointments (accepted/pending) so AI sees all taken times."""
+    apts = _appointment_rows_for_calendar_merge()
+    apt_by_id = _appointment_by_id_map(apts)
+    slots = _booked_slot_rows_that_hold_calendar(_load_booked_slots(), apt_by_id)
+    if runtime.USE_DB:
+        seen = {
+            (s.get("date"), s.get("time"), _staff_slot_key(s.get("staff_id")))
+            for s in slots
+        }
+        for a in apts:
+            if not a.get("date") or not a.get("time"):
+                continue
+            # pending_customer: details texted to caller; slot is not held until they SMS-confirm (see handle_incoming_sms).
+            if a.get("status") in (
+                "accepted",
+                "confirmed",
+                "completed",
+                "pending",
+                "pending_review",
+            ):
+                sk = _staff_slot_key(a.get("staff_id"))
+                k = (a["date"], a["time"], sk)
+                if k not in seen:
+                    slots.append(
+                        {
+                            "date": a["date"],
+                            "time": a["time"],
+                            "appointment_id": a.get("id", 0),
+                            "duration_minutes": _appointment_duration_minutes(a),
+                            "staff_id": a.get("staff_id"),
+                        }
+                    )
+                    seen.add(k)
+    return slots
+
+def get_booked_slots(date: str) -> List[dict]:
+    """Return slots already booked for the given date (YYYY-MM-DD)."""
+    slots = _get_all_booked_slots_merged()
+    return [s for s in slots if s.get("date") == date]
+
+def _slot_overlaps(
+    start_a: str, duration_a: int, start_b: str, duration_b: int
+) -> bool:
+    """True if two time windows overlap. start_* is HH:MM or flexible (10, 10:00, etc.)."""
+    a_start = _time_to_minutes(start_a)
+    a_end = a_start + duration_a
+    b_start = _time_to_minutes(start_b)
+    b_end = b_start + duration_b
+    return a_start < b_end and b_start < a_end
+
+def _slot_blocking_details(
+    date: str,
+    time: str,
+    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES,
+    staff_id: Optional[str] = None,
+) -> List[dict]:
+    """Return merged slot rows (with appointment status) that block this window."""
+    want = _staff_slot_key(staff_id)
+    norm_time = _normalize_time_to_hhmm(time) or time
+    apt_by_id = _appointment_by_id_map(_appointment_rows_for_calendar_merge())
+    out: List[dict] = []
+    for s in _get_all_booked_slots_merged():
+        if s.get("date") != date or _staff_slot_key(s.get("staff_id")) != want:
+            continue
+        slot_time = s.get("time") or ""
+        d = s.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES
+        if not _slot_overlaps(norm_time, duration_minutes, slot_time, d):
+            continue
+        aid = s.get("appointment_id")
+        apt_status = ""
+        if aid is not None:
+            apt = apt_by_id.get(int(aid))
+            if apt:
+                apt_status = (apt.get("status") or "").strip()
+        out.append(
+            {
+                "appointment_id": aid,
+                "time": slot_time,
+                "status": apt_status,
+            }
+        )
+    return out
+
+def is_slot_available(
+    date: str,
+    time: str,
+    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES,
+    staff_id: Optional[str] = None,
+) -> bool:
+    """True if no overlapping booking for this date+time and staff column."""
+    blockers = _slot_blocking_details(date, time, duration_minutes, staff_id)
+    if blockers:
+        system_debug(
+            "slot_unavailable",
+            date=date,
+            time=time,
+            staff_key=_staff_slot_key(staff_id),
+            blockers=blockers,
+        )
+        return False
+    system_debug(
+        "slot_available", date=date, time=time, staff_key=_staff_slot_key(staff_id)
+    )
+    return True
+
+def reserve_slot(
+    date: str,
+    time: str,
+    appointment_id: int,
+    duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES,
+    staff_id: Optional[str] = None,
+) -> None:
+    """Record a slot as booked when creating an appointment."""
+    slots = _load_booked_slots()
+    slots.append(
+        {
+            "date": date,
+            "time": time,
+            "appointment_id": appointment_id,
+            "duration_minutes": duration_minutes,
+            "staff_id": staff_id,
+        }
+    )
+    _save_booked_slots(slots)
+    _invalidate_booked_slots_cache()
+    system_debug(
+        "slot_reserved",
+        date=date,
+        time=time,
+        appointment_id=appointment_id,
+        staff_id=staff_id,
+    )
+
+def release_slot(appointment_id: int) -> None:
+    """Remove slot when appointment is rejected or cancelled."""
+    slots = _load_booked_slots()
+    slots = [s for s in slots if s.get("appointment_id") != appointment_id]
+    _save_booked_slots(slots)
+    _invalidate_booked_slots_cache()
+    system_debug("slot_released", appointment_id=appointment_id)
+
+def _reconcile_sms_appointment_slot_after_detail_change(apt: dict) -> None:
+    """After SMS time/date change, move calendar hold when the appointment already reserves a slot."""
+    aid = apt.get("id")
+    if not aid:
+        return
+    st = (apt.get("status") or "").strip()
+    if st not in ("pending_review", "accepted", "confirmed", "completed"):
+        return
+    release_slot(int(aid))
+    date_str = (apt.get("date") or "").strip()
+    time_hhmm = _normalize_time_to_hhmm(apt.get("time") or "") or (apt.get("time") or "").strip()
+    staff_for = (apt.get("staff_id") or "").strip() or None
+    duration = _appointment_duration_minutes(apt)
+    if date_str and time_hhmm and is_slot_available(date_str, time_hhmm, duration, staff_for):
+        reserve_slot(date_str, time_hhmm, int(aid), duration, staff_for)
+
+def _reconcile_booked_slots_orphans() -> int:
+    """Drop booked_slots rows whose appointment no longer holds the calendar (fixes AI 'taken' with empty UI)."""
+    if not runtime.USE_DB:
+        return 0
+    apts = _appointment_rows_for_calendar_merge()
+    apt_by_id = _appointment_by_id_map(apts)
+    raw = _load_booked_slots()
+    kept = _booked_slot_rows_that_hold_calendar(raw, apt_by_id)
+    removed = len(raw) - len(kept)
+    if removed > 0:
+        _save_booked_slots(kept)
+        _invalidate_booked_slots_cache()
+        system_info(
+            "booked_slots_orphans_removed",
+            removed=removed,
+            client_id=database._client_id(),
+        )
+    return removed
+
+def _voice_calendar_holds() -> List[dict]:
+    """Slots the AI receptionist treats as unavailable, with linked appointment when one exists."""
+    apts = _appointment_rows_for_calendar_merge()
+    apt_by_id = _appointment_by_id_map(apts)
+    holds: List[dict] = []
+    for s in _get_all_booked_slots_merged():
+        aid = s.get("appointment_id")
+        apt = None
+        if aid is not None:
+            try:
+                apt = apt_by_id.get(int(aid))
+            except (TypeError, ValueError):
+                apt = None
+        holds.append(
+            {
+                "date": s.get("date"),
+                "time": _normalize_time_to_hhmm(s.get("time") or "")
+                or (s.get("time") or ""),
+                "appointment_id": aid,
+                "status": (apt.get("status") if apt else None) or "unknown",
+                "name": (apt.get("name") if apt else None) or "",
+                "phone": (apt.get("phone") if apt else None) or "",
+                "source": (apt.get("source") if apt else None) or "",
+            }
+        )
+    return holds
+
+def _invalidate_booked_slots_cache() -> None:
+    """Clear booked slots cache so next prompt build sees current availability (e.g. after reserve/release)."""
+    _booked_slots_cache.clear()
+
+def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False) -> str:
+    """Build booked-slot lines for the system prompt (per-stylist when multi-staff)."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    client_key = database._client_id() or "default"
+    cache_key = f"{client_key}:{days_ahead}"
+    if not skip_cache and cache_key in _booked_slots_cache:
+        text, expires = _booked_slots_cache[cache_key]
+        if expires > now:
+            system_debug(
+                "booked_slots_prompt_cache_hit",
+                client_key=client_key,
+                slots_text_len=len(text),
+            )
+            return text
+        del _booked_slots_cache[cache_key]
+    all_slots = _get_all_booked_slots_merged()
+    system_debug(
+        "booked_slots_prompt_built",
+        client_key=client_key,
+        skip_cache=skip_cache,
+        total_slots=len(all_slots),
+    )
+    info = config_service.get_business_info()
+    roster = [
+        ((s.get("id") or "").strip(), (s.get("name") or "").strip())
+        for s in (info.get("staff") or [])
+        if (s.get("name") or "").strip()
+    ]
+    multi_staff = len(roster) >= 2
+    id_to_name = {sid: name for sid, name in roster if sid}
+    today = now.date()
+    default_times = [f"{h:02d}:00" for h in range(9, 18)]  # 09:00–17:00
+    parts: List[str] = []
+    suggest_parts: List[str] = []
+
+    dates_with_bookings: set[str] = set()
+    for s in all_slots:
+        dt = (s.get("date") or "").strip()
+        if dt:
+            dates_with_bookings.add(dt)
+
+    if multi_staff:
+        by_stylist_booked: dict[str, List[str]] = {}
+        by_date_staff: dict[tuple[str, str], List[str]] = {}
+        for s in all_slots:
+            dt = (s.get("date") or "").strip()
+            t = (s.get("time") or "").strip()
+            if not dt or not t:
+                continue
+            sk = _staff_slot_key(s.get("staff_id"))
+            by_date_staff.setdefault((dt, sk), []).append(t)
+        for (dt, sk), times in sorted(by_date_staff.items()):
+            label = _staff_label_for_slot_key(sk, id_to_name)
+            times_display = [_hhmm_to_ampm(x) for x in sorted(set(times))]
+            by_stylist_booked.setdefault(label, []).append(
+                f"{dt} at {', '.join(times_display)}"
+            )
+        if by_stylist_booked:
+            booked_lines = [
+                f"{label}: {'; '.join(lines)}"
+                for label, lines in sorted(by_stylist_booked.items())
+            ]
+            parts.append(
+                "Booked slots by stylist (each calendar is separate—do not merge across people): "
+                + " | ".join(booked_lines)
+            )
+        roster_with_ids = [(sid, name) for sid, name in roster if sid]
+        for d in range(days_ahead):
+            day = today + timedelta(days=d)
+            date_str = day.isoformat()
+            if date_str not in dates_with_bookings:
+                continue
+            for sid, name in roster_with_ids:
+                times = by_date_staff.get((date_str, sid), [])
+                taken_set = {
+                    t
+                    for t in (
+                        _normalize_time_to_hhmm(x.strip()) for x in times if x
+                    )
+                    if t
+                }
+                if not taken_set:
+                    suggest_parts.append(
+                        f"For {name} on {date_str} no times are booked for {name}—"
+                        f"standard hours 9 AM–5 PM are available with {name}."
+                    )
+                    continue
+                safe = [t for t in default_times if t not in taken_set]
+                taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]
+                if safe:
+                    safe_display = [_hhmm_to_ampm(t) for t in safe]
+                    suggest_parts.append(
+                        f"For {name} on {date_str} ONLY suggest these times (free for {name}): "
+                        f"{', '.join(safe_display)}. Never suggest {', '.join(taken_display)} for {name}—"
+                        f"already taken for {name}."
+                    )
+                else:
+                    suggest_parts.append(
+                        f"For {name} on {date_str} standard hours appear fully booked for {name} "
+                        f"({', '.join(taken_display)}). Offer another day or another stylist—not "
+                        f"that the whole salon is closed."
+                    )
+    else:
+        by_date: dict[str, List[str]] = {}
+        for s in all_slots:
+            dt = (s.get("date") or "").strip()
+            if not dt:
+                continue
+            t = (s.get("time") or "").strip()
+            if t:
+                by_date.setdefault(dt, []).append(t)
+        for d in range(days_ahead):
+            day = today + timedelta(days=d)
+            date_str = day.isoformat()
+            times = by_date.get(date_str) or []
+            if times:
+                times_display = [_hhmm_to_ampm(t) for t in sorted(times)]
+                parts.append(f"{date_str} at {', '.join(times_display)}")
+                taken_set = {
+                    t
+                    for t in (
+                        _normalize_time_to_hhmm(x.strip()) for x in times if x
+                    )
+                    if t
+                }
+                safe = [t for t in default_times if t not in taken_set]
+                if safe:
+                    safe_display = [_hhmm_to_ampm(t) for t in safe]
+                    taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]
+                    suggest_parts.append(
+                        f"For {date_str} ONLY suggest these times (they are free): "
+                        f"{', '.join(safe_display)}. Never suggest {', '.join(taken_display)}—already taken."
+                    )
+
+    if parts:
+        if multi_staff:
+            text = " ".join(parts) + ". "
+        else:
+            text = "Booked slots (do not double-book): " + "; ".join(parts) + ". "
+    else:
+        text = ""
+    if suggest_parts:
+        text += " " + " ".join(suggest_parts)
+    expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
+    _booked_slots_cache[cache_key] = (text, expires_at)
+    return text
