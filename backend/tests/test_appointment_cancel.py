@@ -1,8 +1,22 @@
-"""Tests for store cancellation of accepted appointments."""
+"""Tests for store cancellation of accepted appointments.
 
+cancel_appointment now lives in routers/appointments.py and resolves its helpers by
+module (database / booking_service / config_service / sms_service / deps), so patches
+target those owning modules rather than `main`.
+"""
+
+import asyncio
 from unittest.mock import MagicMock
 
-import main
+import pytest
+from fastapi import HTTPException
+
+import booking_service
+import config_service
+import database
+import deps
+import sms_service
+from routers import appointments as appts
 
 
 def test_cancel_accepted_appointment(monkeypatch):
@@ -19,7 +33,7 @@ def test_cancel_accepted_appointment(monkeypatch):
     sent = []
 
     monkeypatch.setattr(
-        main,
+        database,
         "db_appointments_get_by_id",
         lambda aid, client_id=None: dict(stored) if aid == 7 else None,
     )
@@ -28,30 +42,28 @@ def test_cancel_accepted_appointment(monkeypatch):
         stored.update(kwargs)
         return dict(stored)
 
-    monkeypatch.setattr(main, "db_appointments_update", fake_update)
-    monkeypatch.setattr(main, "release_slot", lambda aid: released.append(aid))
-    monkeypatch.setattr(main, "get_business_info", lambda: {"name": "Test Biz"})
+    monkeypatch.setattr(database, "db_appointments_update", fake_update)
+    monkeypatch.setattr(booking_service, "release_slot", lambda aid: released.append(aid))
+    monkeypatch.setattr(config_service, "get_business_info", lambda: {"name": "Test Biz"})
     monkeypatch.setattr(
-        main,
+        booking_service,
         "polish_owner_customer_sms",
         lambda reason, biz, apt, event="decline": f"cancel:{event}",
     )
     monkeypatch.setattr(
-        main,
+        sms_service,
         "send_sms",
         lambda to, body, from_override=None: sent.append(body) or True,
     )
-    monkeypatch.setattr(main, "_tenant_sms_from_number", lambda: "+15552220000")
-    monkeypatch.setattr(main, "_bind_tenant_db_context", lambda tenant: "test")
-    monkeypatch.setattr(main, "audit_log", lambda *a, **k: None)
-    monkeypatch.setattr(main, "system_info", lambda *a, **k: None)
-
-    import asyncio
+    monkeypatch.setattr(booking_service, "_tenant_sms_from_number", lambda: "+15552220000")
+    monkeypatch.setattr(deps, "_bind_tenant_db_context", lambda tenant: "test")
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(appts, "system_info", lambda *a, **k: None)
 
     result = asyncio.run(
-        main.cancel_appointment(
+        appts.cancel_appointment(
             7,
-            main.AppointmentRejectBody(reason="Clearing test booking"),
+            appts.AppointmentRejectBody(reason="Clearing test booking"),
             request=MagicMock(),
             tenant={"client_id": "test"},
         )
@@ -65,21 +77,17 @@ def test_cancel_accepted_appointment(monkeypatch):
 def test_cancel_rejects_pending_review(monkeypatch):
     monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(
-        main,
+        database,
         "db_appointments_get_by_id",
         lambda aid, client_id=None: {"id": 1, "status": "pending_review"},
     )
-    monkeypatch.setattr(main, "_bind_tenant_db_context", lambda tenant: "test")
-
-    import asyncio
-    import pytest
-    from fastapi import HTTPException
+    monkeypatch.setattr(deps, "_bind_tenant_db_context", lambda tenant: "test")
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
-            main.cancel_appointment(
+            appts.cancel_appointment(
                 1,
-                main.AppointmentRejectBody(reason="nope"),
+                appts.AppointmentRejectBody(reason="nope"),
                 request=MagicMock(),
                 tenant={"client_id": "test"},
             )

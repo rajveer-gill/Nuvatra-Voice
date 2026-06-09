@@ -14,12 +14,16 @@ from typing import List, Optional
 
 from fastapi import HTTPException
 
+import logging
+
 import config_service
 import database
 import runtime
 import json
 from datetime import datetime, timezone
 from observability import system_debug, system_info
+
+logger = logging.getLogger("nuvatra")
 
 DEFAULT_SLOT_DURATION_MINUTES = 30
 
@@ -709,3 +713,70 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
     expires_at = now + timedelta(seconds=_BOOKED_SLOTS_CACHE_TTL_SEC)
     _booked_slots_cache[cache_key] = (text, expires_at)
     return text
+
+
+# ===== appointment decline/cancel SMS polish (uses runtime.client) =====
+
+
+def polish_owner_customer_sms(
+    raw_reason: str,
+    business_name: str,
+    apt: dict,
+    *,
+    event: str = "decline",
+) -> str:
+    """Rewrite owner note into a warm customer SMS (decline pending request or cancel accepted booking)."""
+    text = (raw_reason or "").strip()
+    if not text:
+        text = (
+            "We need to cancel your appointment."
+            if event == "cancel"
+            else "We could not accommodate that time."
+        )
+    date = apt.get("date") or ""
+    time_ampm = _hhmm_to_ampm(apt.get("time") or "") or (apt.get("time") or "")
+    if event == "cancel":
+        system = (
+            "You write brief SMS messages for a salon, barbershop, or nail studio. "
+            "The business is CANCELLING an already confirmed appointment. "
+            "Rewrite the owner's note into ONE warm, natural cancellation message. "
+            "State clearly that the appointment is cancelled. Max 480 characters. "
+            "Do not invent policies. Invite them to rebook if appropriate."
+        )
+        user = (
+            f"Business name: {business_name}\n"
+            f"Confirmed appointment: {date} at {time_ampm}\n"
+            f"Owner note: {text[:1800]}"
+        )
+    else:
+        system = (
+            "You write brief SMS messages for a salon, barbershop, or nail studio. "
+            "Rewrite the owner's decline reason into ONE warm, natural message. "
+            "Max 480 characters. Do not invent discounts, guarantees, or policies. "
+            "If appropriate, invite alternative dates/times. Match the tone of the owner's note."
+        )
+        user = (
+            f"Business name: {business_name}\n"
+            f"Appointment requested: {date} at {time_ampm}\n"
+            f"Owner note: {text[:1800]}"
+        )
+    try:
+        runtime._ensure_openai_client()
+        r = runtime.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=220,
+            temperature=0.45,
+        )
+        out = (r.choices[0].message.content or "").strip()
+        return out[:1580] if out else text[:1580]
+    except Exception as e:
+        logger.warning("polish_owner_customer_sms_openai_failed event=%s: %s", event, e)
+        return text[:1580]
+
+
+def polish_owner_decline_sms(raw_reason: str, business_name: str, apt: dict) -> str:
+    return polish_owner_customer_sms(raw_reason, business_name, apt, event="decline")

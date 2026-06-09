@@ -1,17 +1,18 @@
-"""Appointments API — CRUD + accept (booking creation/calendar/status).
+"""Appointments API — full domain: CRUD, accept, and AI-polished decline/cancel.
 
-The AI-polished decline/cancel routes (reject, cancel, preview-decline-sms) stay in
-main for now — they depend on polish_owner_*_sms, which couples to the OpenAI client
-(a shared runtime piece deferred to its own extraction). They move once that lands.
+All nine appointment routes live here. Slot/duration/calendar logic comes from
+booking_service; the decline/cancel routes use booking_service.polish_owner_*_sms
+(which calls runtime.client). Helpers are resolved by module (deps/database/
+booking_service/config_service/sms_service/runtime) so monkeypatches target owners.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import booking_service
 import config_service
@@ -262,3 +263,149 @@ async def accept_appointment(
     msg = f"Your appointment at {business_name} is confirmed for {date} at {time_ampm}. Reply if you need to change."
     sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
     return {"success": True, "appointment": apt}
+
+
+# ===== AI-polished decline/cancel routes (cut 2; need runtime.client) =====
+
+
+class AppointmentRejectBody(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class PreviewDeclineSmsBody(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=2000)
+    appointment_id: Optional[int] = None
+    event: Literal["decline", "cancel"] = "decline"
+
+
+_ACCEPTED_APPOINTMENT_STATUSES = frozenset({"accepted", "confirmed", "completed"})
+
+
+@router.post("/api/appointments/{appointment_id}/reject")
+async def reject_appointment(
+    appointment_id: int,
+    body: AppointmentRejectBody,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Reject request with owner-provided reason; AI-polished SMS to customer."""
+    cid = deps._bind_tenant_db_context(tenant)
+    apt = (
+        database.db_appointments_get_by_id(appointment_id, client_id=cid)
+        if runtime.USE_DB
+        else next((a for a in runtime.appointments if a["id"] == appointment_id), None)
+    )
+    if not apt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if str(apt.get("status") or "") != "pending_review":
+        raise HTTPException(
+            status_code=400, detail="Appointment is not awaiting approval"
+        )
+    reason_clean = body.reason.strip()
+    if runtime.USE_DB:
+        apt = (
+            database.db_appointments_update(
+                appointment_id,
+                status="rejected",
+                owner_decline_reason=reason_clean,
+                client_id=cid,
+            )
+            or apt
+        )
+    else:
+        apt["status"] = "rejected"
+    deps.audit_log(
+        "user",
+        "appointment_rejected",
+        resource_type="appointment",
+        resource_id=str(appointment_id),
+        details={"date": apt.get("date"), "time": apt.get("time")},
+        request=request,
+    )
+    booking_service.release_slot(appointment_id)
+    business_name = config_service.get_business_info().get("name", "us")
+    msg = booking_service.polish_owner_decline_sms(reason_clean, business_name, apt)
+    sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
+    return {"success": True, "appointment": apt}
+
+
+@router.post("/api/appointments/{appointment_id}/cancel")
+async def cancel_appointment(
+    appointment_id: int,
+    body: AppointmentRejectBody,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Cancel an accepted booking, free the slot, and text the customer."""
+    cid = deps._bind_tenant_db_context(tenant)
+    apt = (
+        database.db_appointments_get_by_id(appointment_id, client_id=cid)
+        if runtime.USE_DB
+        else next((a for a in runtime.appointments if a["id"] == appointment_id), None)
+    )
+    if not apt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    st = str(apt.get("status") or "")
+    if st not in _ACCEPTED_APPOINTMENT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="Only accepted runtime.appointments can be cancelled from the dashboard",
+        )
+    reason_clean = body.reason.strip()
+    if runtime.USE_DB:
+        apt = (
+            database.db_appointments_update(
+                appointment_id,
+                status="cancelled",
+                owner_decline_reason=reason_clean,
+                client_id=cid,
+            )
+            or apt
+        )
+    else:
+        apt["status"] = "cancelled"
+    deps.audit_log(
+        "user",
+        "appointment_cancelled",
+        resource_type="appointment",
+        resource_id=str(appointment_id),
+        details={"date": apt.get("date"), "time": apt.get("time")},
+        request=request,
+    )
+    booking_service.release_slot(appointment_id)
+    business_name = config_service.get_business_info().get("name", "us")
+    msg = booking_service.polish_owner_customer_sms(reason_clean, business_name, apt, event="cancel")
+    sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
+    system_info(
+        "appointment_cancelled_by_store",
+        appointment_id=appointment_id,
+        client_id=cid,
+        date=apt.get("date"),
+        time=apt.get("time"),
+    )
+    return {"success": True, "appointment": apt}
+
+
+@router.post("/api/appointments/preview-decline-sms")
+async def preview_decline_sms(
+    body: PreviewDeclineSmsBody,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Return AI-polished decline text without sending SMS (for owner review before reject)."""
+    cid = deps._bind_tenant_db_context(tenant)
+    apt: dict = {}
+    if body.appointment_id is not None and runtime.USE_DB:
+        apt = database.db_appointments_get_by_id(body.appointment_id, client_id=cid) or {}
+        if not apt:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+    business_name = config_service.get_business_info().get("name", "us")
+    event = (body.event or "decline").strip().lower()
+    if event not in ("decline", "cancel"):
+        event = "decline"
+    polished = booking_service.polish_owner_customer_sms(
+        body.reason.strip(),
+        business_name,
+        apt if apt else {"date": "", "time": ""},
+        event=event,
+    )
+    return {"polished_message": polished}
