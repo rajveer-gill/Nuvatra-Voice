@@ -80,3 +80,36 @@ Low risk at current (salon-booking) concurrency; a genuine architectural defect 
 real load and a definite finding against a "Google/Meta" review bar. Schedule as its
 own workstream with staging load tests — separate from the main.py router refactor,
 which is about file structure, not the connection layer.
+
+## Sharpened fix (diagnosed) — the thread-local model is the root cause
+
+Converting handlers to `def` does NOT fix it: FastAPI's threadpool does not pin a
+thread per request, so a worker-thread connection gets reused across requests
+carrying transaction state, and a `Depends`-with-`yield` teardown can run on a
+different worker thread than the handler. The correct fix is to make the per-request
+connection follow the *request context*, not the thread:
+
+1. In `database.py`, replace the `_thread_local` connection with a **`contextvars.ContextVar`**
+   (anyio copies contextvars into the threadpool, so it follows both async tasks and
+   sync handlers). `_get_conn`/release read/write the contextvar.
+2. Acquire/release per request via a **request-scoped dependency with `yield`** (or
+   keep a middleware, but the contextvar makes release correct in any context). Drop
+   the event-loop-thread async release middleware.
+3. Then DB-bound CRUD handlers can be plain `def` (threadpooled, no event-loop block),
+   and there is no cross-request connection sharing.
+
+This is the **highest-blast-radius change in the codebase** (every endpoint's DB
+access). Do NOT rush it — it requires the load test below.
+
+## Local validation runbook (ready now)
+
+- Throwaway Postgres: `docker run -d --name csurge-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=postgres -p 5432:5432 postgres:16`
+- Run the DB-integration suite (isolated per conftest): `DATABASE_URL=postgresql://postgres:dev@localhost:5432/postgres python3.9 -m pytest -q` → 384 passed / 0 failed.
+- DATABASE_URL is intentionally NOT in `.env` (it would make the unit suite hit real PG); pass it inline for DB runs.
+
+## Progress
+- [x] **Step 1 — DB-integration test isolation** (conftest clean-slate; commit 434c22f). Makes the rework verifiable.
+- [ ] Step 2 — concurrency reproduction test (httpx.AsyncClient, db→await→db, assert no cross-request bleed) — the gate.
+- [ ] Step 3 — implement the contextvar connection rework.
+- [ ] Step 4 — repro passes + full suite green + load test (locust/k6, watch `pg_stat_activity`).
+- [ ] Step 5 — staged deploy, watched.
