@@ -34,7 +34,7 @@ def test_analytics_export_growth_returns_csv(client):
     from main import require_tenant
     app.dependency_overrides[require_tenant] = _tenant_growth
 
-    with patch("main._load_call_log", return_value=[]):
+    with patch("routers.analytics._load_call_log", return_value=[]):
         try:
             resp = client.get("/api/analytics/export")
             assert resp.status_code == 200
@@ -48,7 +48,7 @@ def test_analytics_export_pro_returns_csv(client):
     from main import require_tenant
     app.dependency_overrides[require_tenant] = _tenant_pro
 
-    with patch("main._load_call_log", return_value=[]):
+    with patch("routers.analytics._load_call_log", return_value=[]):
         try:
             resp = client.get("/api/analytics/export")
             assert resp.status_code == 200
