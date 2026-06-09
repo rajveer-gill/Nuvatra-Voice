@@ -10,6 +10,7 @@ import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
 import { AuditLog } from '@/components/admin/AuditLog'
+import { FleetHealthSummary } from '@/components/admin/FleetHealthSummary'
 
 type TenantAccessStatus = 'active' | 'pending_invite' | 'none' | 'active_pending_mismatch'
 
@@ -770,6 +771,8 @@ export default function AdminPage() {
               </button>
             </div>
           </motion.form>
+
+          <FleetHealthSummary tenants={tenants} />
 
           <section className="rounded-2xl border border-white/10 bg-zinc-900/70 p-6 shadow-xl backdrop-blur-md md:p-8">
             <h2 className="mb-4 font-display text-lg font-semibold text-white">Existing tenants</h2>
