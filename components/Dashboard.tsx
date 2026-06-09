@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
 import { STATUS_CLASSES, STATUS_LABELS } from '@/components/appointments/appointmentStatus'
 
@@ -126,7 +127,15 @@ export default function Dashboard() {
       const limits = sub?.limits
       setHasExport(!!limits?.has_export)
       setMinutesCap(limits?.minutes_cap ?? null)
-      setUsage(sub?.usage ?? null)
+      setUsage(
+        sub?.usage
+          ? {
+              voice_minutes: sub.usage.voice_minutes ?? 0,
+              sms_count: sub.usage.sms_count ?? 0,
+              month: sub.usage.month ?? '',
+            }
+          : null,
+      )
       setStats(statsRes.data)
       setAppointments(appointmentsRes.data.appointments || [])
       setMessages(messagesRes.data.messages || [])
@@ -156,8 +165,32 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+      <div className="space-y-6">
+        {/* Stat cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="bg-white rounded-lg shadow-md p-6">
+              <div className="flex items-center justify-between">
+                <div className="space-y-3">
+                  <Skeleton className="h-3 w-28" />
+                  <Skeleton className="h-8 w-16" />
+                </div>
+                <Skeleton className="h-12 w-12 rounded-full" />
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Section blocks */}
+        {[0, 1].map((i) => (
+          <div key={i} className="bg-white rounded-lg shadow-md p-6 space-y-4">
+            <Skeleton className="h-5 w-48" />
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[0, 1, 2, 3].map((j) => (
+                <Skeleton key={j} className="h-16 w-full" />
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     )
   }
