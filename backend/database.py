@@ -1502,6 +1502,58 @@ def db_audit_append(
     except Exception as e:
         print(f"[DB] Failed to append audit: {e}")
 
+def db_audit_list(
+    *,
+    limit: int = 100,
+    client_id: Optional[str] = None,
+    action: Optional[str] = None,
+) -> List[dict]:
+    """Recent audit events for the admin viewer, newest first. Optional filters by
+    client_id / action. Excludes the `details` blob (keeps the table clean and
+    avoids surfacing hashes); core who/what/when/where is returned."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        where = []
+        params: list = []
+        if client_id:
+            where.append("client_id = %s")
+            params.append(client_id)
+        if action:
+            where.append("action = %s")
+            params.append(action)
+        sql = (
+            "SELECT id, occurred_at, actor_type, actor_id, action, resource_type, "
+            "resource_id, client_id, ip FROM audit_events"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY occurred_at DESC LIMIT %s"
+        params.append(max(1, min(int(limit), 500)))
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "id": r[0],
+                "occurred_at": r[1].isoformat() if r[1] else None,
+                "actor_type": r[2],
+                "actor_id": r[3],
+                "action": r[4],
+                "resource_type": r[5],
+                "resource_id": r[6],
+                "client_id": r[7],
+                "ip": r[8],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        _log.warning("db_audit_list failed: %s", e)
+        return []
+
+
 def _normalize_phone(phone: str) -> str:
     return "".join(c for c in (phone or "") if c.isdigit())
 

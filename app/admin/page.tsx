@@ -9,6 +9,7 @@ import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
+import { AuditLog } from '@/components/admin/AuditLog'
 
 type TenantAccessStatus = 'active' | 'pending_invite' | 'none' | 'active_pending_mismatch'
 
@@ -685,6 +686,8 @@ export default function AdminPage() {
           </section>
 
           <ProvisioningPanel />
+
+          <AuditLog />
 
           <motion.form
             onSubmit={handleSubmit}
