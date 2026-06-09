@@ -26,6 +26,11 @@ logger = logging.getLogger("nuvatra")
 TWILIO_SMS_FROM = os.getenv("TWILIO_SMS_FROM") or os.getenv("TWILIO_PHONE_NUMBER") or ""
 
 
+def normalize_phone(phone: str) -> str:
+    """Normalize to a digits-only key (no +). Used for caller-memory/booking phone matching."""
+    return "".join(c for c in phone if c.isdigit())
+
+
 def _phone_to_e164(phone: str) -> Optional[str]:
     """Convert to E.164 for Twilio SMS (e.g. +15551234567). Returns None if too short."""
     digits = "".join(c for c in phone if c.isdigit())
