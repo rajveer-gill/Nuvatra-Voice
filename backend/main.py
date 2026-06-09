@@ -141,47 +141,13 @@ from booking_fields import (
 )
 
 
-# _public_base_url now lives in deps (cross-cutting webhook/url helper); re-export.
-from deps import _public_base_url  # noqa: E402,F401
-
-
-def _derived_public_base_from_request(request: Request) -> str:
-    """When PUBLIC_BASE_URL is unset, derive https://host from the inbound webhook (Render/proxies send X-Forwarded-*)."""
-    host = (
-        (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
-        .split(",")[0]
-        .strip()
-    )
-    if not host:
-        return ""
-    proto = (
-        (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    )
-    if proto not in ("https", "http"):
-        proto = (request.url.scheme or "https").lower()
-        if proto not in ("http", "https"):
-            proto = "https"
-    return f"{proto}://{host}".rstrip("/")
-
-
-def _twilio_base_url(request: Request) -> str:
-    """
-    Absolute base URL for Twilio <Play>, <Gather action>, etc.
-    Twilio rejects relative URLs — without this, calls end immediately on production if env base is unset.
-    """
-    bu = _public_base_url()
-    if bu:
-        return bu
-    d = _derived_public_base_from_request(request)
-    if d:
-        return d
-    try:
-        ru = urlparse(str(request.url))
-        if ru.hostname and "ngrok" in ru.hostname.lower():
-            return f"{ru.scheme}://{ru.netloc}".rstrip("/")
-    except Exception:
-        pass
-    return ""
+# Cross-cutting URL + background-task helpers now live in deps; re-export.
+from deps import (  # noqa: E402,F401
+    _public_base_url,
+    _derived_public_base_from_request,
+    _twilio_base_url,
+    create_tracked_task,
+)
 
 
 
@@ -912,6 +878,8 @@ from voice_service import (  # noqa: E402,F401
     _fetch_twilio_recording_bytes,
     _summarize_call_recording_sync,
     _schedule_recording_summary,
+    cleanup_call_runtime_state,
+    TTS_FALLBACK_TEXT,
 )
 
 # AI voice-receptionist booking logic now lives in conversation_service; re-export so the
@@ -2686,40 +2654,7 @@ async def text_to_speech(
 active_calls = runtime.call_store.sessions
 response_status = runtime.call_store.response_status
 
-_background_tasks: set[asyncio.Task] = set()
-
-
-def create_tracked_task(coro: Any, *, name: str) -> asyncio.Task:
-    """Create background task with standardized failure logging and lifecycle cleanup."""
-    task = asyncio.create_task(coro, name=name)
-    _background_tasks.add(task)
-
-    def _done(t: asyncio.Task) -> None:
-        _background_tasks.discard(t)
-        try:
-            _ = t.result()
-        except asyncio.CancelledError:
-            logger.info("background_task_cancelled name=%s", name)
-        except Exception:
-            logger.exception("background_task_failed name=%s", name)
-
-    task.add_done_callback(_done)
-    return task
-
-
-def cleanup_call_runtime_state(call_sid: str) -> None:
-    """Clear per-call runtime state deterministically."""
-    if not call_sid:
-        return
-    runtime.call_store.cleanup_call(call_sid)
-
-
 # Fallback when OpenAI/TTS fails - play this so caller does not get dead air
-TTS_FALLBACK_TEXT = (
-    "We're experiencing a brief technical issue. Please try again in a moment."
-)
-
-
 @app.get("/api/phone/greeting-audio")
 async def get_greeting_audio(request: Request):
     """Serve greeting audio using the voice selected in Settings. Cached on disk + in memory."""

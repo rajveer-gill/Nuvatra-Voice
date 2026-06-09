@@ -57,6 +57,18 @@ DEFAULT_GREETING_TEMPLATE = (
 GOT_IT_PHRASE = "Got it, one moment."
 ONE_MOMENT_PHRASE = "One moment."
 
+# Fallback when OpenAI/TTS fails - play this so caller does not get dead air.
+TTS_FALLBACK_TEXT = (
+    "We're experiencing a brief technical issue. Please try again in a moment."
+)
+
+
+def cleanup_call_runtime_state(call_sid: str) -> None:
+    """Clear per-call runtime state deterministically."""
+    if not call_sid:
+        return
+    runtime.call_store.cleanup_call(call_sid)
+
 
 def _greeting_debug_enabled() -> bool:
     """GREETING_DEBUG=1 or SETTINGS_LOAD_DEBUG=1 — logs greeting resolution on calls and Settings saves."""

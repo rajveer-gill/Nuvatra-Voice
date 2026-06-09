@@ -14,9 +14,12 @@ subscription_access) — never main — so the import graph stays acyclic.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
+from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
 
@@ -34,6 +37,9 @@ except ImportError:  # pragma: no cover
     TWILIO_AVAILABLE = False
 
 
+logger = logging.getLogger("nuvatra")
+
+
 def _public_base_url() -> str:
     """HTTPS origin Twilio can reach for webhooks (use NGROK_URL or PUBLIC_BASE_URL)."""
     return (
@@ -41,6 +47,63 @@ def _public_base_url() -> str:
         .strip()
         .rstrip("/")
     )
+
+
+def _derived_public_base_from_request(request: Request) -> str:
+    """When PUBLIC_BASE_URL is unset, derive https://host from the inbound webhook (Render/proxies send X-Forwarded-*)."""
+    host = (
+        (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+        .split(",")[0]
+        .strip()
+    )
+    if not host:
+        return ""
+    proto = (
+        (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    )
+    if proto not in ("https", "http"):
+        proto = (request.url.scheme or "https").lower()
+        if proto not in ("http", "https"):
+            proto = "https"
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _twilio_base_url(request: Request) -> str:
+    """Absolute base URL for Twilio <Play>, <Gather action>, etc. (Twilio rejects relative URLs)."""
+    bu = _public_base_url()
+    if bu:
+        return bu
+    d = _derived_public_base_from_request(request)
+    if d:
+        return d
+    try:
+        ru = urlparse(str(request.url))
+        if ru.hostname and "ngrok" in ru.hostname.lower():
+            return f"{ru.scheme}://{ru.netloc}".rstrip("/")
+    except Exception:
+        pass
+    return ""
+
+
+_background_tasks: "set[asyncio.Task]" = set()
+
+
+def create_tracked_task(coro: Any, *, name: str) -> "asyncio.Task":
+    """Create background task with standardized failure logging and lifecycle cleanup."""
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+
+    def _done(t: "asyncio.Task") -> None:
+        _background_tasks.discard(t)
+        try:
+            _ = t.result()
+        except asyncio.CancelledError:
+            logger.info("background_task_cancelled name=%s", name)
+        except Exception:
+            logger.exception("background_task_failed name=%s", name)
+
+    task.add_done_callback(_done)
+    return task
 
 
 def _validate_twilio_webhook(request: Request, form_data: dict) -> bool:
