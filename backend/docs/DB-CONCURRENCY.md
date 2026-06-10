@@ -123,10 +123,25 @@ the reproduction test (step 2) is the correctness gate either way.
 - [x] **Step 2 — concurrency reproduction test** (test_db_concurrency_repro.py, xfail — documents the live defect).
 - [~] **Step 3a — contextvar connection rework: ATTEMPTED, then REVERTED.** See post-mortem (attempt 1) below.
 - [x] **Step 3b — per-call connection scoping (attempt 2): LANDED.** See "The fix that shipped" below.
-- [ ] Step 4 — throughput half (move request-path DB work off the event loop via `to_thread` / sync `def`).
-      Now safe and incremental on top of 3b: every db_* call is already a self-contained borrow+release unit.
-- [ ] Step 5 — load test (locust/k6 against staging; watch p50/p99 + `pg_stat_activity`).
+- [~] **Step 4 — throughput half: bulk landed (commit a6efd6c).** 62 of 78 request handlers were
+      pure blocking work (no `await` in the body); converted `async def` → `def` so FastAPI runs them
+      in its threadpool, moving their DB work off the event loop. Safe on top of 3b (each db_* call is
+      a self-contained borrow+release unit). **Still on the loop (follow-ups):**
+      (a) the 13 "mixed" handlers that genuinely `await` (OpenAI/httpx/gather) — wrap their individual
+          db_* calls in `await asyncio.to_thread(...)`;
+      (b) the async auth dependencies (`require_tenant` etc.) that do a lookup per request;
+      (c) 3 handlers kept async by necessity (they schedule background tasks → need a running loop).
+- [ ] Step 5 — load test (locust/k6 against staging; watch p50/p99 + `pg_stat_activity`). **Required to
+      validate ANY of step 4** — the serial pytest suite (TestClient) cannot surface throughput.
 - [ ] Step 6 — staged deploy, watched.
+
+### Converting handlers to sync `def` — the rule that matters
+A sync `def` runs in a threadpool worker **with no running event loop**, so a handler may be made
+sync ONLY if it (transitively) never needs the loop. Classification: no `await`/`async with`/
+`async for` in the body AND no transitive `asyncio.create_task` / `create_tracked_task` /
+`get_running_loop`. The trap is *transitive* scheduling — e.g. `create_provisioning_job` has no
+`await` in its body but calls `_kick_worker()` → `asyncio.create_task`; converting it broke its test.
+When in doubt, leave it async.
 
 ## The fix that shipped (attempt 2 — per-call connection scoping)
 
