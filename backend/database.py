@@ -233,7 +233,13 @@ def db_ping() -> bool:
     return False
 
 def init_db() -> bool:
-    """Initialize database: create tables if not exist. Returns True if DB is used."""
+    """Initialize database: create tables if not exist. Returns True if DB is used.
+
+    NOTE: Schema changes now go through Alembic, not here — do not add new
+    CREATE TABLE / ALTER TABLE statements to this function. Add an Alembic
+    revision instead (see docs/MIGRATIONS.md). The Alembic 0001_baseline
+    revision mirrors the DDL below exactly.
+    """
     global _use_db
     url = os.getenv("DATABASE_URL")
     if not url:
