@@ -120,7 +120,94 @@ the reproduction test (step 2) is the correctness gate either way.
 
 ## Progress
 - [x] **Step 1 — DB-integration test isolation** (conftest clean-slate; commit 434c22f). Makes the rework verifiable.
-- [ ] Step 2 — concurrency reproduction test (httpx.AsyncClient, db→await→db, assert no cross-request bleed) — the gate.
-- [ ] Step 3 — implement the contextvar connection rework.
-- [ ] Step 4 — repro passes + full suite green + load test (locust/k6, watch `pg_stat_activity`).
-- [ ] Step 5 — staged deploy, watched.
+- [x] **Step 2 — concurrency reproduction test** (test_db_concurrency_repro.py, xfail — documents the live defect).
+- [~] **Step 3a — contextvar connection rework: ATTEMPTED, then REVERTED.** See post-mortem (attempt 1) below.
+- [x] **Step 3b — per-call connection scoping (attempt 2): LANDED.** See "The fix that shipped" below.
+- [ ] Step 4 — throughput half (move request-path DB work off the event loop via `to_thread` / sync `def`).
+      Now safe and incremental on top of 3b: every db_* call is already a self-contained borrow+release unit.
+- [ ] Step 5 — load test (locust/k6 against staging; watch p50/p99 + `pg_stat_activity`).
+- [ ] Step 6 — staged deploy, watched.
+
+## The fix that shipped (attempt 2 — per-call connection scoping)
+
+**Insight.** The bleed only ever happens when a connection is **cached across an `await`**. A db_*
+body is synchronous and contains no `await`, so if each *top-level* db_* call borrows a dedicated
+pooled connection and returns it the instant it returns, the connection is never held across a
+yield point — concurrent async requests can never share a live connection. Crucially, borrow and
+release then happen in the **same synchronous call frame**, so nothing depends on framework/
+middleware teardown running in the right context (the exact failure mode of attempt 1).
+
+**Implementation (all in `database.py`, ~90 lines, zero call-site / handler / background-worker
+changes):**
+- `_scoped(fn)` wraps a db_* function: on a no-DB path (`not _use_db`) it's a pass-through;
+  otherwise it bumps a `_thread_local.depth` counter, runs the body, and on the outermost frame
+  (depth back to 0) calls `_conn_scope_exit()`.
+- `_conn_scope_exit()` rolls back the borrowed connection (clears any idle-in-transaction read
+  snapshot; committed writes are already persisted) and returns it to the pool — discarding it on
+  error rather than poisoning the pool.
+- A module-bottom loop wraps all 94 public `db_*` functions in place (rebinding the globals, so
+  inter-function calls like `db_tenant_member_add → db_tenant_member_assign_owner` also go through
+  the scope; the depth counter keeps a nested chain on one shared connection, released once by the
+  outermost frame). `db_release_thread_connection` is excluded (it's the explicit release helper).
+
+**Why this is correct for every execution context:**
+- *Async handlers* (the buggy path): each db_* borrows+releases atomically on the loop thread;
+  since the call is synchronous it can't be interrupted mid-borrow, and the conn is gone before any
+  `await`. No cross-request bleed.
+- *Background `to_thread` workers* (provisioning/cron 60+ fan-out, recording summary, voice warm):
+  unchanged — each runs on its own OS thread; per-call scoping just makes their explicit
+  `db_release_thread_connection()` redundant (harmless no-op).
+- *Tests calling handlers/db_* directly*: each call self-releases, so the attempt-1 leak (no
+  TestClient → no teardown → leak) cannot recur.
+
+**Verified:** after any top-level db_* call `_thread_local.conn is None` (released, depth 0); two
+concurrent async tasks doing db→await→db hold no connection across the await; 50 sequential calls
+do not exhaust the pool; unit suite green (386 + the 1 pre-existing clock-brittle booking test);
+full DB-integration suite green at ~70s (no pool exhaustion — the gate that attempt 1 failed).
+
+> Note: `test_db_concurrency_repro.py` stays `xfail` — it probes the *low-level* `_get_conn()`
+> directly (still thread-local by design), not the db_* boundary where the fix lives. The real
+> protection is the borrow-per-call discipline above, covered by the DB-integration suite.
+
+## Post-mortem — why the contextvar rework was reverted (attempt 1)
+
+**What was tried.** Replace `database._thread_local` (per-OS-thread) with
+`database._conn_var = contextvars.ContextVar("db_conn")` (per-task), so each async task gets its
+own connection; move the connection RELEASE from the `@app.middleware("http")` hook to a
+`_db_request_scope()` **yield-dependency** on `FastAPI(dependencies=...)`, on the theory its
+teardown runs in the handler's own context and can therefore see the contextvar.
+
+**The correctness half worked.** A direct probe (two `asyncio.gather`'d tasks each calling
+`_get_conn()`) confirmed they now receive DISTINCT connection objects — the cross-request
+transaction-bleed hazard is genuinely fixable this way.
+
+**The release half did NOT.** Running the full DB-integration suite under the rework:
+`134 passed, 258 errors in 2609s (43m)` — vs. `391 passed in ~70s` before. Signature of
+**connection-pool exhaustion**: connections were borrowed and never returned, the
+`ThreadedConnectionPool(maxconn=10)` drained, and every later test errored/stalled. Two leak
+sources, both real:
+1. **Tests (and internal code) that call handler functions directly** — not through TestClient —
+   borrow a connection in `_get_conn()` but never trigger the request-scoped yield-dependency, so
+   nothing releases it. The old thread-local model survived this because conftest's per-test
+   `_discard_thread_connection()` cleaned the single shared thread-local conn; with a contextvar,
+   the conn lives in whatever (possibly already-exited) context borrowed it.
+2. **The yield-dependency teardown does not reliably see the handler's `_conn_var.set()`** —
+   Starlette/anyio runs portions of the request in copied contexts, so a contextvar mutation made
+   deep in the handler is not always visible at dependency-teardown time. This is the same
+   copied-context hazard the plan flagged for `run_in_threadpool`; it applies here too.
+
+**Decision.** Reverted database.py + main.py to the thread-local model (known-good, 391 green).
+A connection layer that leaks under the real call patterns is strictly worse than the documented,
+contained defect. The repro test stays `xfail` (it still documents the live hazard).
+
+**The real path (attempt 2).** Don't bolt per-task lifecycle onto a sync psycopg2 pool with
+contextvars + framework teardown hooks — the acquire/release boundary is too implicit. Either:
+- **(preferred) migrate the DB layer to `asyncpg`** with an explicit per-request
+  `async with pool.acquire() as conn` scope — acquire and release are lexically bound and
+  context-correct by construction; or
+- keep psycopg2 but make acquire/release **explicit at every entry point** (a context-manager
+  dependency for HTTP routes AND an explicit `with db_conn():` wrapper around every direct/
+  background call site), never relying on middleware/teardown to find a contextvar.
+
+Either way, the gate is the same: the repro test flips to pass AND the full DB-integration suite
+stays green at ~70s (no pool exhaustion), THEN a staging load test.

@@ -134,6 +134,84 @@ def _discard_thread_connection() -> None:
             pass
 
 
+# ---------------------------------------------------------------------------
+# Per-call connection scoping  (the cross-request transaction-bleed fix)
+# ---------------------------------------------------------------------------
+# The hazard: async request handlers call the sync db_* functions directly on the
+# event-loop thread. The old model cached the borrowed connection in _thread_local
+# and only released it at request end (middleware), so a connection HELD ACROSS AN
+# `await` was visible to whatever other request ran on the loop thread in the
+# meantime — cross-request transaction bleed (see docs/DB-CONCURRENCY.md).
+#
+# The fix: every *top-level* db_* call borrows a dedicated pooled connection and
+# returns it — rolled back — the instant it returns. A db_* body is synchronous and
+# contains no `await`, so the connection is never held across a yield point; concurrent
+# async requests therefore can never share a live connection. Borrow and release happen
+# in the SAME synchronous call frame (the wrapper's finally), so there is no reliance on
+# framework/middleware teardown running in the right context — the exact failure mode of
+# the earlier contextvar attempt. Reentrant depth-counting lets nested db_* calls (a db_*
+# that calls another) share one connection; only the outermost frame releases.
+import functools as _functools
+
+# db_-prefixed names that are NOT query functions and must not be scope-wrapped.
+_SCOPE_EXCLUDE = {"db_release_thread_connection"}
+
+
+def _conn_scope_exit() -> None:
+    """Return the call's borrowed connection to the pool, rolled back to clear any
+    open read snapshot / aborted transaction so the next borrower starts clean."""
+    conn = getattr(_thread_local, "conn", None)
+    _thread_local.conn = None
+    if conn is None:
+        return
+    pool = _ensure_pool()
+    try:
+        if not conn.closed:
+            conn.rollback()  # committed writes already persisted; clears idle-in-tx reads
+    except Exception:
+        # Connection is unusable — discard it rather than return a poisoned conn.
+        try:
+            if pool:
+                pool.putconn(conn, close=True)
+            else:
+                conn.close()
+        except Exception:
+            pass
+        return
+    if pool:
+        try:
+            pool.putconn(conn)
+        except Exception as e:
+            _log.warning("db_pool_putconn_failed: %s", e)
+    else:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _scoped(fn):
+    """Wrap a db_* query function so each top-level call borrows + releases its own
+    connection. Reentrant: nested db_* calls share the outermost frame's connection."""
+
+    @_functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not _use_db:
+            return fn(*args, **kwargs)  # in-memory / no-DB path borrows nothing
+        depth = getattr(_thread_local, "depth", 0)
+        _thread_local.depth = depth + 1
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            new_depth = getattr(_thread_local, "depth", 1) - 1
+            _thread_local.depth = max(0, new_depth)
+            if new_depth <= 0:
+                _conn_scope_exit()
+
+    wrapper._db_scoped = True
+    return wrapper
+
+
 def db_ping() -> bool:
     """Return True if DB is reachable (for health check).
 
@@ -3227,3 +3305,22 @@ def db_provisioning_job_get(job_id: str) -> Optional[dict]:
     except Exception as e:
         _log.warning("db_provisioning_job_get failed: %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Apply per-call connection scoping to every public db_* query function.
+# Done once at import, after all functions are defined. Wrapping the module
+# globals (not just exposing new names) means inter-function calls — e.g.
+# db_tenant_member_add -> db_tenant_member_assign_owner — also go through the
+# scope, and the reentrant depth counter keeps them on one shared connection.
+# ---------------------------------------------------------------------------
+for _name, _obj in list(globals().items()):
+    if (
+        _name.startswith("db_")
+        and _name not in _SCOPE_EXCLUDE
+        and callable(_obj)
+        and getattr(_obj, "__module__", None) == __name__
+        and not getattr(_obj, "_db_scoped", False)
+    ):
+        globals()[_name] = _scoped(_obj)
+del _name, _obj
