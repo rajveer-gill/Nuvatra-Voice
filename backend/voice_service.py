@@ -15,7 +15,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from urllib.parse import quote, urlparse
 
 from fastapi import Request

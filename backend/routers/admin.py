@@ -9,6 +9,7 @@ module-qualified so monkeypatches target the owning module.
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -20,6 +21,9 @@ import config_service
 import database
 import deps
 import runtime
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 router = APIRouter()
 
@@ -238,7 +242,7 @@ def admin_session(request: Request):
     if not token:
         return {"is_admin": False}
     try:
-        user_id, _ = verify_clerk_token(token)
+        user_id, _ = deps.verify_clerk_token(token)
     except HTTPException:
         return {"is_admin": False}
     admin_ids = [
@@ -263,7 +267,7 @@ def admin_create_tenant(
             status_code=503, detail="Database required for multi-tenant"
         )
     bv = (req.business_vertical or "salon_chair").strip()
-    if bv not in ALLOWED_BUSINESS_VERTICALS:
+    if bv not in config_service.ALLOWED_BUSINESS_VERTICALS:
         raise HTTPException(status_code=400, detail="Invalid business_vertical")
     # New tenants get 7-day trial (plan=free, subscription_status=trialing); no paid plan at creation
     tenant = database.db_tenant_create(
@@ -274,7 +278,7 @@ def admin_create_tenant(
             status_code=409, detail="Tenant already exists or create failed"
         )
     cfg = config_service._default_client_config_data(req.client_id, tenant.get("plan") or "free")
-    save_raw_client_config(req.client_id, cfg)
+    config_service.save_raw_client_config(req.client_id, cfg)
     link = clerk_service._clerk_link_email_to_tenant(req.email, tenant["id"])
     invite_sent = bool(link.get("invite_sent"))
     user_relinked = bool(link.get("user_relinked"))
@@ -507,7 +511,7 @@ def admin_update_tenant_twilio_phone(
     updated = database.db_tenant_get_by_id(tenant_id)
     from twilio_provision import configure_webhooks, public_webhook_result
 
-    base = _public_base_url()
+    base = deps._public_base_url()
     webhook_config = configure_webhooks(
         account_sid=TWILIO_ACCOUNT_SID or "",
         auth_token=TWILIO_AUTH_TOKEN or "",
@@ -562,7 +566,7 @@ def admin_delete_tenant(
         )
     client_slug = (tenant.get("client_id") or "").strip()
     if client_slug:
-        client_dir = PROJECT_ROOT / "clients" / client_slug
+        client_dir = config_service.PROJECT_ROOT / "clients" / client_slug
         try:
             if client_dir.is_dir():
                 shutil.rmtree(client_dir, ignore_errors=True)
