@@ -366,6 +366,10 @@ def _default_client_config_data(client_id: str, plan: str = "free") -> dict:
                 out = dict(base)
                 out["client_id"] = client_id
                 out["plan"] = plan
+                # The template ships placeholder example staff (Manager/Reception) for
+                # human reference; a freshly-created tenant must start with an empty
+                # roster so the owner adds their own team, not inherit the placeholders.
+                out["staff"] = []
                 return out
         except Exception as e:
             logger.warning("template_config_load_failed err=%s", e)

@@ -60,6 +60,16 @@ def test_save_raw_client_config_writes_db_and_file(client_config_dir, monkeypatc
     assert on_disk["greeting"] == "Hello from save"
 
 
+def test_default_config_seeds_empty_staff_roster():
+    """A freshly-created tenant must start with no staff. The shipped template
+    (clients/template/config.json) carries placeholder Manager/Reception entries for
+    human reference; _default_client_config_data must not leak them into new tenants
+    (reads the real template here, so it guards the actual seed path)."""
+    cfg = config_service._default_client_config_data("brand-new-tenant", "free")
+    assert cfg["staff"] == []
+    assert cfg["client_id"] == "brand-new-tenant"
+
+
 def test_greeting_cache_key_uses_resolved_spoken_text(monkeypatch):
     monkeypatch.setattr(
         config_service,
