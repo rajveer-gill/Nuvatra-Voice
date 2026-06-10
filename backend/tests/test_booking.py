@@ -277,12 +277,18 @@ def test_validate_booking_does_not_repeat_service_when_user_answered(monkeypatch
         {"role": "assistant", "content": "Which service would you like with Jake? Short Cut or Long Cut."},
         {"role": "user", "content": "long cut"},
     ]
+    # Relative future date keeps this deterministic: is_past_closing_for_date rejects
+    # only when the booking date == today (after closing), so a hardcoded "today" flaked
+    # in the afternoon. Three days out is never today in any timezone.
+    from datetime import date, timedelta
+
+    future_date = (date.today() + timedelta(days=3)).isoformat()
     ok, msg, staff_id, service = _validate_booking_requirements(
         {
             "staff": "Jake",
             "reason": "Long Cut",
             "name": "Raj",
-            "date": "2026-06-09",
+            "date": future_date,
             "time": "15:00",
         },
         conversation_history=history,
