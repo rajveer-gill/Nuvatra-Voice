@@ -22,8 +22,8 @@ The site uses **Clerk** for authentication. Marketing pages are public; the **Da
    The frontend runs on **Vercel** or **Netlify**. Add these as **Environment Variables** in that project’s dashboard:
    - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` = your publishable key (pk_test_… or pk_live_…)
    - `CLERK_SECRET_KEY` = your secret key (sk_test_… or sk_live_…)
-   - `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL` = `/dashboard`
-   - `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL` = `/dashboard`
+   - `NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL` = `/dashboard`
+   - `NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL` = `/dashboard`
    - `NEXT_PUBLIC_API_URL` = your backend URL (e.g. `https://nuvatra-voice.onrender.com`)
 
    Without these on the host, sign-in and the dashboard will not work in production.

@@ -18,15 +18,11 @@ const syne = Syne({
 
 const siteUrl = 'https://www.call-surge.com'
 
-/** Prefer Clerk’s fallback redirect env vars; legacy AFTER_SIGN_* still supported until hosts migrate. */
+/** Clerk post-auth redirect targets (modern fallback-redirect env vars; default to /dashboard). */
 const clerkSignInFallbackRedirectUrl =
-  process.env.NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL ||
-  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL ||
-  '/dashboard'
+  process.env.NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL || '/dashboard'
 const clerkSignUpFallbackRedirectUrl =
-  process.env.NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL ||
-  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL ||
-  '/dashboard'
+  process.env.NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL || '/dashboard'
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
