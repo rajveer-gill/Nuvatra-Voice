@@ -50,6 +50,23 @@ twilio_client = None
 _openai_client = None
 
 
+def _new_openai_client():
+    """Construct the OpenAI client with a bounded timeout and retry budget.
+
+    The SDK defaults to a 600s timeout. On a live phone call that means a
+    single hung request stalls the caller indefinitely (and, when issued on
+    the event loop, every concurrent call with it). Bound both so a slow
+    request fails fast into the graceful TTS fallback instead of hanging.
+    Worst-case latency is timeout * (max_retries + 1); keep both small.
+    Tune via OPENAI_TIMEOUT_SECONDS / OPENAI_MAX_RETRIES.
+    """
+    return openai.OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        timeout=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "12")),
+        max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "1")),
+    )
+
+
 class _LazyOpenAIClient:
     """Proxy that creates the real OpenAI client on first attribute access."""
 
@@ -57,7 +74,7 @@ class _LazyOpenAIClient:
         global _openai_client
         if _openai_client is None:
             print("[INIT] Creating OpenAI client (lazy)...")
-            _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            _openai_client = _new_openai_client()
             print("[OK] OpenAI client created successfully")
         return getattr(_openai_client, name)
 
@@ -70,7 +87,7 @@ def _ensure_openai_client():
     global _openai_client
     if _openai_client is None:
         print("[INIT] Creating OpenAI client...")
-        _openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        _openai_client = _new_openai_client()
         print("[OK] OpenAI client created successfully")
 
 

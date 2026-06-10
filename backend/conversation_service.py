@@ -812,7 +812,13 @@ async def generate_response_async(
                 user_turns=_count_booking_user_turns(call_data["conversation_history"]),
             )
 
-        ai_response = runtime.client.chat.completions.create(
+        # Run on a worker thread: the OpenAI SDK call is blocking, and this
+        # coroutine runs as a tracked task on the event loop. Calling it inline
+        # would stall every concurrent call's loop work for the request's
+        # duration. (The booking-extraction call below is threaded for the same
+        # reason.) A hung request is bounded by the client timeout in runtime.py.
+        ai_response = await asyncio.to_thread(
+            runtime.client.chat.completions.create,
             model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.8,
