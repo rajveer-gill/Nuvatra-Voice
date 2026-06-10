@@ -34,7 +34,7 @@ router = APIRouter()
 
 
 @router.get("/api/stats")
-async def get_stats(_: None = Depends(deps.require_active_subscription)):
+def get_stats(_: None = Depends(deps.require_active_subscription)):
     apts = database.db_appointments_get_all() if runtime.USE_DB else runtime.appointments
     msgs = database.db_messages_get_all() if runtime.USE_DB else runtime.messages
     pending = len([a for a in apts if a.get("status") == "pending"])
@@ -84,7 +84,7 @@ def _weekday_sun_zero(dt: datetime) -> int:
 
 
 @router.get("/api/analytics/health")
-async def get_analytics_health(
+def get_analytics_health(
     tenant: Optional[dict] = Depends(deps.require_tenant),
     _: None = Depends(deps.require_active_subscription),
 ):
@@ -140,7 +140,7 @@ async def get_analytics_health(
 
 
 @router.get("/api/analytics/summary")
-async def get_analytics_summary(
+def get_analytics_summary(
     tenant: Optional[dict] = Depends(deps.require_tenant),
     _: None = Depends(deps.require_active_subscription),
 ):
@@ -195,7 +195,7 @@ async def get_analytics_summary(
 
 
 @router.get("/api/analytics/calls")
-async def get_analytics_calls(
+def get_analytics_calls(
     limit: int = 50,
     outcome: Optional[str] = None,
     tenant: Optional[dict] = Depends(deps.require_tenant),
@@ -210,7 +210,7 @@ async def get_analytics_calls(
 
 
 @router.get("/api/analytics/export")
-async def get_analytics_export(
+def get_analytics_export(
     tenant: Optional[dict] = Depends(deps.require_tenant),
     _: None = Depends(deps.require_active_subscription),
 ):

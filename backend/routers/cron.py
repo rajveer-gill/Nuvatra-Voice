@@ -141,7 +141,7 @@ async def cron_appointment_reminders(request: Request):
 
 
 @router.post("/api/cron/process-overage")
-async def cron_process_overage(request: Request):
+def cron_process_overage(request: Request):
     """Monthly overage billing. Compute overage for previous month and create Stripe invoice items. Requires X-Cron-Secret."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -224,7 +224,7 @@ async def cron_process_overage(request: Request):
 
 
 @router.post("/api/cron/retention-purge")
-async def cron_retention_purge(request: Request):
+def cron_retention_purge(request: Request):
     """Purge expired rows (default 3 years) while honoring active legal holds."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -244,7 +244,7 @@ async def cron_retention_purge(request: Request):
 
 
 @router.post("/api/cron/export-snapshot")
-async def cron_export_snapshot(request: Request):
+def cron_export_snapshot(request: Request):
     """Daily tenant-scoped JSON snapshot export with SHA256 manifest."""
     if not _verify_cron_secret(request):
         raise HTTPException(status_code=401, detail="Unauthorized")

@@ -328,7 +328,7 @@ def finalize_staff_records_for_storage(
 
 
 @router.get("/api/business-info")
-async def api_get_business_info(
+def api_get_business_info(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     out = config_service.business_info_for_dashboard(tenant)
@@ -339,7 +339,7 @@ async def api_get_business_info(
 
 
 @router.get("/api/greeting-preview")
-async def api_greeting_preview(
+def api_greeting_preview(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     """
@@ -356,7 +356,7 @@ async def api_greeting_preview(
 
 
 @router.get("/api/setup-status")
-async def api_setup_status(
+def api_setup_status(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     """Return which required/recommended business info fields are missing. Used for setup checklist."""
@@ -376,7 +376,7 @@ async def api_setup_status(
 
 
 @router.post("/api/onboarding/complete")
-async def api_onboarding_complete(
+def api_onboarding_complete(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     """Mark guided onboarding as completed for this tenant."""

@@ -232,7 +232,7 @@ def _admin_tenant_with_access_email(tenant: dict) -> dict:
 
 
 @router.get("/api/admin/session")
-async def admin_session(request: Request):
+def admin_session(request: Request):
     """True if the bearer token user id is in ADMIN_CLERK_USER_IDS. No tenant required."""
     token = deps.get_bearer_token(request)
     if not token:
@@ -252,7 +252,7 @@ async def admin_session(request: Request):
 
 
 @router.post("/api/admin/tenants")
-async def admin_create_tenant(
+def admin_create_tenant(
     req: AdminCreateTenantRequest,
     request: Request,
     admin_user_id: str = Depends(deps.require_admin),
@@ -299,7 +299,7 @@ async def admin_create_tenant(
 
 
 @router.post("/api/admin/tenants/{tenant_id}/resend-invite")
-async def admin_resend_invite(
+def admin_resend_invite(
     tenant_id: str,
     req: AdminResendInviteRequest,
     request: Request,
@@ -333,7 +333,7 @@ async def admin_resend_invite(
 
 
 @router.get("/api/admin/tenants")
-async def admin_list_tenants(_: str = Depends(deps.require_admin)):
+def admin_list_tenants(_: str = Depends(deps.require_admin)):
     """List all tenants. Requires admin auth."""
     if not runtime.USE_DB:
         return {"tenants": [], "db_enabled": False}
@@ -363,7 +363,7 @@ async def admin_list_tenants(_: str = Depends(deps.require_admin)):
 
 
 @router.post("/api/admin/tenants/bulk", deprecated=True)
-async def admin_bulk_create_tenants(_admin: str = Depends(deps.require_admin)):
+def admin_bulk_create_tenants(_admin: str = Depends(deps.require_admin)):
     """Deprecated. The synchronous bulk-create timed out and left tenants
     half-provisioned at scale. Use the background provisioning pipeline:
     POST /api/admin/provisioning/jobs (idempotent, resumable, auto-purchases
@@ -375,7 +375,7 @@ async def admin_bulk_create_tenants(_admin: str = Depends(deps.require_admin)):
 
 
 @router.get("/api/admin/ops/self-check")
-async def admin_ops_self_check(_: str = Depends(deps.require_admin)):
+def admin_ops_self_check(_: str = Depends(deps.require_admin)):
     """Production safety checks for webhook and auth hardening."""
     from voice.redis_ops_health import redis_ops_health
 
@@ -409,14 +409,14 @@ async def admin_ops_self_check(_: str = Depends(deps.require_admin)):
 
 
 @router.get("/api/admin/legal-holds")
-async def admin_list_legal_holds(_: str = Depends(deps.require_admin)):
+def admin_list_legal_holds(_: str = Depends(deps.require_admin)):
     if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
     return {"holds": database.db_legal_hold_list_active()}
 
 
 @router.post("/api/admin/legal-holds")
-async def admin_upsert_legal_hold(
+def admin_upsert_legal_hold(
     req: AdminLegalHoldRequest,
     request: Request,
     admin_user_id: str = Depends(deps.require_admin),
@@ -447,7 +447,7 @@ async def admin_upsert_legal_hold(
 
 
 @router.delete("/api/admin/legal-holds/{client_id}")
-async def admin_clear_legal_hold(
+def admin_clear_legal_hold(
     client_id: str,
     request: Request,
     admin_user_id: str = Depends(deps.require_admin),
@@ -468,7 +468,7 @@ async def admin_clear_legal_hold(
 
 
 @router.get("/api/admin/tenants/{tenant_id}/access-debug")
-async def admin_tenant_access_debug(tenant_id: str, _: str = Depends(deps.require_admin)):
+def admin_tenant_access_debug(tenant_id: str, _: str = Depends(deps.require_admin)):
     """Admin: full access wiring snapshot for one tenant (invite, DB member, Clerk metadata)."""
     if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
@@ -476,7 +476,7 @@ async def admin_tenant_access_debug(tenant_id: str, _: str = Depends(deps.requir
 
 
 @router.get("/api/admin/debug/resolve-email")
-async def admin_resolve_email_debug(email: str, _: str = Depends(deps.require_admin)):
+def admin_resolve_email_debug(email: str, _: str = Depends(deps.require_admin)):
     """Admin: find an email across pending invites, Clerk users, and tenant memberships."""
     if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
@@ -484,7 +484,7 @@ async def admin_resolve_email_debug(email: str, _: str = Depends(deps.require_ad
 
 
 @router.patch("/api/admin/tenants/{tenant_id}/twilio-phone")
-async def admin_update_tenant_twilio_phone(
+def admin_update_tenant_twilio_phone(
     tenant_id: str,
     req: AdminTenantTwilioUpdate,
     request: Request,
@@ -532,7 +532,7 @@ async def admin_update_tenant_twilio_phone(
 
 
 @router.delete("/api/admin/tenants/{tenant_id}")
-async def admin_delete_tenant(
+def admin_delete_tenant(
     tenant_id: str, request: Request, admin_user_id: str = Depends(deps.require_admin)
 ):
     """Delete a tenant and revoke access for its members.
@@ -621,7 +621,7 @@ async def admin_delete_tenant(
 
 
 @router.patch("/api/admin/tenants/{tenant_id}/billing-exempt")
-async def admin_tenant_billing_exempt(
+def admin_tenant_billing_exempt(
     tenant_id: str,
     req: BillingExemptUpdate,
     request: Request,
@@ -723,7 +723,7 @@ async def admin_tenant_billing_exempt(
 
 
 @router.post("/api/admin/tenants/{tenant_id}/members")
-async def admin_add_tenant_member(
+def admin_add_tenant_member(
     tenant_id: str,
     req: AdminResendInviteRequest,
     request: Request,
@@ -755,7 +755,7 @@ async def admin_add_tenant_member(
 # ===== access-debug route (moved from main; uses _membership_diagnosis) =====
 
 @router.get("/api/me/access")
-async def me_access(request: Request):
+def me_access(request: Request):
     """
     Debug helper for dashboard access issues: shows which Clerk user is signed in,
     which emails Clerk has on file, and whether a tenant membership exists in the DB.

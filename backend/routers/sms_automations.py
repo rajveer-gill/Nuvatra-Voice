@@ -22,7 +22,7 @@ router = APIRouter()
 
 
 @router.get("/api/sms-automations")
-async def get_sms_automations(
+def get_sms_automations(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     """List SMS automations. Growth/Pro only."""
@@ -53,7 +53,7 @@ async def get_sms_automations(
 
 
 @router.post("/api/sms-automations")
-async def create_sms_automation(
+def create_sms_automation(
     req: SmsAutomationCreate,
     tenant: Optional[dict] = Depends(deps.require_tenant),
     _: None = Depends(deps.require_active_subscription),
@@ -86,7 +86,7 @@ async def create_sms_automation(
 
 
 @router.patch("/api/sms-automations/{automation_id}")
-async def update_sms_automation(
+def update_sms_automation(
     automation_id: int,
     req: SmsAutomationUpdate,
     _: None = Depends(deps.require_active_subscription),
@@ -103,7 +103,7 @@ async def update_sms_automation(
 
 
 @router.delete("/api/sms-automations/{automation_id}")
-async def delete_sms_automation(
+def delete_sms_automation(
     automation_id: int, _: None = Depends(deps.require_active_subscription)
 ):
     cid = database._client_id()

@@ -34,7 +34,7 @@ router = APIRouter()
 
 
 @router.get("/api/subscription")
-async def get_subscription(tenant: Optional[dict] = Depends(deps.require_tenant)):
+def get_subscription(tenant: Optional[dict] = Depends(deps.require_tenant)):
     """Return subscription state, plan limits, and usage for the current tenant."""
     state = get_tenant_subscription_state(tenant)
     if get_plan_limits:
@@ -77,7 +77,7 @@ class CreateCheckoutSessionRequest(BaseModel):
 
 
 @router.post("/api/create-checkout-session")
-async def create_checkout_session(
+def create_checkout_session(
     req: CreateCheckoutSessionRequest, tenant: Optional[dict] = Depends(deps.require_tenant)
 ):
     """Create a Stripe Checkout session for the given plan. Returns { url } for redirect."""
@@ -137,7 +137,7 @@ async def create_checkout_session(
 
 
 @router.post("/api/create-portal-session")
-async def create_portal_session(tenant: Optional[dict] = Depends(deps.require_tenant)):
+def create_portal_session(tenant: Optional[dict] = Depends(deps.require_tenant)):
     """Create a Stripe Customer Portal session for managing subscription. Returns { url }."""
     if not STRIPE_AVAILABLE or not stripe:
         raise HTTPException(status_code=503, detail="Billing not configured")

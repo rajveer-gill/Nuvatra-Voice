@@ -19,7 +19,7 @@ router = APIRouter()
 
 
 @router.get("/api/leads")
-async def get_leads(
+def get_leads(
     tenant: Optional[dict] = Depends(deps.require_tenant),
     _: None = Depends(deps.require_active_subscription),
 ):

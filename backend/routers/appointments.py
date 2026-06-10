@@ -47,7 +47,7 @@ class AppointmentUpdate(BaseModel):
 
 
 @router.post("/api/appointments")
-async def create_appointment(
+def create_appointment(
     appointment: AppointmentRequest,
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
@@ -104,7 +104,7 @@ async def create_appointment(
 
 
 @router.get("/api/appointments")
-async def get_appointments(
+def get_appointments(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     cid = deps._bind_tenant_db_context(tenant)
@@ -146,7 +146,7 @@ async def get_appointments(
 
 
 @router.get("/api/appointments/diagnostics")
-async def get_appointments_diagnostics(
+def get_appointments_diagnostics(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     """Tenant-scoped appointment debug snapshot (for dashboard troubleshooting)."""
@@ -163,7 +163,7 @@ async def get_appointments_diagnostics(
 
 
 @router.get("/api/appointments/calendar")
-async def appointments_calendar(
+def appointments_calendar(
     date_from: str,
     date_to: str,
     staff_id: Optional[str] = None,
@@ -184,7 +184,7 @@ async def appointments_calendar(
 
 
 @router.patch("/api/appointments/{appointment_id}")
-async def update_appointment(
+def update_appointment(
     appointment_id: int,
     update: AppointmentUpdate,
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
@@ -219,7 +219,7 @@ async def update_appointment(
 
 
 @router.post("/api/appointments/{appointment_id}/accept")
-async def accept_appointment(
+def accept_appointment(
     appointment_id: int,
     request: Request,
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
@@ -282,7 +282,7 @@ _ACCEPTED_APPOINTMENT_STATUSES = frozenset({"accepted", "confirmed", "completed"
 
 
 @router.post("/api/appointments/{appointment_id}/reject")
-async def reject_appointment(
+def reject_appointment(
     appointment_id: int,
     body: AppointmentRejectBody,
     request: Request,
@@ -330,7 +330,7 @@ async def reject_appointment(
 
 
 @router.post("/api/appointments/{appointment_id}/cancel")
-async def cancel_appointment(
+def cancel_appointment(
     appointment_id: int,
     body: AppointmentRejectBody,
     request: Request,
@@ -387,7 +387,7 @@ async def cancel_appointment(
 
 
 @router.post("/api/appointments/preview-decline-sms")
-async def preview_decline_sms(
+def preview_decline_sms(
     body: PreviewDeclineSmsBody,
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):

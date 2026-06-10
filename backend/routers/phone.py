@@ -69,7 +69,7 @@ class TTSRequest(BaseModel):
 
 
 @router.post("/api/text-to-speech")
-async def text_to_speech(
+def text_to_speech(
     request: TTSRequest, _: None = Depends(deps.require_active_subscription)
 ):
     """
@@ -104,7 +104,7 @@ async def text_to_speech(
 
 
 @router.get("/api/phone/greeting-audio")
-async def get_greeting_audio(request: Request):
+def get_greeting_audio(request: Request):
     """Serve greeting audio using the voice selected in Settings. Cached on disk + in memory."""
     from voice.tts_cache import get_cached, put_cached
 
@@ -183,7 +183,7 @@ async def get_greeting_audio(request: Request):
 
 
 @router.get("/api/phone/got-it-audio")
-async def get_got_it_audio(request: Request):
+def get_got_it_audio(request: Request):
     """Serve 'Got it, one moment' using the receptionist voice. Cached on disk + in memory."""
     from voice.tts_cache import get_cached, put_cached
 
@@ -244,7 +244,7 @@ async def get_got_it_audio(request: Request):
 
 
 @router.get("/api/phone/one-moment-audio")
-async def get_one_moment_audio(request: Request):
+def get_one_moment_audio(request: Request):
     """Serve 'One moment.' from cache for pending-response filler polling."""
     from voice.tts_cache import get_cached, put_cached
 
@@ -302,7 +302,7 @@ async def get_one_moment_audio(request: Request):
 
 
 @router.get("/api/phone/tts-audio-hd")
-async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
+def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
     """
     Generate HD TTS audio for Twilio phone calls (ultra-smooth, no choppiness).
     Used specifically for the initial greeting to ensure perfect quality.
@@ -334,7 +334,7 @@ async def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
 
 
 @router.get("/api/phone/tts-audio")
-async def get_tts_audio_for_phone(text: str, voice: str = "fable"):
+def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     """
     Generate TTS audio for phone calls.
     This endpoint is called by Twilio to play OpenAI TTS audio.
@@ -1584,7 +1584,7 @@ async def recording_status(request: Request):
 
 
 @router.post("/api/phone/transcribe")
-async def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
+def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
     """
     Transcribe audio from phone call using OpenAI Whisper.
     This endpoint receives base64-encoded audio from Twilio.
@@ -1613,7 +1613,7 @@ async def transcribe_phone_audio(request: Request, audio_data: str = Form(...)):
 
 
 @router.get("/api/phone/calls")
-async def get_active_calls(_: str = Depends(deps.require_admin)):
+def get_active_calls(_: str = Depends(deps.require_admin)):
     """Admin-only: list in-flight voice sessions (PII — never public)."""
     return {
         "active_calls": len(runtime.call_store.sessions),
@@ -1644,7 +1644,7 @@ async def phone_media_websocket(websocket: WebSocket):
 
 
 @router.post("/api/phone/stream")
-async def handle_media_stream(request: Request):
+def handle_media_stream(request: Request):
     """
     Legacy placeholder. Real-time media uses WebSocket ``GET /api/phone/media`` (Twilio Media Streams).
     """

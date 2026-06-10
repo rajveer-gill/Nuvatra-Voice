@@ -88,7 +88,7 @@ async def create_provisioning_job(
 
 
 @router.get("/api/admin/provisioning/jobs/{job_id}")
-async def get_provisioning_job(
+def get_provisioning_job(
     job_id: str,
     admin: str = Depends(deps.require_admin),
 ):

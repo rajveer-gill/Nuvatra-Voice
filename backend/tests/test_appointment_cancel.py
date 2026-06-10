@@ -60,13 +60,11 @@ def test_cancel_accepted_appointment(monkeypatch):
     monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
     monkeypatch.setattr(appts, "system_info", lambda *a, **k: None)
 
-    result = asyncio.run(
-        appts.cancel_appointment(
-            7,
-            appts.AppointmentRejectBody(reason="Clearing test booking"),
-            request=MagicMock(),
-            tenant={"client_id": "test"},
-        )
+    result = appts.cancel_appointment(
+        7,
+        appts.AppointmentRejectBody(reason="Clearing test booking"),
+        request=MagicMock(),
+        tenant={"client_id": "test"},
     )
     assert result["success"] is True
     assert stored["status"] == "cancelled"
@@ -84,12 +82,10 @@ def test_cancel_rejects_pending_review(monkeypatch):
     monkeypatch.setattr(deps, "_bind_tenant_db_context", lambda tenant: "test")
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            appts.cancel_appointment(
-                1,
-                appts.AppointmentRejectBody(reason="nope"),
-                request=MagicMock(),
-                tenant={"client_id": "test"},
-            )
+        appts.cancel_appointment(
+            1,
+            appts.AppointmentRejectBody(reason="nope"),
+            request=MagicMock(),
+            tenant={"client_id": "test"},
         )
     assert exc.value.status_code == 400

@@ -15,12 +15,12 @@ router = APIRouter()
 
 
 @router.get("/")
-async def root():
+def root():
     return {"message": "Call Surge API", "status": "running"}
 
 
 @router.get("/api/health")
-async def health():
+def health():
     """Health check for load balancers and monitoring. Returns 503 when DB is required but unreachable."""
     db_ok = (
         "ok"
@@ -56,7 +56,7 @@ def _sentry_debug_allowed(request: Request) -> bool:
 
 
 @router.get("/sentry-debug")
-async def trigger_sentry_error(request: Request):
+def trigger_sentry_error(request: Request):
     if not _sentry_debug_allowed(request):
         raise HTTPException(status_code=404, detail="Not Found")
     _ = 1 / 0  # intentional test error for Sentry when route is enabled

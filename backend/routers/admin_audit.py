@@ -13,7 +13,7 @@ router = APIRouter()
 
 
 @router.get("/api/admin/audit")
-async def list_audit_events(
+def list_audit_events(
     limit: int = 100,
     client_id: Optional[str] = None,
     action: Optional[str] = None,

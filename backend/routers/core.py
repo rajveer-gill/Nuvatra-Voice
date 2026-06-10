@@ -77,7 +77,7 @@ def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
 
 
 @router.post("/api/conversation", response_model=ConversationResponse)
-async def handle_conversation(
+def handle_conversation(
     request: ConversationRequest, _: None = Depends(deps.require_active_subscription)
 ):
     try:
@@ -164,7 +164,7 @@ async def handle_conversation(
 
 
 @router.post("/api/messages")
-async def create_message(
+def create_message(
     message: MessageRequest, _: None = Depends(deps.require_active_subscription)
 ):
     try:
@@ -190,6 +190,6 @@ async def create_message(
 
 
 @router.get("/api/messages")
-async def get_messages(_: None = Depends(deps.require_active_subscription)):
+def get_messages(_: None = Depends(deps.require_active_subscription)):
     lst = database.db_messages_get_all() if runtime.USE_DB else runtime.messages
     return {"messages": lst}
