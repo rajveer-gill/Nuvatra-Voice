@@ -211,6 +211,7 @@ export default function AdminPage() {
   const reduceMotion = useReducedMotion()
   const [adminAllowed, setAdminAllowed] = useState<boolean | null>(null)
   const [tenants, setTenants] = useState<Tenant[]>([])
+  const [tenantQuery, setTenantQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -612,13 +613,32 @@ export default function AdminPage() {
     )
   }
 
+  const tenantQ = tenantQuery.trim().toLowerCase()
+  const filteredTenants = tenantQ
+    ? tenants.filter((t) =>
+        [
+          t.name,
+          t.client_id,
+          t.twilio_phone_number,
+          t.allocated_email,
+          t.owner_email,
+          t.pending_invite_email,
+          t.plan,
+          t.business_vertical,
+        ].some((v) => (v || '').toLowerCase().includes(tenantQ))
+      )
+    : tenants
+
   return (
     <AppChrome>
       <main className="min-h-screen px-4 py-10 md:px-6">
         <div className="mx-auto max-w-4xl">
-          <div className="mb-8 flex items-center justify-between gap-4">
-            <h1 className="font-display text-2xl font-semibold tracking-tight text-white md:text-3xl">Admin – Add Client</h1>
-            <Link href="/" className="text-sm text-zinc-400 motion-safe-transition hover:text-white">
+          <div className="mb-8 flex items-start justify-between gap-4">
+            <div>
+              <h1 className="font-display text-2xl font-semibold tracking-tight text-white md:text-3xl">Admin console</h1>
+              <p className="mt-1 text-sm text-zinc-400">Manage tenants, provisioning, and production health.</p>
+            </div>
+            <Link href="/" className="shrink-0 text-sm text-zinc-400 motion-safe-transition hover:text-white">
               ← Home
             </Link>
           </div>
@@ -775,7 +795,26 @@ export default function AdminPage() {
           <FleetHealthSummary tenants={tenants} />
 
           <section className="rounded-2xl border border-white/10 bg-zinc-900/70 p-6 shadow-xl backdrop-blur-md md:p-8">
-            <h2 className="mb-4 font-display text-lg font-semibold text-white">Existing tenants</h2>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <h2 className="font-display text-lg font-semibold text-white">Existing tenants</h2>
+              {!loading && tenants.length > 0 && (
+                <span className="text-xs text-zinc-500">
+                  {tenantQ ? `${filteredTenants.length} of ${tenants.length}` : `${tenants.length} total`}
+                </span>
+              )}
+            </div>
+            {tenants.length > 0 && (
+              <div className="mb-4">
+                <input
+                  type="text"
+                  value={tenantQuery}
+                  onChange={(e) => setTenantQuery(e.target.value)}
+                  placeholder="Search by name, client ID, email, phone, or plan…"
+                  className={inputClass}
+                  aria-label="Search tenants"
+                />
+              </div>
+            )}
             <div className="mb-6 rounded-xl border border-white/10 bg-zinc-950/60 p-4">
               <p className="text-xs font-medium text-zinc-400">Access debug — look up an email</p>
               <p className="mt-1 text-xs text-zinc-500">
@@ -822,6 +861,8 @@ export default function AdminPage() {
               </div>
             ) : tenants.length === 0 ? (
               <p className="text-zinc-500">No tenants yet.</p>
+            ) : filteredTenants.length === 0 ? (
+              <p className="text-zinc-500">No tenants match “{tenantQuery.trim()}”.</p>
             ) : (
               <motion.ul
                 className="divide-y divide-white/10"
@@ -829,7 +870,7 @@ export default function AdminPage() {
                 initial={reduceMotion ? false : 'hidden'}
                 animate="visible"
               >
-                {tenants.map((t) => {
+                {filteredTenants.map((t) => {
                   const twilioDraftVal = twilioDraft[t.id] ?? ''
                   const canSaveTwilioNumber = isUsTenantTwilioDraft(twilioDraftVal)
                     ? nationalDigitsForUsTwilioInput(twilioDraftVal).length > 0
