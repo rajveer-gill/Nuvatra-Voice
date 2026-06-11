@@ -5,6 +5,7 @@ import { Users, Send, Loader2 } from 'lucide-react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient } from '@/lib/api'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { Reveal } from '@/components/motion'
 
 interface Lead {
@@ -77,7 +78,11 @@ export default function Leads() {
       </h2>
       <p className="text-gray-600 text-sm mb-4">People who reached out but did not book an appointment.</p>
       {leads.length === 0 ? (
-        <p className="text-gray-500 text-center py-8">No leads yet</p>
+        <EmptyState
+          icon={Users}
+          title="No leads yet"
+          description="People who reach out but don't book will be captured here so you can follow up with a text."
+        />
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">

@@ -5,6 +5,7 @@ import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loa
 import { useApiClient } from '@/lib/api'
 import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
 import { Skeleton } from '@/components/ui/Skeleton'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
 import { STATUS_CLASSES, STATUS_LABELS } from '@/components/appointments/appointmentStatus'
 
@@ -431,7 +432,11 @@ export default function Dashboard() {
           <div className="mt-6">
             <p className="text-gray-700 font-semibold mb-2">Recent calls</p>
             {recentCalls.length === 0 ? (
-              <p className="text-gray-500 text-sm">No calls logged yet</p>
+              <EmptyState
+                icon={Phone}
+                title="No calls logged yet"
+                description="When your AI receptionist answers a call, a summary and recording will appear here."
+              />
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm text-gray-900">
@@ -514,7 +519,11 @@ export default function Dashboard() {
           Recent Appointments
         </h2>
         {appointments.length === 0 ? (
-          <p className="text-gray-500 text-center py-8">No appointments yet</p>
+          <EmptyState
+            icon={Calendar}
+            title="No appointments yet"
+            description="Bookings your AI receptionist takes will show up here for you to accept or decline."
+          />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-gray-900">
@@ -558,7 +567,11 @@ export default function Dashboard() {
           Recent Messages
         </h2>
         {messages.length === 0 ? (
-          <p className="text-gray-500 text-center py-8">No messages yet</p>
+          <EmptyState
+            icon={MessageSquare}
+            title="No messages yet"
+            description="When a caller leaves a message, it'll appear here to read and reply to."
+          />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-gray-900">
