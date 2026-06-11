@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, Fragment } from 'react'
-import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loader2 } from 'lucide-react'
+import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loader2, RefreshCw } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -87,6 +87,15 @@ interface CallLogEntry {
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
+function relativeAgo(ts: number | null): string {
+  if (!ts) return ''
+  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (secs < 5) return 'just now'
+  if (secs < 60) return `${secs}s ago`
+  const mins = Math.round(secs / 60)
+  return `${mins}m ago`
+}
+
 export default function Dashboard() {
   const api = useApiClient()
   const [stats, setStats] = useState<Stats>({
@@ -109,12 +118,30 @@ export default function Dashboard() {
   const [replyingId, setReplyingId] = useState<number | null>(null)
   const [replyText, setReplyText] = useState('')
   const [msgActionNote, setMsgActionNote] = useState<{ id: number; text: string; ok: boolean } | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [, setTick] = useState(0)
 
   useEffect(() => {
     fetchData()
     const interval = setInterval(fetchData, 30000) // Refresh every 30 seconds
     return () => clearInterval(interval)
   }, [api])
+
+  // Re-render the "updated Xs ago" label without refetching.
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 15000)
+    return () => clearInterval(t)
+  }, [])
+
+  const manualRefresh = async () => {
+    setRefreshing(true)
+    try {
+      await fetchData()
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   const fetchData = async () => {
     try {
@@ -147,6 +174,7 @@ export default function Dashboard() {
       setAnalyticsSummary(summaryRes.data?.client_id != null ? summaryRes.data : null)
       setCallHealth(healthRes.data?.calls_total != null ? healthRes.data : null)
       setRecentCalls(callsRes.data?.calls || [])
+      setLastUpdated(Date.now())
     } catch (error: unknown) {
       const status = (error as { response?: { status?: number } })?.response?.status
       if (status === 401 || status === 403) {
@@ -239,6 +267,19 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 text-gray-900">
+      <div className="flex items-center justify-end gap-3 text-sm text-gray-500">
+        {lastUpdated && <span aria-live="polite">Updated {relativeAgo(lastUpdated)}</span>}
+        <button
+          type="button"
+          onClick={manualRefresh}
+          disabled={refreshing}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+
       {/* Usage widget */}
       {usage != null && minutesCap != null && minutesCap > 0 && (
         <div className="bg-white rounded-lg shadow-md p-6">
