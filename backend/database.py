@@ -424,6 +424,20 @@ def init_db() -> bool:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sms_opt_out_client ON sms_opt_out(client_id)")
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS sms_consent (
+                id BIGSERIAL PRIMARY KEY,
+                phone TEXT NOT NULL,
+                client_id TEXT NOT NULL DEFAULT 'default',
+                consent_type TEXT NOT NULL DEFAULT 'service',
+                source TEXT NOT NULL,
+                detail JSONB,
+                ip TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sms_consent_phone_client ON sms_consent(phone, client_id, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sms_consent_client_created ON sms_consent(client_id, created_at DESC)")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS audit_events (
                 id BIGSERIAL PRIMARY KEY,
                 occurred_at TIMESTAMPTZ DEFAULT NOW(),
@@ -602,6 +616,7 @@ def init_db() -> bool:
         for col, typ in [
             ("staff_id", "TEXT"),
             ("owner_decline_reason", "TEXT"),
+            ("confirmation_sms_failed", "BOOLEAN NOT NULL DEFAULT false"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE appointments ADD COLUMN IF NOT EXISTS {col} {typ}")

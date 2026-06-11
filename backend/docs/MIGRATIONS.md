@@ -72,26 +72,17 @@ Always write a real `downgrade()` so the migration is reversible.
 
 ## Applying migrations in deployment
 
-This adoption is **additive**: `init_db()` is unchanged and still bootstraps the
-*baseline* schema at app startup. It does **not** create anything added by a
-later revision, so new migrations must be applied with `alembic upgrade head`.
+**Deploy model (important):** production deploys are "push to `main` → Render/
+Vercel auto-restart", with no separate migration step. `init_db()` runs on every
+startup and is the operative bootstrap. So **new additive schema is added to BOTH
+`init_db()` (idempotent `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`)
+and a matching Alembic revision** — `init_db()` guarantees the column/table exist
+when the new code starts; the revision keeps the versioned history correct.
 
-On Render this is wired as a **`preDeployCommand`** on the web service
-(`render.yaml`): `cd backend && alembic upgrade head`. Render runs it on a single
-instance before the new version takes traffic — the correct single-release step,
-with no concurrent-migration race across web workers. A brand-new revision is
-therefore applied automatically on the next deploy.
-
-> One-time check before the first deploy that carries a post-baseline revision:
-> make sure production is at a known Alembic state. If it was built by `init_db()`
-> and never stamped, run `alembic stamp 0001_baseline` once (see above). After
-> that, `upgrade head` only runs the genuinely new revisions. (Re-running the
-> fully-idempotent baseline is harmless either way, since every statement is
-> `IF NOT EXISTS`.)
-
-For any other host, run `alembic upgrade head` against the production
-`DATABASE_URL` as a single release step (manually or via a `release:` Procfile
-entry) — not from every web worker.
+We deliberately do **not** wire `alembic upgrade head` into the Render deploy: it
+would add a step that can fail the whole deploy, and `init_db()` already makes the
+schema present. To apply migrations to an Alembic-tracked database manually, run
+`alembic upgrade head` against its `DATABASE_URL` as a single release step.
 
 ## Useful commands
 
