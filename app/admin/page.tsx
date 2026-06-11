@@ -11,6 +11,8 @@ import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
 import { AuditLog } from '@/components/admin/AuditLog'
 import { FleetHealthSummary } from '@/components/admin/FleetHealthSummary'
+import { CollapsibleSection } from '@/components/ui/CollapsibleSection'
+import { ChevronDown } from 'lucide-react'
 
 type TenantAccessStatus = 'active' | 'pending_invite' | 'none' | 'active_pending_mismatch'
 
@@ -650,9 +652,12 @@ export default function AdminPage() {
             <div className="mb-6 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{success}</div>
           )}
 
-          <section className="mb-8 rounded-2xl border border-white/10 bg-zinc-900/70 p-6 shadow-xl backdrop-blur-md">
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <h2 className="font-display text-lg font-semibold text-white">Production ops</h2>
+          <CollapsibleSection
+            title="Production ops"
+            description="Environment & infrastructure self-check."
+            className="mb-8"
+          >
+            <div className="mb-4 flex justify-end">
               <button
                 type="button"
                 onClick={() => void fetchOpsCheck()}
@@ -704,7 +709,7 @@ export default function AdminPage() {
             <p className="mt-3 text-xs text-zinc-500">
               Redis security checklist: <code className="text-zinc-400">docs/REDIS-SECURITY.md</code> in the repo.
             </p>
-          </section>
+          </CollapsibleSection>
 
           <ProvisioningPanel />
 
@@ -724,11 +729,18 @@ export default function AdminPage() {
                 <input
                   type="text"
                   required
+                  inputMode="text"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   placeholder="e.g. acme-salon"
                   value={form.client_id}
-                  onChange={(e) => setForm({ ...form, client_id: e.target.value.replace(/\s/g, '-').toLowerCase() })}
+                  onChange={(e) => setForm({ ...form, client_id: e.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, '-') })}
                   className={inputClass}
                 />
+                <p className="mt-1 text-xs text-zinc-500">
+                  Lowercase letters, numbers, and hyphens only (typed automatically). This is the permanent
+                  internal ID — pick something stable; it can&apos;t be changed later.
+                </p>
               </div>
               <div>
                 <label className="mb-1 block text-sm font-medium text-zinc-400">Business name</label>
@@ -740,6 +752,7 @@ export default function AdminPage() {
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
                   className={inputClass}
                 />
+                <p className="mt-1 text-xs text-zinc-500">Shown to callers in the greeting and across the dashboard.</p>
               </div>
               <div>
                 <label className="mb-1 block text-sm font-medium text-zinc-400">Industry (vertical)</label>
@@ -815,8 +828,12 @@ export default function AdminPage() {
                 />
               </div>
             )}
-            <div className="mb-6 rounded-xl border border-white/10 bg-zinc-950/60 p-4">
-              <p className="text-xs font-medium text-zinc-400">Access debug — look up an email</p>
+            <details className="group mb-6 rounded-xl border border-white/10 bg-zinc-950/60">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-4 text-xs font-medium text-zinc-400 [&::-webkit-details-marker]:hidden">
+                Access debug — look up an email
+                <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" aria-hidden />
+              </summary>
+              <div className="px-4 pb-4">
               <p className="mt-1 text-xs text-zinc-500">
                 Shows which tenant(s) and Clerk user(s) match an address. Set{' '}
                 <code className="text-zinc-400">ADMIN_ACCESS_DEBUG=1</code> on Render for extra server logs.
@@ -854,7 +871,8 @@ export default function AdminPage() {
                   {JSON.stringify(emailLookupResult, null, 2)}
                 </pre>
               )}
-            </div>
+              </div>
+            </details>
             {loading ? (
               <div className="flex justify-center py-12">
                 <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-400/30 border-t-cyan-400" />

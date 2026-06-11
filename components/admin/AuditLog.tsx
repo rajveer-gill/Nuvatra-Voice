@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { RevealStagger, RevealItem } from '@/components/motion'
+import { CollapsibleSection } from '@/components/ui/CollapsibleSection'
 
 interface AuditEvent {
   id: number
@@ -68,12 +69,12 @@ export function AuditLog() {
   }, [load])
 
   return (
-    <section className="mb-8 rounded-2xl border border-white/10 bg-zinc-900/70 p-6 shadow-xl backdrop-blur-md">
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <div>
-          <h2 className="font-display text-lg font-semibold text-white">Audit log</h2>
-          <p className="text-xs text-zinc-500">Recent security &amp; admin events (newest first).</p>
-        </div>
+    <CollapsibleSection
+      title="Audit log"
+      description="Recent security & admin events (newest first)."
+      className="mb-8"
+    >
+      <div className="mb-4 flex justify-end">
         <button
           type="button"
           onClick={() => void load()}
@@ -140,6 +141,6 @@ export function AuditLog() {
       ) : (
         <p className="py-6 text-center text-sm text-zinc-500">No audit events recorded yet.</p>
       )}
-    </section>
+    </CollapsibleSection>
   )
 }
