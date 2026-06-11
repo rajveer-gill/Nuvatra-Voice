@@ -301,6 +301,59 @@ def get_one_moment_audio(request: Request):
             )
 
 
+@router.get("/api/phone/filler-audio")
+def get_filler_audio(request: Request, i: int = 0):
+    """Serve a progressive wait-loop filler (by index) using the receptionist voice.
+    Cached on disk + in memory, like one-moment-audio, so repeated polls add no
+    synthesis latency."""
+    from voice.tts_cache import get_cached, put_cached
+
+    client_id = voice_service._get_client_id_from_call(request)
+    if not client_id:
+        raise HTTPException(status_code=404, detail="Call session not found")
+    database.set_request_client_id(client_id)
+    phrases = voice_service.PENDING_FILLER_PHRASES
+    idx = i % len(phrases) if phrases else 0
+    phrase = phrases[idx] if phrases else voice_service.ONE_MOMENT_PHRASE
+    cache_key = voice_service._filler_cache_key(client_id, phrase)
+    cached = get_cached(voice_service.PROJECT_ROOT, "filler", cache_key)
+    if cached:
+        return Response(
+            content=cached,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=filler.mp3",
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(cached)),
+            },
+        )
+    try:
+        voice = cache_key[2]
+        speed = cache_key[3]
+        data = voice_service._synthesize_tts_clip(phrase, voice=voice, speed=speed)
+        put_cached(voice_service.PROJECT_ROOT, "filler", cache_key, data)
+        return Response(
+            content=data,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=filler.mp3",
+                "Cache-Control": "public, max-age=86400",
+                "Content-Length": str(len(data)),
+            },
+        )
+    except Exception as e:
+        logger.exception("filler_audio_generate_failed: %s", e)
+        # Degrade to the cached 'one moment' clip rather than dead air.
+        try:
+            data = voice_service._synthesize_tts_clip(
+                voice_service.ONE_MOMENT_PHRASE, voice=cache_key[2], speed=cache_key[3]
+            )
+            return Response(content=data, media_type="audio/mpeg", headers={"Content-Length": str(len(data))})
+        except Exception as e2:
+            logger.exception("filler_audio_fallback_failed: %s", e2)
+            raise HTTPException(status_code=500, detail="Failed to generate filler audio")
+
+
 @router.get("/api/phone/tts-audio-hd")
 def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
     """
@@ -874,6 +927,11 @@ async def process_speech(request: Request):
                 content=outcome.replacement_twiml, media_type="application/xml"
             )
 
+        # New turn — restart the wait-loop filler sequence so it begins with silence
+        # (the caller is about to hear "Got it, one moment.") rather than mid-rotation.
+        if call_sid:
+            runtime.call_store.merge_session(call_sid, {"respond_poll_count": 0})
+
         response = VoiceResponse()
         got_it_audio_url = f"{base_url}/api/phone/got-it-audio?call_sid={call_sid}"
         response.play(got_it_audio_url)
@@ -1166,6 +1224,28 @@ async def handle_no_speech(request: Request):
         return Response(content=str(response), media_type="application/xml")
 
 
+def _append_pending_filler(response, base_url: str, call_sid: Optional[str]) -> None:
+    """Append one wait-loop turn: a varied filler clip (or brief silence on the first
+    poll, since the caller just heard 'Got it, one moment.'), a short pause, and a
+    redirect back to /respond. A per-call poll counter keeps the filler from repeating
+    the same line on a loop during a long wait."""
+    count = 0
+    if call_sid:
+        sess = runtime.call_store.sessions.get(call_sid, {}) or {}
+        try:
+            count = int(sess.get("respond_poll_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+    pick = voice_service.pending_filler_for_poll(count)
+    if pick is not None:
+        idx, _phrase = pick
+        response.play(f"{base_url}/api/phone/filler-audio?call_sid={call_sid}&i={idx}")
+    response.pause(length=1)
+    response.redirect(f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST")
+    if call_sid:
+        runtime.call_store.merge_session(call_sid, {"respond_poll_count": count + 1})
+
+
 @router.post("/api/phone/respond")
 async def respond_with_audio(request: Request):
     """
@@ -1196,14 +1276,7 @@ async def respond_with_audio(request: Request):
                 has_active_call=bool(call_sid and call_sid in runtime.call_store.sessions),
             )
             response = VoiceResponse()
-            filler_audio_url = (
-                f"{base_url}/api/phone/one-moment-audio?call_sid={call_sid}"
-            )
-            response.play(filler_audio_url)
-            response.pause(length=1)
-            response.redirect(
-                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
-            )
+            _append_pending_filler(response, base_url, call_sid)
             return Response(content=str(response), media_type="application/xml")
 
         status_data = runtime.call_store.response_status[call_sid]
@@ -1349,16 +1422,8 @@ async def respond_with_audio(request: Request):
                 client_id=str(runtime.call_store.sessions.get(call_sid, {}).get("client_id") or ""),
                 status=status,
             )
-            # Still pending - play filler and redirect again
-            # Use OpenAI TTS (Fable voice) for consistency
-            filler_text = "One sec."
-            filler_encoded = quote(filler_text)
-            filler_audio_url = f"{base_url}/api/phone/tts-audio?text={filler_encoded}&voice={config_service.get_tts_voice()}"
-            response.play(filler_audio_url)
-            response.pause(length=1)
-            response.redirect(
-                f"{base_url}/api/phone/respond?CallSid={call_sid}", method="POST"
-            )
+            # Still pending - play a varied filler and redirect again.
+            _append_pending_filler(response, base_url, call_sid)
             return Response(content=str(response), media_type="application/xml")
 
     except Exception as e:

@@ -60,6 +60,12 @@ DEFAULT_GREETING_TEMPLATE = (
 GOT_IT_PHRASE = "Got it, one moment."
 ONE_MOMENT_PHRASE = "One moment."
 
+# Progressive fillers played while the AI is still composing a reply. The caller
+# has just heard "Got it, one moment.", so the first wait poll stays silent and we
+# never lead with "One moment." again; on longer waits we alternate these so it
+# never sounds like a broken record. Served cached via /api/phone/filler-audio.
+PENDING_FILLER_PHRASES = ["Almost there.", "One moment.", "Just a moment longer."]
+
 # Fallback when OpenAI/TTS fails - play this so caller does not get dead air.
 TTS_FALLBACK_TEXT = (
     "We're experiencing a brief technical issue. Please try again in a moment."
@@ -285,6 +291,30 @@ def _one_moment_cache_key(client_id: str) -> tuple:
         (config_service.get_tts_voice() or "fable").strip(),
         speed_key,
     )
+
+
+def _filler_cache_key(client_id: str, phrase: str) -> tuple:
+    info = config_service.get_business_info()
+    try:
+        speed_key = round(float(info.get("speed", 1.0)), 2)
+    except (TypeError, ValueError):
+        speed_key = 1.0
+    return (
+        client_id,
+        phrase,
+        (config_service.get_tts_voice() or "fable").strip(),
+        speed_key,
+    )
+
+
+def pending_filler_for_poll(poll_count: int):
+    """Pick the wait-loop filler for a given poll index. Returns (index, phrase),
+    or None for the first poll (stay silent — the caller just heard
+    'Got it, one moment.'). Alternates phrases so long waits don't loop one line."""
+    if poll_count <= 0 or not PENDING_FILLER_PHRASES:
+        return None
+    idx = (poll_count - 1) % len(PENDING_FILLER_PHRASES)
+    return idx, PENDING_FILLER_PHRASES[idx]
 
 
 def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
