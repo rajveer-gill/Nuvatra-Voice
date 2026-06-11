@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { CheckCircle2, Circle, ArrowRight } from 'lucide-react'
+import { CheckCircle2, Circle, ArrowRight, Clock } from 'lucide-react'
 
 export type SetupWizardStatus = {
   complete?: boolean
@@ -20,6 +20,9 @@ type Step = {
   title: string
   description: string
   done: boolean
+  /** Who acts on this step — the business owner ('you') or our team ('us'). */
+  actor: 'you' | 'us'
+  /** Where in Settings to act (anchor id), if owner-actionable. */
   settingsAnchor?: string
 }
 
@@ -27,25 +30,28 @@ function buildSteps(status: SetupWizardStatus | null): Step[] {
   const missing = status?.missing ?? []
   const businessDone = !missing.includes('Business name') && !missing.includes('Hours of operation') && !missing.includes('Address')
   const servicesDone = !(status?.warnings ?? []).some((w) => w.startsWith('Add services'))
+  const goLiveDone = Boolean(status?.twilio_number_set && status?.webhooks_configured)
   return [
     {
       id: 'business',
       title: 'Business profile',
       description: 'Name, hours, and address so callers get accurate info.',
       done: businessDone,
-      settingsAnchor: undefined,
+      actor: 'you',
     },
     {
       id: 'services',
       title: 'Services',
       description: 'What you offer — helps the AI guide booking conversations.',
       done: servicesDone,
+      actor: 'you',
     },
     {
       id: 'team',
       title: 'Team roster',
       description: 'At least one named team member for appointments.',
       done: status?.roster_ready === true,
+      actor: 'you',
       settingsAnchor: 'team-roster-settings',
     },
     {
@@ -53,21 +59,32 @@ function buildSteps(status: SetupWizardStatus | null): Step[] {
       title: 'Store phone',
       description: 'Number to transfer callers when they need a real person.',
       done: status?.forwarding_phone_ready === true,
+      actor: 'you',
       settingsAnchor: 'store-phone-settings',
     },
     {
       id: 'go-live',
-      title: 'AI phone & webhooks',
-      description: 'Your admin assigns a Twilio number and configures webhooks.',
-      done: Boolean(status?.twilio_number_set && status?.webhooks_configured),
+      title: 'AI phone line',
+      description: goLiveDone
+        ? 'Your dedicated phone line is active and answering calls.'
+        : "We're setting up your dedicated phone line — nothing needed from you. We'll let you know the moment it's ready.",
+      done: goLiveDone,
+      actor: 'us',
     },
     {
       id: 'test',
       title: 'Test your greeting',
       description: 'Preview what callers hear in Settings, then place a test call.',
       done: Boolean(status?.onboarding_completed_at),
+      actor: 'you',
     },
   ]
+}
+
+function stepHref(step: Step): string {
+  return step.settingsAnchor
+    ? `/dashboard?tab=settings#${step.settingsAnchor}`
+    : '/dashboard?tab=settings'
 }
 
 type Props = {
@@ -108,17 +125,24 @@ export function SetupWizard({ status, onComplete, completing, compact }: Props) 
           >
             {step.done ? (
               <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" aria-hidden />
+            ) : step.actor === 'us' ? (
+              <Clock className="mt-0.5 h-5 w-5 shrink-0 text-cyan-400" aria-hidden />
             ) : (
               <Circle className="mt-0.5 h-5 w-5 shrink-0 text-zinc-600" aria-hidden />
             )}
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-zinc-100">
-                {i + 1}. {step.title}
+              <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-zinc-100">
+                <span>{i + 1}. {step.title}</span>
+                {step.actor === 'us' && !step.done && (
+                  <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
+                    We handle this
+                  </span>
+                )}
               </p>
               <p className="mt-0.5 text-xs text-zinc-500">{step.description}</p>
-              {!step.done && step.settingsAnchor && (
+              {!step.done && step.actor === 'you' && (
                 <Link
-                  href={`/dashboard?tab=settings#${step.settingsAnchor}`}
+                  href={stepHref(step)}
                   className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-cyan-400 hover:text-cyan-300"
                 >
                   Open in Settings
