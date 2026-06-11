@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3 } from 'lucide-react'
+import { useState, useEffect, Fragment } from 'react'
+import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loader2 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -104,6 +104,10 @@ export default function Dashboard() {
   const [exporting, setExporting] = useState(false)
   const [usage, setUsage] = useState<{ voice_minutes: number; sms_count: number; month: string } | null>(null)
   const [minutesCap, setMinutesCap] = useState<number | null>(null)
+  const [busyMsgId, setBusyMsgId] = useState<number | null>(null)
+  const [replyingId, setReplyingId] = useState<number | null>(null)
+  const [replyText, setReplyText] = useState('')
+  const [msgActionNote, setMsgActionNote] = useState<{ id: number; text: string; ok: boolean } | null>(null)
 
   useEffect(() => {
     fetchData()
@@ -150,6 +154,43 @@ export default function Dashboard() {
       console.error('Error fetching data:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const updateMessageLocal = (m: Message) =>
+    setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, ...m } : x)))
+
+  const markRead = async (id: number, read: boolean) => {
+    setBusyMsgId(id)
+    try {
+      const res = await api.post(`/api/messages/${id}/read?read=${read}`)
+      if (res?.data?.message) updateMessageLocal(res.data.message)
+    } catch (error) {
+      console.error('Failed to update message', error)
+    } finally {
+      setBusyMsgId(null)
+    }
+  }
+
+  const sendReply = async (id: number) => {
+    const text = replyText.trim()
+    if (!text) return
+    setBusyMsgId(id)
+    setMsgActionNote(null)
+    try {
+      const res = await api.post(`/api/messages/${id}/reply`, { text })
+      if (res?.data?.message) updateMessageLocal(res.data.message)
+      const ok = res?.data?.reply_sms_sent !== false
+      setMsgActionNote({ id, ok, text: ok ? 'Reply sent.' : "Couldn't send the text — try calling the customer instead." })
+      setReplyingId(null)
+      setReplyText('')
+      setTimeout(() => setMsgActionNote(null), ok ? 4000 : 8000)
+    } catch (error) {
+      console.error('Failed to send reply', error)
+      setMsgActionNote({ id, ok: false, text: 'Failed to send reply.' })
+      setTimeout(() => setMsgActionNote(null), 6000)
+    } finally {
+      setBusyMsgId(null)
     }
   }
 
@@ -528,40 +569,109 @@ export default function Dashboard() {
                   <th className="text-left py-3 px-4 font-semibold text-gray-800">Message</th>
                   <th className="text-left py-3 px-4 font-semibold text-gray-800">Urgency</th>
                   <th className="text-left py-3 px-4 font-semibold text-gray-800">Status</th>
+                  <th className="text-right py-3 px-4 font-semibold text-gray-800">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {messages.slice(0, 10).map((message) => (
-                  <tr key={message.id} className="border-b border-gray-200 hover:bg-gray-50">
-                    <td className="py-3 px-4 font-medium text-gray-900">{message.caller_name}</td>
-                    <td className="py-3 px-4 text-gray-900">{message.caller_phone}</td>
-                    <td className="max-w-md truncate py-3 px-4 text-gray-900">{message.message}</td>
-                    <td className="py-3 px-4">
-                      <span
-                        className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${
-                          message.urgency === 'urgent'
-                            ? 'bg-red-200 text-red-950'
-                            : message.urgency === 'high'
-                              ? 'bg-orange-200 text-orange-950'
-                              : 'bg-sky-200 text-sky-950'
-                        }`}
-                      >
-                        {message.urgency}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4">
-                      <span
-                        className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${
-                          message.status === 'unread'
-                            ? 'bg-amber-200 text-amber-950'
-                            : 'bg-emerald-200 text-emerald-950'
-                        }`}
-                      >
-                        {message.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {messages.slice(0, 10).map((message) => {
+                  const busy = busyMsgId === message.id
+                  const isUnread = message.status === 'unread'
+                  return (
+                    <Fragment key={message.id}>
+                      <tr className={`border-b border-gray-200 hover:bg-gray-50 ${isUnread ? 'bg-amber-50/40' : ''}`}>
+                        <td className="py-3 px-4 font-medium text-gray-900">{message.caller_name || '—'}</td>
+                        <td className="py-3 px-4 text-gray-900">{message.caller_phone || '—'}</td>
+                        <td className="max-w-md truncate py-3 px-4 text-gray-900">{message.message}</td>
+                        <td className="py-3 px-4">
+                          <span
+                            className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${
+                              message.urgency === 'urgent'
+                                ? 'bg-red-200 text-red-950'
+                                : message.urgency === 'high'
+                                  ? 'bg-orange-200 text-orange-950'
+                                  : 'bg-sky-200 text-sky-950'
+                            }`}
+                          >
+                            {message.urgency}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span
+                            className={`inline-block rounded-full px-2 py-1 text-xs font-semibold ${
+                              isUnread ? 'bg-amber-200 text-amber-950' : 'bg-emerald-200 text-emerald-950'
+                            }`}
+                          >
+                            {message.status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => markRead(message.id, isUnread)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              {isUnread ? 'Mark read' : 'Mark unread'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy || !message.caller_phone}
+                              title={message.caller_phone ? 'Text the caller back' : 'No phone number to reply to'}
+                              onClick={() => {
+                                setReplyingId(replyingId === message.id ? null : message.id)
+                                setReplyText('')
+                                setMsgActionNote(null)
+                              }}
+                              className="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow disabled:opacity-50"
+                            >
+                              <Send className="h-3.5 w-3.5" />
+                              Reply
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {(replyingId === message.id || msgActionNote?.id === message.id) && (
+                        <tr className="border-b border-gray-200 bg-gray-50">
+                          <td colSpan={6} className="px-4 py-3">
+                            {replyingId === message.id && (
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                                <label className="flex-1">
+                                  <span className="mb-1 block text-xs font-medium text-gray-600">
+                                    Reply by text to {message.caller_phone}
+                                  </span>
+                                  <textarea
+                                    value={replyText}
+                                    onChange={(e) => setReplyText(e.target.value)}
+                                    rows={2}
+                                    maxLength={1000}
+                                    placeholder="Type your reply…"
+                                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  disabled={busy || !replyText.trim()}
+                                  onClick={() => sendReply(message.id)}
+                                  className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow disabled:opacity-50"
+                                >
+                                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                                  Send text
+                                </button>
+                              </div>
+                            )}
+                            {msgActionNote?.id === message.id && (
+                              <p className={`mt-1 text-xs font-medium ${msgActionNote.ok ? 'text-emerald-600' : 'text-red-600'}`}>
+                                {msgActionNote.text}
+                              </p>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
               </tbody>
             </table>
           </div>

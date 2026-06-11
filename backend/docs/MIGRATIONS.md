@@ -73,11 +73,25 @@ Always write a real `downgrade()` so the migration is reversible.
 ## Applying migrations in deployment
 
 This adoption is **additive**: `init_db()` is unchanged and still bootstraps the
-schema at app startup, so the running deploy was not modified. To apply a *new*
-migration to production, run `alembic upgrade head` against the production
-`DATABASE_URL` — either manually, or by wiring it into a release step (e.g. a
-Render pre-deploy command or a `release:` Procfile entry). Run it as a single
-release step, not from every web worker, to avoid concurrent-migration races.
+*baseline* schema at app startup. It does **not** create anything added by a
+later revision, so new migrations must be applied with `alembic upgrade head`.
+
+On Render this is wired as a **`preDeployCommand`** on the web service
+(`render.yaml`): `cd backend && alembic upgrade head`. Render runs it on a single
+instance before the new version takes traffic — the correct single-release step,
+with no concurrent-migration race across web workers. A brand-new revision is
+therefore applied automatically on the next deploy.
+
+> One-time check before the first deploy that carries a post-baseline revision:
+> make sure production is at a known Alembic state. If it was built by `init_db()`
+> and never stamped, run `alembic stamp 0001_baseline` once (see above). After
+> that, `upgrade head` only runs the genuinely new revisions. (Re-running the
+> fully-idempotent baseline is harmless either way, since every statement is
+> `IF NOT EXISTS`.)
+
+For any other host, run `alembic upgrade head` against the production
+`DATABASE_URL` as a single release step (manually or via a `release:` Procfile
+entry) — not from every web worker.
 
 ## Useful commands
 

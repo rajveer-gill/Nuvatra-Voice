@@ -11,4 +11,6 @@ export interface Appointment {
   source?: string
   staff_id?: string | null
   owner_decline_reason?: string | null
+  /** True when a dashboard accept/decline/cancel could not deliver its confirmation text. */
+  confirmation_sms_failed?: boolean
 }

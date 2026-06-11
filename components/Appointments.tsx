@@ -51,7 +51,6 @@ export default function Appointments() {
   const [calendarHolds, setCalendarHolds] = useState<
     { date: string; time: string; appointment_id?: number; status: string; name: string }[]
   >([])
-  const [tenantClientId, setTenantClientId] = useState<string | null>(null)
   const [diagnostics, setDiagnostics] = useState<{
     total?: number
     likely_mismatch?: boolean
@@ -75,7 +74,6 @@ export default function Appointments() {
       const res = await api.get('/api/appointments')
       setAppointments(res.data.appointments || [])
       setCalendarHolds(res.data.calendar_holds || [])
-      setTenantClientId(res.data.client_id || null)
       setDiagnostics(res.data.diagnostics || null)
       setTwilioPhone(res.data.twilio_phone_number || null)
     } catch (e) {
@@ -175,10 +173,15 @@ export default function Appointments() {
     setUpdatingId(id)
     setAcceptRejectMsg(null)
     try {
-      await api.post(`/api/appointments/${id}/accept`)
+      const res = await api.post(`/api/appointments/${id}/accept`)
       await fetchAppointments()
-      setAcceptRejectMsg({ id, msg: 'Accepted — confirmation text sent.', ok: true })
-      setTimeout(() => setAcceptRejectMsg(null), 4000)
+      const sent = res?.data?.confirmation_sms_sent !== false
+      setAcceptRejectMsg(
+        sent
+          ? { id, msg: 'Accepted — confirmation text sent.', ok: true }
+          : { id, msg: "Accepted, but the confirmation text didn't send. Call the customer to confirm.", ok: false }
+      )
+      setTimeout(() => setAcceptRejectMsg(null), sent ? 4000 : 8000)
     } catch (e) {
       console.error('Failed to accept', e)
       setAcceptRejectMsg({ id, msg: apiDetail(e), ok: false })
@@ -194,19 +197,22 @@ export default function Appointments() {
     setUpdatingId(id)
     setAcceptRejectMsg(null)
     try {
-      if (kind === 'cancel') {
-        await api.post(`/api/appointments/${id}/cancel`, { reason: ownerActionReason.trim() })
-        await fetchAppointments()
-        setAcceptRejectMsg({ id, msg: 'Cancelled — customer notified.', ok: true })
-      } else {
-        await api.post(`/api/appointments/${id}/reject`, { reason: ownerActionReason.trim() })
-        await fetchAppointments()
-        setAcceptRejectMsg({ id, msg: 'Declined — customer notified.', ok: true })
-      }
+      const res =
+        kind === 'cancel'
+          ? await api.post(`/api/appointments/${id}/cancel`, { reason: ownerActionReason.trim() })
+          : await api.post(`/api/appointments/${id}/reject`, { reason: ownerActionReason.trim() })
+      await fetchAppointments()
+      const sent = res?.data?.confirmation_sms_sent !== false
+      const verb = kind === 'cancel' ? 'Cancelled' : 'Declined'
+      setAcceptRejectMsg(
+        sent
+          ? { id, msg: `${verb} — customer notified.`, ok: true }
+          : { id, msg: `${verb}, but the text didn't send. Call the customer to let them know.`, ok: false }
+      )
       setOwnerActionModal(null)
       setOwnerActionReason('')
       setDeclinePreview(null)
-      setTimeout(() => setAcceptRejectMsg(null), 4000)
+      setTimeout(() => setAcceptRejectMsg(null), sent ? 4000 : 8000)
     } catch (e) {
       console.error(`Failed to ${kind}`, e)
       setAcceptRejectMsg({ id, msg: apiDetail(e), ok: false })
@@ -259,9 +265,6 @@ export default function Appointments() {
             </motion.div>
             <div>
               <h2 className="text-xl font-bold text-white">Appointments</h2>
-              {tenantClientId && (
-                <p className="text-xs text-zinc-500">Business · {tenantClientId}</p>
-              )}
             </div>
           </div>
 
@@ -373,11 +376,20 @@ export default function Appointments() {
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
-            className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100"
+            className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
           >
-            Appointments may be stored under <strong>{diagnostics.env_client_id}</strong> while you are
-            viewing <strong>{tenantClientId}</strong>. Remove <code>CLIENT_ID</code> on Render and link your
-            Twilio number in Settings.
+            {twilioPhone ? (
+              <>
+                Some of your appointments may not be appearing here because of a setup issue on our
+                side. Please contact support so we can fix the connection for your account.
+              </>
+            ) : (
+              <>
+                Your business phone number isn&rsquo;t linked to this account yet, so new appointments
+                may not show up here. Add it under{' '}
+                <strong>Settings → Phone</strong> to finish setup.
+              </>
+            )}
           </motion.div>
         )}
 

@@ -427,12 +427,21 @@ def build_system_prompt(
     focus_block = appointment_focus_guidance(
         name, include_booked_slots=include_booked_slots, channel="voice"
     )
+    message_block = (
+        "\n\nTAKING A MESSAGE: If the caller wants to leave a message for the business "
+        "(a callback request, a question for the team, or anything to pass along) and you "
+        "are not booking an appointment or transferring the call, capture it by ending your "
+        "reply with EXACTLY one line: MESSAGE: <a short summary of what they want, written in "
+        "the third person>. Put your brief spoken reply first (e.g. \"Sure, I'll pass that "
+        "along.\") and the MESSAGE: line last. Only use MESSAGE: when they actually want "
+        "something relayed to the team—never for small talk or questions you already answered."
+    )
     base_prompt = f"""{header}
 
 {focus_block}
 
 You can help with:
-{help_section}{staff_block}{memory_block}{slots_block}"""
+{help_section}{staff_block}{memory_block}{slots_block}{message_block}"""
 
     if detected_language != "English":
         return (

@@ -2,6 +2,7 @@
 
 import { motion } from 'framer-motion'
 import {
+  AlertTriangle,
   Calendar,
   Check,
   Clock,
@@ -119,6 +120,12 @@ export function AppointmentCard({
               </span>
             )}
           </div>
+          {apt.confirmation_sms_failed && (
+            <div className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-medium text-amber-200">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>Confirmation text didn&rsquo;t send — call the customer to confirm.</span>
+            </div>
+          )}
         </div>
 
         <div className="flex shrink-0 flex-col items-stretch gap-2 sm:items-end">

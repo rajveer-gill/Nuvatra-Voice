@@ -453,6 +453,12 @@ async def handle_incoming_sms(request: Request):
                 )
             elif kw == "start":
                 database.db_sms_opt_out_clear(from_number, cid)
+                database.db_sms_consent_record(
+                    from_number,
+                    cid,
+                    "sms_start",
+                    detail={"message_sid": msg_sid or None},
+                )
                 sms_service.send_sms(
                     from_number,
                     "You're subscribed again to texts from this number. Msg and data rates may apply. Reply STOP to opt out.",
@@ -488,6 +494,13 @@ async def handle_incoming_sms(request: Request):
             return Response(
                 content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 media_type="application/xml",
+            )
+        if runtime.USE_DB and from_number and tenant.get("client_id"):
+            database.db_sms_consent_record(
+                from_number,
+                tenant["client_id"],
+                "inbound_sms",
+                detail={"message_sid": msg_sid or None},
             )
         staff_handled = _maybe_handle_staff_sms_approval(
             from_number, body, tenant, to_number

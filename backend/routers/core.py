@@ -9,8 +9,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 import booking_service
 import config_service
@@ -18,6 +18,7 @@ import conversation_service
 import database
 import deps
 import runtime
+import sms_service
 from observability import email_hint_for_log, system_info
 from booking_fields import booking_context_from_business, is_valid_booking_date, looks_like_booking_time
 
@@ -41,6 +42,10 @@ class MessageRequest(BaseModel):
     caller_phone: str
     message: str
     urgency: str = "normal"
+
+
+class MessageReplyBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1000)
 
 
 def _send_appointment_email_notification(apt: dict, *, kind: str) -> bool:
@@ -193,3 +198,74 @@ def create_message(
 def get_messages(_: None = Depends(deps.require_active_subscription)):
     lst = database.db_messages_get_all() if runtime.USE_DB else runtime.messages
     return {"messages": lst}
+
+
+def _find_inmem_message(message_id: int) -> Optional[dict]:
+    return next((m for m in runtime.messages if m.get("id") == message_id), None)
+
+
+@router.post("/api/messages/{message_id}/read")
+def mark_message_read(
+    message_id: int,
+    request: Request,
+    read: bool = True,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Mark a caller message read (or unread with ?read=false)."""
+    cid = deps._bind_tenant_db_context(tenant)
+    status = "read" if read else "unread"
+    if runtime.USE_DB:
+        updated = database.db_messages_set_status(message_id, status, client_id=cid)
+    else:
+        updated = _find_inmem_message(message_id)
+        if updated:
+            updated["status"] = status
+    if not updated:
+        raise HTTPException(status_code=404, detail="Message not found")
+    deps.audit_log(
+        "user",
+        "message_marked_read" if read else "message_marked_unread",
+        resource_type="message",
+        resource_id=str(message_id),
+        request=request,
+    )
+    return {"success": True, "message": updated}
+
+
+@router.post("/api/messages/{message_id}/reply")
+def reply_to_message(
+    message_id: int,
+    body: MessageReplyBody,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Text the caller back from the business number, and mark the message read."""
+    cid = deps._bind_tenant_db_context(tenant)
+    msg = (
+        database.db_messages_get_by_id(message_id, client_id=cid)
+        if runtime.USE_DB
+        else _find_inmem_message(message_id)
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    to_phone = (msg.get("caller_phone") or "").strip()
+    if not to_phone:
+        raise HTTPException(status_code=400, detail="This message has no caller phone to reply to")
+    sent = sms_service.send_sms(
+        to_phone, body.text.strip(), from_override=booking_service._tenant_sms_from_number()
+    )
+    # Replying resolves the message regardless of delivery; the caller is contacted.
+    if runtime.USE_DB:
+        updated = database.db_messages_set_status(message_id, "read", client_id=cid) or msg
+    else:
+        msg["status"] = "read"
+        updated = msg
+    deps.audit_log(
+        "user",
+        "message_replied",
+        resource_type="message",
+        resource_id=str(message_id),
+        details={"reply_sms_sent": bool(sent)},
+        request=request,
+    )
+    return {"success": True, "message": updated, "reply_sms_sent": sent}

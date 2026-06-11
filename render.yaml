@@ -25,6 +25,10 @@ services:
     plan: starter
     healthCheckPath: /api/health
     buildCommand: cd backend && pip install -r requirements.txt
+    # Apply pending DB migrations once per deploy, before the new version takes
+    # traffic (Render runs preDeployCommand on a single instance). Without this,
+    # new Alembic revisions never reach production. See backend/docs/MIGRATIONS.md.
+    preDeployCommand: cd backend && alembic upgrade head
     startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL

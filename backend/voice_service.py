@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
@@ -926,6 +927,19 @@ def parse_transfer_to(ai_text: str) -> Optional[str]:
     if t.upper().startswith(prefix):
         return t[len(prefix) :].strip()
     return None
+
+
+def parse_message_directive(ai_text: str) -> Optional[str]:
+    """If AI emitted a MESSAGE: <text> line (anywhere in the reply), return the message
+    body; else None. The directive carries a third-person summary of what the caller
+    wants relayed to the business."""
+    if not ai_text or "MESSAGE:" not in ai_text.upper():
+        return None
+    m = re.search(r"(?i)MESSAGE:\s*([^\n]+)", ai_text)
+    if not m:
+        return None
+    body = m.group(1).strip()
+    return body or None
 
 
 def get_twilio_language_code(language_name: str) -> str:

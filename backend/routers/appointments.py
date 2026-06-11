@@ -218,6 +218,29 @@ def update_appointment(
     raise HTTPException(status_code=404, detail="Appointment not found")
 
 
+def _flag_if_confirmation_unsent(
+    appointment_id: int, apt: dict, cid: str, sent: bool
+) -> dict:
+    """When a dashboard action could not deliver its confirmation text, persist a
+    flag on the appointment so the dashboard surfaces 'text didn't send — call the
+    customer' instead of silently reporting success. Guarded so an un-migrated DB
+    (no confirmation_sms_failed column) degrades to a response-only flag.
+    """
+    if sent:
+        return apt
+    try:
+        if runtime.USE_DB:
+            updated = database.db_appointments_update(
+                appointment_id, confirmation_sms_failed=True, client_id=cid
+            )
+            if updated:
+                return updated
+    except Exception:
+        pass
+    apt["confirmation_sms_failed"] = True
+    return apt
+
+
 @router.post("/api/appointments/{appointment_id}/accept")
 def accept_appointment(
     appointment_id: int,
@@ -261,8 +284,9 @@ def accept_appointment(
     date = apt.get("date", "")
     time_ampm = booking_service._hhmm_to_ampm(apt.get("time") or "")
     msg = f"Your appointment at {business_name} is confirmed for {date} at {time_ampm}. Reply if you need to change."
-    sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
-    return {"success": True, "appointment": apt}
+    sent = sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
+    apt = _flag_if_confirmation_unsent(appointment_id, apt, cid, sent)
+    return {"success": True, "appointment": apt, "confirmation_sms_sent": sent}
 
 
 # ===== AI-polished decline/cancel routes (cut 2; need runtime.client) =====
@@ -325,8 +349,9 @@ def reject_appointment(
     booking_service.release_slot(appointment_id)
     business_name = config_service.get_business_info().get("name", "us")
     msg = booking_service.polish_owner_decline_sms(reason_clean, business_name, apt)
-    sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
-    return {"success": True, "appointment": apt}
+    sent = sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
+    apt = _flag_if_confirmation_unsent(appointment_id, apt, cid, sent)
+    return {"success": True, "appointment": apt, "confirmation_sms_sent": sent}
 
 
 @router.post("/api/appointments/{appointment_id}/cancel")
@@ -375,7 +400,8 @@ def cancel_appointment(
     booking_service.release_slot(appointment_id)
     business_name = config_service.get_business_info().get("name", "us")
     msg = booking_service.polish_owner_customer_sms(reason_clean, business_name, apt, event="cancel")
-    sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
+    sent = sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
+    apt = _flag_if_confirmation_unsent(appointment_id, apt, cid, sent)
     system_info(
         "appointment_cancelled_by_store",
         appointment_id=appointment_id,
@@ -383,7 +409,7 @@ def cancel_appointment(
         date=apt.get("date"),
         time=apt.get("time"),
     )
-    return {"success": True, "appointment": apt}
+    return {"success": True, "appointment": apt, "confirmation_sms_sent": sent}
 
 
 @router.post("/api/appointments/preview-decline-sms")

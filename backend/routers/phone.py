@@ -538,6 +538,13 @@ async def handle_incoming_call(request: Request):
             "caller_memory": caller_memory,
             "twilio_public_base_url": base_url,
         }
+        if runtime.USE_DB and from_number and client_id and client_id != "default":
+            database.db_sms_consent_record(
+                from_number,
+                client_id,
+                "inbound_call",
+                detail={"call_sid": call_sid, "to_number": to_number},
+            )
         biz_info = config_service.get_business_info()
         if config_service.staff_roster_ready_for_booking(biz_info):
             svc_n = len(config_service._normalize_service_entries(biz_info.get("services") or []))

@@ -492,6 +492,51 @@ def _strip_booking_directive_for_voice(ai_text: str) -> str:
     return cleaned if cleaned else (ai_text or "").strip()
 
 
+def _strip_message_directive_for_voice(ai_text: str) -> str:
+    """Remove a MESSAGE:... directive line so it is never read aloud by TTS."""
+    if not ai_text or "MESSAGE:" not in ai_text.upper():
+        return (ai_text or "").strip()
+    cleaned = re.sub(r"(?is)\s*MESSAGE:\s*[^\n]+", "", ai_text).strip()
+    return cleaned if cleaned else (ai_text or "").strip()
+
+
+def _store_caller_message(call_data: dict, body: str) -> bool:
+    """Persist a caller's message (from a MESSAGE: directive) so it appears in the
+    dashboard. Caller name comes from caller-memory, phone from the live call. Graceful:
+    never raises into the voice turn."""
+    body = (body or "").strip()
+    if not body:
+        return False
+    client_id = str(call_data.get("client_id") or "").strip() or None
+    caller_mem = call_data.get("caller_memory") or {}
+    name = (caller_mem.get("name") or "").strip()
+    phone = (call_data.get("from_number") or "").strip()
+    low = body.lower()
+    urgency = (
+        "high"
+        if any(w in low for w in ("urgent", "emergency", "asap", "right away"))
+        else "normal"
+    )
+    data = {
+        "caller_name": name,
+        "caller_phone": phone,
+        "message": body[:2000],
+        "urgency": urgency,
+        "status": "unread",
+    }
+    try:
+        if runtime.USE_DB:
+            database.db_messages_insert(data, client_id=client_id)
+        else:
+            data["id"] = len(runtime.messages) + 1
+            data["created_at"] = datetime.now().isoformat()
+            runtime.messages.append(data)
+        return True
+    except Exception as e:
+        logger.warning("store_caller_message failed: %s", e, exc_info=True)
+        return False
+
+
 def resolve_staff_id_from_booking_fragment(fragment: Optional[str]) -> Optional[str]:
     frag = (fragment or "").strip()
     if not frag:
@@ -959,6 +1004,13 @@ async def generate_response_async(
                             from_set=bool(from_number_sms),
                         )
                         if to_number_sms:
+                            if runtime.USE_DB and cid and cid != "default":
+                                database.db_sms_consent_record(
+                                    to_number_sms,
+                                    cid,
+                                    "voice_booking",
+                                    detail={"appointment_id": apt.get("id")},
+                                )
                             ok = sms_service.send_sms(
                                 to_number_sms,
                                 thanks_msg,
@@ -1111,6 +1163,21 @@ async def generate_response_async(
         ai_text = _strip_booking_directive_for_voice(ai_text or "")
         if not ai_text:
             ai_text = "Thanks—we've noted that. Let us know if you need anything else."
+
+        # Caller wants to leave a message — capture it, then strip the directive from speech.
+        message_body = voice_service.parse_message_directive(ai_text)
+        if message_body:
+            stored = _store_caller_message(call_data, message_body)
+            ai_text = _strip_message_directive_for_voice(ai_text)
+            system_info(
+                "voice_message_captured",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                stored=stored,
+                msg_len=len(message_body),
+            )
+            if not ai_text:
+                ai_text = "Got it—I've passed your message along to the team. Anything else I can help with?"
 
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}

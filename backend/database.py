@@ -1649,7 +1649,7 @@ def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
     cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
-        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed
            FROM appointments WHERE client_id = %s ORDER BY date, time""",
         (cid,),
     )
@@ -1669,6 +1669,7 @@ def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
             "created_at": r[9].isoformat() if r[9] else "",
             "staff_id": r[10] if len(r) > 10 else None,
             "owner_decline_reason": r[11] if len(r) > 11 else None,
+            "confirmation_sms_failed": bool(r[12]) if len(r) > 12 else False,
         }
         for r in rows
     ]
@@ -1784,7 +1785,7 @@ def db_appointments_update(
     conn = _get_conn()
     if not conn:
         return None
-    allowed = ("status", "date", "time", "reason", "name", "email", "phone", "staff_id", "owner_decline_reason")
+    allowed = ("status", "date", "time", "reason", "name", "email", "phone", "staff_id", "owner_decline_reason", "confirmation_sms_failed")
     updates = []
     vals = []
     for k, v in kwargs.items():
@@ -1799,7 +1800,7 @@ def db_appointments_update(
     cur = conn.cursor()
     cur.execute(
         f"UPDATE appointments SET {', '.join(updates)} WHERE id = %s AND client_id = %s "
-        "RETURNING id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason",
+        "RETURNING id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed",
         vals,
     )
     row = cur.fetchone()
@@ -1820,6 +1821,7 @@ def db_appointments_update(
         "created_at": row[9].isoformat() if row[9] else "",
         "staff_id": row[10] if len(row) > 10 else None,
         "owner_decline_reason": row[11] if len(row) > 11 else None,
+        "confirmation_sms_failed": bool(row[12]) if len(row) > 12 else False,
     }
 
 def db_appointments_get_by_id(
@@ -1833,7 +1835,7 @@ def db_appointments_get_by_id(
     cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
-        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed
            FROM appointments WHERE id = %s AND client_id = %s""",
         (appointment_id, cid),
     )
@@ -1854,6 +1856,7 @@ def db_appointments_get_by_id(
         "created_at": row[9].isoformat() if row[9] else "",
         "staff_id": row[10] if len(row) > 10 else None,
         "owner_decline_reason": row[11] if len(row) > 11 else None,
+        "confirmation_sms_failed": bool(row[12]) if len(row) > 12 else False,
     }
 
 def db_appointments_max_id() -> int:
@@ -1883,7 +1886,7 @@ def db_appointments_in_date_range(
     if staff_id:
         cur.execute(
             """
-            SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+            SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed
             FROM appointments
             WHERE client_id = %s AND date >= %s AND date <= %s AND staff_id = %s
               AND status NOT IN ('cancelled', 'rejected')
@@ -1894,7 +1897,7 @@ def db_appointments_in_date_range(
     else:
         cur.execute(
             """
-            SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason
+            SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed
             FROM appointments
             WHERE client_id = %s AND date >= %s AND date <= %s
               AND status NOT IN ('cancelled', 'rejected')
@@ -1918,6 +1921,7 @@ def db_appointments_in_date_range(
             "created_at": r[9].isoformat() if r[9] else "",
             "staff_id": r[10] if len(r) > 10 else None,
             "owner_decline_reason": r[11] if len(r) > 11 else None,
+            "confirmation_sms_failed": bool(r[12]) if len(r) > 12 else False,
         }
         for r in rows
     ]
@@ -2287,6 +2291,50 @@ def db_sms_opt_out_clear(phone: str, client_id: str) -> None:
         print(f"[DB] sms_opt_out clear failed: {e}")
 
 
+def db_sms_consent_record(
+    phone: str,
+    client_id: str,
+    source: str,
+    *,
+    consent_type: str = "service",
+    detail: Optional[dict] = None,
+    ip: Optional[str] = None,
+) -> None:
+    """Append a consent event to the opt-IN ledger.
+
+    Append-only: one row per consent moment (inbound call, inbound SMS, START
+    opt-in, voice booking). This is the provable trail that complements
+    sms_opt_out. Graceful: never raises into a call/SMS flow — a missing table
+    (un-migrated DB) or transient error just logs and returns.
+    """
+    conn = _get_conn()
+    if not conn or not client_id:
+        return
+    norm = _normalize_phone(phone or "")
+    if not norm:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO sms_consent (phone, client_id, consent_type, source, detail, ip)
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+            """,
+            (
+                norm,
+                client_id,
+                consent_type,
+                source,
+                json.dumps(detail) if detail is not None else None,
+                ip,
+            ),
+        )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"[DB] sms_consent record failed: {e}")
+
+
 # --- Messages ---
 def db_messages_get_all() -> List[dict]:
     conn = _get_conn()
@@ -2304,20 +2352,78 @@ def db_messages_get_all() -> List[dict]:
         for r in rows
     ]
 
-def db_messages_insert(data: dict) -> dict:
+def db_messages_insert(data: dict, *, client_id: Optional[str] = None) -> dict:
     conn = _get_conn()
     if not conn:
         raise RuntimeError("Database not available")
+    cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO messages (client_id, caller_name, caller_phone, message, urgency, status)
         VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING id, created_at
-    """, (_client_id(), data.get("caller_name", ""), data.get("caller_phone", ""), data.get("message", ""), data.get("urgency", "normal"), data.get("status", "unread")))
+    """, (cid, data.get("caller_name", ""), data.get("caller_phone", ""), data.get("message", ""), data.get("urgency", "normal"), data.get("status", "unread")))
     row = cur.fetchone()
     conn.commit()
     cur.close()
     return {"id": row[0], "created_at": row[1].isoformat() if row[1] else "", **data}
+
+
+def db_messages_get_by_id(message_id: int, *, client_id: Optional[str] = None) -> Optional[dict]:
+    conn = _get_conn()
+    if not conn:
+        return None
+    cid = (client_id or "").strip() or _client_id()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, caller_name, caller_phone, message, urgency, status, created_at "
+        "FROM messages WHERE id = %s AND client_id = %s",
+        (message_id, cid),
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "caller_name": row[1],
+        "caller_phone": row[2],
+        "message": row[3],
+        "urgency": row[4],
+        "status": row[5],
+        "created_at": row[6].isoformat() if row[6] else "",
+    }
+
+
+def db_messages_set_status(
+    message_id: int, status: str, *, client_id: Optional[str] = None
+) -> Optional[dict]:
+    """Update a message's status (e.g. 'read' / 'unread'), tenant-scoped. Returns the
+    updated row or None if not found."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    cid = (client_id or "").strip() or _client_id()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE messages SET status = %s WHERE id = %s AND client_id = %s "
+        "RETURNING id, caller_name, caller_phone, message, urgency, status, created_at",
+        (status, message_id, cid),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    cur.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "caller_name": row[1],
+        "caller_phone": row[2],
+        "message": row[3],
+        "urgency": row[4],
+        "status": row[5],
+        "created_at": row[6].isoformat() if row[6] else "",
+    }
 
 def db_messages_max_id() -> int:
     conn = _get_conn()
@@ -2435,6 +2541,32 @@ def db_leads_get_all(client_id: str, limit: int = 100) -> List[dict]:
         {"id": r[0], "name": r[1] or "", "phone": r[2], "reason": r[3] or "", "source": r[4], "created_at": r[5].isoformat() if r[5] else ""}
         for r in rows
     ]
+
+
+def db_leads_get_by_id(lead_id: int, client_id: str) -> Optional[dict]:
+    """Fetch a single lead, tenant-scoped. None if not found."""
+    if not client_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, name, phone, reason, source, created_at FROM leads WHERE id = %s AND client_id = %s",
+        (lead_id, client_id),
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "name": row[1] or "",
+        "phone": row[2],
+        "reason": row[3] or "",
+        "source": row[4],
+        "created_at": row[5].isoformat() if row[5] else "",
+    }
 
 # --- SMS Automations ---
 def db_sms_automations_get_all(client_id: str) -> List[dict]:
