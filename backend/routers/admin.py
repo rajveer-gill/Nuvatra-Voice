@@ -255,6 +255,42 @@ def admin_session(request: Request):
     return {"is_admin": user_id in admin_ids}
 
 
+# --- TEMPORARY: full data reset for pre-launch testing. Remove before launch. ---
+class AdminResetDataRequest(BaseModel):
+    confirm: str = Field(..., description="Must equal 'RESET' to proceed")
+
+
+@router.post("/api/admin/reset-all-data")
+def admin_reset_all_data(
+    req: AdminResetDataRequest,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """TEMPORARY (pre-launch testing): wipe all tenant/operational data so signup can be
+    retested from scratch. Triple-gated: admin auth + ALLOW_DATA_RESET=1 env flag +
+    typed 'RESET' confirmation. Remove this route before launch."""
+    if (os.getenv("ALLOW_DATA_RESET") or "").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=403,
+            detail="Data reset is disabled. Set ALLOW_DATA_RESET=1 on the server to enable it for testing.",
+        )
+    if req.confirm.strip() != "RESET":
+        raise HTTPException(status_code=400, detail="Type RESET to confirm.")
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    ok = database.db_reset_all_tenant_data()
+    deps.audit_log(
+        "admin",
+        "data_reset_all",
+        actor_id=admin_user_id,
+        details={"ok": ok},
+        request=request,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Reset failed; check server logs.")
+    return {"success": True, "message": "All tenant data wiped. You can sign up from scratch now."}
+
+
 @router.post("/api/admin/tenants")
 def admin_create_tenant(
     req: AdminCreateTenantRequest,

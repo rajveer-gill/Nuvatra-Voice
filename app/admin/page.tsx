@@ -232,6 +232,10 @@ export default function AdminPage() {
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [twilioDraft, setTwilioDraft] = useState<Record<string, string>>({})
   const [twilioSaving, setTwilioSaving] = useState<string | null>(null)
+  // TEMPORARY: pre-launch data reset. Remove before launch.
+  const [resetConfirm, setResetConfirm] = useState('')
+  const [resetting, setResetting] = useState(false)
+  const [resetMsg, setResetMsg] = useState<string | null>(null)
   const [inviteEmailByTenant, setInviteEmailByTenant] = useState<Record<string, string>>({})
   const [resendingInvite, setResendingInvite] = useState<string | null>(null)
   const [accessDebugOpen, setAccessDebugOpen] = useState<Record<string, boolean>>({})
@@ -613,6 +617,24 @@ export default function AdminPage() {
         </div>
       </AppChrome>
     )
+  }
+
+  // TEMPORARY: pre-launch data reset. Remove before launch.
+  const handleResetAllData = async () => {
+    if (resetConfirm !== 'RESET') return
+    setResetting(true)
+    setResetMsg(null)
+    try {
+      const res = await api.post('/api/admin/reset-all-data', { confirm: resetConfirm }, adminApi)
+      setResetMsg(res?.data?.message || 'All data wiped.')
+      setResetConfirm('')
+      setTenants([])
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setResetMsg(detail || 'Reset failed.')
+    } finally {
+      setResetting(false)
+    }
   }
 
   const tenantQ = tenantQuery.trim().toLowerCase()
@@ -1071,6 +1093,38 @@ export default function AdminPage() {
                 })}
               </motion.ul>
             )}
+          </section>
+
+          {/* TEMPORARY: pre-launch data reset. Remove before launch. */}
+          <section className="mt-8 rounded-2xl border border-red-500/40 bg-red-500/5 p-6">
+            <h2 className="font-display text-lg font-semibold text-red-200">Danger zone — testing only</h2>
+            <p className="mt-1 max-w-2xl text-sm text-red-200/80">
+              Wipes <strong>all</strong> tenants, appointments, messages, leads, and call data so you
+              can test signup from scratch. This cannot be undone, and it does not release Twilio
+              numbers (do that manually). Requires <code className="text-red-100">ALLOW_DATA_RESET=1</code> on the
+              server. Remove this section before launch.
+            </p>
+            <div className="mt-4 flex flex-wrap items-end gap-2">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-red-200/80">Type RESET to confirm</label>
+                <input
+                  type="text"
+                  value={resetConfirm}
+                  onChange={(e) => setResetConfirm(e.target.value)}
+                  placeholder="RESET"
+                  className={inputClass}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleResetAllData()}
+                disabled={resetting || resetConfirm !== 'RESET'}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white motion-safe-transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {resetting ? 'Wiping…' : 'Reset all data'}
+              </button>
+            </div>
+            {resetMsg && <p className="mt-2 text-sm text-red-100">{resetMsg}</p>}
           </section>
         </div>
       </main>
