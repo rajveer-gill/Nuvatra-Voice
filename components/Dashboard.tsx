@@ -225,9 +225,18 @@ export default function Dashboard() {
 
   if (noTenant) {
     return (
-      <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <p className="text-zinc-300 text-center max-w-md">
-          Your account is not yet linked to a business. If you were invited, please use the link from your invite email. Otherwise, contact support.
+      <div className="flex flex-col items-center justify-center h-64 space-y-4 text-center">
+        <p className="max-w-md text-zinc-300">
+          You don&rsquo;t have a business set up yet. Get your AI receptionist live in a couple of minutes.
+        </p>
+        <a
+          href="/dashboard/create-business"
+          className="rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 hover:brightness-110"
+        >
+          Set up your business
+        </a>
+        <p className="max-w-md text-xs text-zinc-500">
+          Were you invited by our team? Use the link from your invite email instead.
         </p>
       </div>
     )

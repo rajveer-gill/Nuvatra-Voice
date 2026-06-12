@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -373,6 +373,68 @@ def api_setup_status(
             len(body.get("missing") or []),
         )
     return body
+
+
+class CreateBusinessRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    plan: Literal["starter", "growth", "pro"] = "starter"
+    business_vertical: str = "salon_chair"
+
+
+def _unique_client_id(name: str) -> str:
+    """Slugify the business name into a stable, unique client_id (lowercase a-z0-9-)."""
+    base = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:40] or "business"
+    candidate, n = base, 2
+    while database.db_tenant_get_by_client_id(candidate) is not None:
+        candidate = f"{base}-{n}"
+        n += 1
+        if n > 200:
+            candidate = f"{base}-{uuid4().hex[:6]}"
+            break
+    return candidate
+
+
+@router.post("/api/onboarding/create-business")
+def api_create_business(
+    req: CreateBusinessRequest,
+    request: Request,
+    user_id: str = Depends(deps.require_user),
+):
+    """Self-serve signup: create a *pending* tenant (no number yet) owned by the
+    signed-in user. The number is provisioned when Stripe checkout completes. One
+    tenant per user — returns the existing one if they already have one."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    bv = (req.business_vertical or "salon_chair").strip()
+    if bv not in config_service.ALLOWED_BUSINESS_VERTICALS:
+        raise HTTPException(status_code=400, detail="Invalid business type")
+    # One tenant per user — don't create a duplicate.
+    existing_ids = database.db_tenant_membership_tenant_ids(user_id)
+    if existing_ids:
+        existing = database.db_tenant_get_by_id(existing_ids[0])
+        if existing:
+            return {"tenant": existing, "already_existed": True}
+    name = req.name.strip()
+    client_id = _unique_client_id(name)
+    tenant = database.db_tenant_create_pending(client_id, name, req.plan, bv)
+    if not tenant:
+        raise HTTPException(status_code=409, detail="Could not create business; please try again")
+    database.set_request_client_id(client_id)
+    cfg = config_service._default_client_config_data(client_id, tenant.get("plan") or req.plan)
+    config_service.save_raw_client_config(client_id, cfg)
+    database.db_tenant_member_set_single(user_id, tenant["id"])
+    deps._clerk_patch_user_tenant_metadata(user_id, tenant["id"])
+    deps.audit_log(
+        "user",
+        "self_serve_business_created",
+        actor_id=user_id,
+        resource_type="tenant",
+        resource_id=tenant["id"],
+        client_id=client_id,
+        details={"name": name, "plan": req.plan, "vertical": bv},
+        request=request,
+    )
+    return {"tenant": tenant, "already_existed": False}
 
 
 @router.post("/api/onboarding/complete")

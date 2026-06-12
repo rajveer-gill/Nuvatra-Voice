@@ -370,6 +370,19 @@ def require_admin(request: Request):
     return user_id
 
 
+def require_user(request: Request) -> str:
+    """Authenticate the Clerk user WITHOUT requiring a tenant — for self-serve signup,
+    before any tenant exists. Returns the Clerk user_id."""
+    token = get_bearer_token(request)
+    if not token:
+        audit_log("user", "auth_failure", details={"reason": "no_token"}, request=request)
+        raise HTTPException(status_code=401, detail="Authorization required")
+    user_id, _ = verify_clerk_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user_id
+
+
 def require_active_subscription(tenant: Optional[dict] = Depends(require_tenant)):
     """Dependency: after require_tenant, require that tenant can use the app (trial or paid or exempt)."""
     state = get_tenant_subscription_state(tenant)

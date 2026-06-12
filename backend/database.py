@@ -340,6 +340,12 @@ def init_db() -> bool:
                 cur.execute(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {typ}")
             except Exception:
                 pass
+        # Self-serve signup creates a pending tenant before its number is provisioned
+        # (the number arrives on Stripe checkout completion), so the column is nullable.
+        try:
+            cur.execute("ALTER TABLE tenants ALTER COLUMN twilio_phone_number DROP NOT NULL")
+        except Exception:
+            pass
         try:
             cur.execute(
                 "UPDATE tenants SET business_vertical = 'salon_chair' WHERE business_vertical IS NULL OR trim(business_vertical) = ''"
@@ -687,6 +693,39 @@ def db_tenant_create(
     except Exception as e:
         print(f"[DB] Failed to create tenant: {e}")
         return None
+
+
+def db_tenant_create_pending(
+    client_id: str,
+    name: str,
+    plan: str = "starter",
+    business_vertical: str = "salon_chair",
+) -> Optional[dict]:
+    """Create a self-serve tenant with NO number yet and status 'incomplete' — the
+    number is provisioned when Stripe checkout completes, and the status flips to
+    active/trialing then. Returns the tenant dict, or None on client_id conflict."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO tenants (client_id, name, twilio_phone_number, plan, subscription_status, business_vertical)
+            VALUES (%s, %s, NULL, %s, 'incomplete', %s)
+            ON CONFLICT (client_id) DO NOTHING
+            RETURNING id, client_id, name, twilio_phone_number, plan, created_at,
+                trial_ends_at, subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, business_vertical
+        """, (client_id, name, plan, business_vertical))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        if not row:
+            return None
+        return _row_to_tenant(row)
+    except Exception as e:
+        print(f"[DB] Failed to create pending tenant: {e}")
+        return None
+
 
 def _row_to_tenant(row) -> dict:
     """Map tenant SELECT row to dict (includes business_vertical when present)."""

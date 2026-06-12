@@ -74,6 +74,8 @@ def _stripe_price_id(plan: str) -> Optional[str]:
 
 class CreateCheckoutSessionRequest(BaseModel):
     plan: Literal["starter", "growth", "pro"]
+    # Self-serve signup: preferred area code for the number provisioned after checkout.
+    area_code: Optional[str] = None
 
 
 @router.post("/api/create-checkout-session")
@@ -119,6 +121,12 @@ def create_checkout_session(
             raise HTTPException(
                 status_code=500, detail="Could not create billing customer"
             )
+    # A tenant with no number yet is a fresh self-serve signup — give it the card-on-file
+    # free trial; existing tenants upgrading from trial get charged normally.
+    needs_trial = not (tenant.get("twilio_phone_number") or "").strip()
+    subscription_data: dict = {"metadata": {"tenant_id": str(tenant_id), "plan": req.plan}}
+    if needs_trial:
+        subscription_data["trial_period_days"] = 7
     try:
         session = stripe.checkout.Session.create(
             customer=stripe_customer_id,
@@ -126,10 +134,12 @@ def create_checkout_session(
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=success_url,
             cancel_url=cancel_url,
-            metadata={"tenant_id": str(tenant_id), "plan": req.plan},
-            subscription_data={
-                "metadata": {"tenant_id": str(tenant_id), "plan": req.plan}
+            metadata={
+                "tenant_id": str(tenant_id),
+                "plan": req.plan,
+                "area_code": (req.area_code or "").strip(),
             },
+            subscription_data=subscription_data,
         )
         return {"url": session.url}
     except Exception as e:
@@ -185,6 +195,45 @@ def create_portal_session(tenant: Optional[dict] = Depends(deps.require_tenant))
         raise deps._server_error("Stripe portal session failed", e)
 
 
+def _provision_number_for_tenant(tenant: dict, area_code: Optional[str], request: Request) -> None:
+    """Self-serve: buy and wire a Twilio number (+ A2P enroll) for a tenant that has
+    none yet, after checkout succeeds. Non-fatal — logged + audited on failure so the
+    operator can provision manually from the admin console."""
+    import twilio_provision
+
+    acct = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+    tok = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    base = (os.getenv("PUBLIC_BASE_URL") or "").strip()
+    if not (acct and tok and base):
+        logger.error("self_serve_provision_skipped: missing Twilio/base config tenant=%s", tenant.get("id"))
+        return
+    res = twilio_provision.purchase_number(
+        account_sid=acct, auth_token=tok, base_url=base, area_code=area_code
+    )
+    if res.get("ok") and res.get("phone_e164"):
+        database.db_tenant_set_twilio_phone(tenant["id"], res["phone_e164"])
+        deps.audit_log(
+            "system",
+            "self_serve_number_provisioned",
+            resource_type="tenant",
+            resource_id=tenant["id"],
+            client_id=tenant.get("client_id"),
+            details={"phone_e164": res["phone_e164"], "a2p_enrolled": res.get("messaging_service_enrolled")},
+            request=request,
+        )
+    else:
+        logger.error("self_serve_provision_failed tenant=%s errors=%s", tenant.get("id"), res.get("errors"))
+        deps.audit_log(
+            "system",
+            "self_serve_number_provision_failed",
+            resource_type="tenant",
+            resource_id=tenant["id"],
+            client_id=tenant.get("client_id"),
+            details={"errors": res.get("errors")},
+            request=request,
+        )
+
+
 @router.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhooks: subscription and payment events. Raw body required for signature verification."""
@@ -228,6 +277,14 @@ async def stripe_webhook(request: Request):
                 details={"plan": plan, "subscription_id": sub_id},
                 request=request,
             )
+            # Self-serve: provision the number now that payment is set up.
+            if tenant and not (tenant.get("twilio_phone_number") or "").strip():
+                try:
+                    _provision_number_for_tenant(
+                        tenant, area_code=(meta.get("area_code") or "").strip() or None, request=request
+                    )
+                except Exception as e:
+                    logger.error("self_serve_provision_exception tenant=%s err=%s", tenant_id, e)
     elif event.type == "customer.subscription.updated":
         sub = event.data.object
         sub_id = sub.get("id")
