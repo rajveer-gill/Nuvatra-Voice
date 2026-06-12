@@ -70,3 +70,59 @@ def test_purchase_handles_twilio_exception(monkeypatch):
     out = twilio_provision.purchase_number(account_sid="AC", auth_token="tok", base_url=BASE)
     assert out["ok"] is False
     assert "twilio_purchase_failed" in out["errors"]
+
+
+# --- A2P Messaging Service enrollment -----------------------------------------
+
+def test_purchase_enrolls_number_in_messaging_service(monkeypatch):
+    monkeypatch.setenv("TWILIO_A2P_MESSAGING_SERVICE_SID", "MG123")
+    client = _fake_client([_FakeNumber("+15551230001", None)], _FakeNumber("+15551230001", "PNxxxx"))
+    monkeypatch.setattr(twilio_provision, "TwilioClient", lambda sid, tok: client)
+
+    out = twilio_provision.purchase_number(account_sid="AC", auth_token="tok", base_url=BASE)
+    assert out["ok"] is True
+    assert out["messaging_service_enrolled"] is True
+    assert out["errors"] == []
+    client.messaging.v1.services.assert_called_with("MG123")
+    enroll_kwargs = client.messaging.v1.services.return_value.phone_numbers.create.call_args.kwargs
+    assert enroll_kwargs["phone_number_sid"] == "PNxxxx"
+
+
+def test_purchase_enroll_idempotent_when_already_present(monkeypatch):
+    monkeypatch.setenv("TWILIO_A2P_MESSAGING_SERVICE_SID", "MG123")
+    client = _fake_client([_FakeNumber("+15551230002", None)], _FakeNumber("+15551230002", "PNyyyy"))
+    svc = client.messaging.v1.services.return_value
+    svc.phone_numbers.create.side_effect = RuntimeError("already associated")
+    existing = MagicMock()
+    existing.sid = "PNyyyy"
+    svc.phone_numbers.list.return_value = [existing]
+    monkeypatch.setattr(twilio_provision, "TwilioClient", lambda sid, tok: client)
+
+    out = twilio_provision.purchase_number(account_sid="AC", auth_token="tok", base_url=BASE)
+    assert out["messaging_service_enrolled"] is True
+    assert out["errors"] == []
+
+
+def test_purchase_enroll_failure_is_non_fatal(monkeypatch):
+    monkeypatch.setenv("TWILIO_A2P_MESSAGING_SERVICE_SID", "MG123")
+    client = _fake_client([_FakeNumber("+15551230003", None)], _FakeNumber("+15551230003", "PNzzzz"))
+    svc = client.messaging.v1.services.return_value
+    svc.phone_numbers.create.side_effect = RuntimeError("boom")
+    svc.phone_numbers.list.return_value = []  # confirms it's not in the service
+    monkeypatch.setattr(twilio_provision, "TwilioClient", lambda sid, tok: client)
+
+    out = twilio_provision.purchase_number(account_sid="AC", auth_token="tok", base_url=BASE)
+    assert out["ok"] is True  # the number was still bought + configured
+    assert out["messaging_service_enrolled"] is False
+    assert "messaging_service_enroll_failed" in out["errors"]
+
+
+def test_purchase_skips_enrollment_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("TWILIO_A2P_MESSAGING_SERVICE_SID", raising=False)
+    client = _fake_client([_FakeNumber("+15551230004", None)], _FakeNumber("+15551230004", "PNwww"))
+    monkeypatch.setattr(twilio_provision, "TwilioClient", lambda sid, tok: client)
+
+    out = twilio_provision.purchase_number(account_sid="AC", auth_token="tok", base_url=BASE)
+    assert out["ok"] is True
+    assert out["messaging_service_enrolled"] is False
+    client.messaging.v1.services.return_value.phone_numbers.create.assert_not_called()

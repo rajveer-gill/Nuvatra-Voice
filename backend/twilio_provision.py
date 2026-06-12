@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import Any, Optional
@@ -14,6 +15,54 @@ try:
     from twilio.rest import Client as TwilioClient
 except ImportError:
     TwilioClient = None  # type: ignore[misc, assignment]
+
+
+def a2p_messaging_service_sid() -> str:
+    """The Messaging Service tied to our approved A2P campaign. Numbers added to it
+    inherit the campaign (so SMS is A2P-registered) and the service's inbound webhook.
+    Empty when unset — enrollment then no-ops, leaving existing flows unchanged."""
+    return (os.getenv("TWILIO_A2P_MESSAGING_SERVICE_SID") or "").strip()
+
+
+def _number_in_messaging_service(client: Any, messaging_service_sid: str, number_sid: str) -> bool:
+    """True if the IncomingPhoneNumber SID is already in the service's sender pool."""
+    try:
+        for pn in client.messaging.v1.services(messaging_service_sid).phone_numbers.list(limit=400):
+            if getattr(pn, "sid", None) == number_sid:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def enroll_in_messaging_service(client: Any, number_sid: Optional[str]) -> dict[str, Any]:
+    """Add a purchased/configured number to the A2P Messaging Service sender pool so it
+    inherits the approved campaign. No-op (skipped=True) when the service SID is unset.
+    Never fatal — a number can still answer calls and send unregistered if this fails."""
+    out: dict[str, Any] = {"enrolled": False, "skipped": False, "errors": []}
+    msid = a2p_messaging_service_sid()
+    if not msid:
+        out["skipped"] = True
+        return out
+    if not number_sid:
+        out["errors"].append("messaging_service_enroll_missing_number_sid")
+        return out
+    try:
+        client.messaging.v1.services(msid).phone_numbers.create(phone_number_sid=number_sid)
+        out["enrolled"] = True
+    except Exception as e:
+        # Idempotent: if it's already in our service, treat as enrolled.
+        if _number_in_messaging_service(client, msid, number_sid):
+            out["enrolled"] = True
+        else:
+            out["errors"].append("messaging_service_enroll_failed")
+            _log.warning(
+                "twilio_messaging_service_enroll_failed number_sid=%s code=%s err=%s",
+                number_sid,
+                getattr(e, "code", None),
+                type(e).__name__,
+            )
+    return out
 
 VERIFY_CACHE_TTL_SEC = 300
 _verify_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -88,6 +137,7 @@ def public_webhook_result(result: dict[str, Any]) -> dict[str, Any]:
         "errors": list(result.get("errors") or []),
         "phone_e164": result.get("phone_e164"),
         "number_sid": result.get("number_sid"),
+        "messaging_service_enrolled": bool(result.get("messaging_service_enrolled")),
     }
 
 
@@ -109,6 +159,7 @@ def configure_webhooks(
         "errors": [],
         "phone_e164": normalize_e164(phone),
         "number_sid": None,
+        "messaging_service_enrolled": False,
     }
     base, base_errors = validate_public_base_url(base_url)
     if base_errors:
@@ -140,6 +191,9 @@ def configure_webhooks(
         result["voice_ok"] = True
         result["sms_ok"] = True
         result["status_ok"] = True
+        enroll = enroll_in_messaging_service(client, result["number_sid"])
+        result["messaging_service_enrolled"] = enroll["enrolled"]
+        result["errors"].extend(enroll["errors"])
         _verify_cache.pop(_verify_cache_key(account_sid, phone, base), None)
     except Exception as e:
         result["errors"].append("twilio_configure_failed")
@@ -170,6 +224,7 @@ def purchase_number(
         "phone_e164": None,
         "number_sid": None,
         "errors": [],
+        "messaging_service_enrolled": False,
     }
     base, base_errors = validate_public_base_url(base_url)
     if base_errors:
@@ -210,6 +265,9 @@ def purchase_number(
             getattr(purchased, "phone_number", chosen) or chosen
         )
         result["number_sid"] = getattr(purchased, "sid", None)
+        enroll = enroll_in_messaging_service(client, result["number_sid"])
+        result["messaging_service_enrolled"] = enroll["enrolled"]
+        result["errors"].extend(enroll["errors"])
     except Exception as e:
         result["errors"].append("twilio_purchase_failed")
         _log.warning(
