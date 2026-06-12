@@ -212,14 +212,11 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (access !== 'denied' || deniedKind !== 'no_membership') return
-    let cancelled = false
-    fetchAccessDebug().catch(() => {
-      if (!cancelled) setAccessDebug(null)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [access, deniedKind, fetchAccessDebug])
+    // Self-serve is the primary path: a signed-in non-admin without a business goes to
+    // setup, not the invite-only "No Access" wall. (Admins were redirected to /admin
+    // earlier; the create-business page handles users who do have a business.)
+    router.replace('/dashboard/create-business')
+  }, [access, deniedKind, router])
 
   useEffect(() => {
     if (access !== 'granted' && access !== 'subscription_required') return
@@ -307,6 +304,19 @@ export default function DashboardPage() {
   }
 
   if (access === 'denied') {
+    if (deniedKind === 'no_membership') {
+      // Redirecting to /dashboard/create-business (see effect above).
+      return (
+        <AppChrome>
+          <main className="flex min-h-screen items-center justify-center">
+            <div className="text-center">
+              <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-cyan-400/30 border-t-cyan-400" />
+              <p className="text-sm text-zinc-400">Taking you to setup…</p>
+            </div>
+          </main>
+        </AppChrome>
+      )
+    }
     return (
       <AppChrome>
         <main className="flex min-h-screen items-center justify-center px-4 py-12">
@@ -331,54 +341,6 @@ export default function DashboardPage() {
                   : deniedDetail ||
                     'Your sign-in is not linked to a business yet (this is not a trial or billing issue). Ask your administrator to resend the invite, then sign out and open the link from that email. If you already signed up, use the same email address that was invited.'}
               </p>
-              {deniedKind === 'no_membership' && accessDebug && (
-                <motion.div
-                  initial={reduceMotion ? false : { opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="mt-5 rounded-xl border border-white/10 bg-zinc-950/60 p-4 text-left text-xs text-zinc-400"
-                >
-                  <p className="font-medium text-zinc-300">Signed-in account</p>
-                  {accessDebug.user_id && <p className="mt-1 break-all font-mono text-zinc-500">{accessDebug.user_id}</p>}
-                  {accessDebug.clerk_emails && accessDebug.clerk_emails.length > 0 && (
-                    <p className="mt-3">
-                      Email on this account:{' '}
-                      <span className="text-zinc-200">{accessDebug.clerk_emails.join(', ')}</span>
-                    </p>
-                  )}
-                  <p className="mt-2">
-                    Tenant linked in database:{' '}
-                    <span className={accessDebug.has_tenant_membership ? 'text-emerald-400' : 'text-amber-300'}>
-                      {accessDebug.has_tenant_membership
-                        ? `${accessDebug.db_tenant_client_id || 'yes'}${accessDebug.db_tenant_name ? ` (${accessDebug.db_tenant_name})` : ''}`
-                        : 'none — admin must invite one of the emails above'}
-                    </span>
-                  </p>
-                  {accessDebug.db_memberships && accessDebug.db_memberships.length > 1 && (
-                    <p className="mt-2 text-amber-300">
-                      Multiple memberships:{' '}
-                      {accessDebug.db_memberships.map((m) => m.client_id).join(', ')}
-                    </p>
-                  )}
-                  {accessDebug.diagnosis?.issues && accessDebug.diagnosis.issues.length > 0 && (
-                    <p className="mt-2 text-orange-200">
-                      Issues: {accessDebug.diagnosis.issues.join(', ')}. Action:{' '}
-                      {accessDebug.diagnosis.recommended_action}
-                    </p>
-                  )}
-                  {(accessDebug.jwt_metadata_tenant_id || accessDebug.clerk_api_tenant_id) && (
-                    <p className="mt-2 font-mono text-[11px] text-zinc-500">
-                      JWT tenant: {accessDebug.jwt_metadata_tenant_id || '—'} · Clerk API:{' '}
-                      {accessDebug.clerk_api_tenant_id || '—'} · DB: {accessDebug.db_tenant_id || '—'}
-                    </p>
-                  )}
-                  {accessDebug.is_admin && (
-                    <p className="mt-2 text-cyan-300">
-                      This account is a platform admin. Use <Link href="/admin" className="underline">/admin</Link> instead
-                      of the client dashboard.
-                    </p>
-                  )}
-                </motion.div>
-              )}
               <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
                 {deniedKind === 'verification_failed' && (
                   <button
