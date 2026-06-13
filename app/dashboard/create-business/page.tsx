@@ -2,13 +2,55 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { Check } from 'lucide-react'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { useApiClient } from '@/lib/api'
 
+// Prices are display-only — the real charge comes from the Stripe price IDs on the
+// backend. Keep these in sync with your Stripe products. Features mirror backend/plans.py.
 const PLANS = [
-  { id: 'starter', name: 'Starter', tagline: 'Get your AI line answering calls' },
-  { id: 'growth', name: 'Growth', tagline: 'Reminders, leads & more staff' },
-  { id: 'pro', name: 'Pro', tagline: 'Call recording & unlimited team' },
+  {
+    id: 'starter',
+    name: 'Starter',
+    price: '$150',
+    tagline: 'Get your AI receptionist answering & booking.',
+    features: [
+      '500 call minutes / month',
+      'Answers calls & books appointments, 24/7',
+      'Texts appointment confirmations',
+      '100 two-way text conversations / month',
+      '30-day call history',
+    ],
+  },
+  {
+    id: 'growth',
+    name: 'Growth',
+    price: '$250',
+    popular: true,
+    tagline: 'Fill more of the calendar and chase every lead.',
+    features: [
+      'Everything in Starter, plus:',
+      '1,500 call minutes / month',
+      'Appointment reminders (cut no-shows)',
+      'Lead capture & follow-up texts',
+      'SMS automations + CSV export',
+      '90-day call history',
+    ],
+  },
+  {
+    id: 'pro',
+    name: 'Pro',
+    price: '$399',
+    tagline: 'Full power for high-volume, multi-chair shops.',
+    features: [
+      'Everything in Growth, plus:',
+      '3,500 call minutes / month',
+      'Call recording & AI summaries',
+      'Unlimited SMS automations & transfers',
+      '1,000 text conversations / month',
+      'Unlimited call history',
+    ],
+  },
 ] as const
 
 type PlanId = (typeof PLANS)[number]['id']
@@ -103,30 +145,54 @@ export default function CreateBusinessPage() {
             </div>
 
             <div>
-              <label className="mb-1 block text-sm font-medium text-zinc-300">Plan</label>
-              <div className="grid gap-2">
-                {PLANS.map((p) => (
-                  <button
-                    type="button"
-                    key={p.id}
-                    onClick={() => setPlan(p.id)}
-                    className={`flex items-center justify-between rounded-xl border px-4 py-3 text-left transition ${
-                      plan === p.id
-                        ? 'border-cyan-500 bg-cyan-500/10'
-                        : 'border-white/10 bg-zinc-950/40 hover:border-white/20'
-                    }`}
-                  >
-                    <span>
-                      <span className="block text-sm font-semibold text-white">{p.name}</span>
-                      <span className="block text-xs text-zinc-500">{p.tagline}</span>
-                    </span>
-                    <span
-                      className={`h-4 w-4 shrink-0 rounded-full border ${
-                        plan === p.id ? 'border-cyan-400 bg-cyan-400' : 'border-zinc-600'
+              <label className="mb-2 block text-sm font-medium text-zinc-300">Choose a plan</label>
+              <div className="grid gap-3">
+                {PLANS.map((p) => {
+                  const selected = plan === p.id
+                  return (
+                    <button
+                      type="button"
+                      key={p.id}
+                      onClick={() => setPlan(p.id)}
+                      className={`relative rounded-2xl border p-4 text-left transition ${
+                        selected
+                          ? 'border-cyan-500 bg-cyan-500/10 ring-1 ring-cyan-500/40'
+                          : 'border-white/10 bg-zinc-950/40 hover:border-white/25'
                       }`}
-                    />
-                  </button>
-                ))}
+                    >
+                      {'popular' in p && (
+                        <span className="absolute -top-2 right-4 rounded-full bg-gradient-to-r from-cyan-500 to-indigo-600 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                          Most popular
+                        </span>
+                      )}
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`h-4 w-4 shrink-0 rounded-full border ${
+                              selected ? 'border-cyan-400 bg-cyan-400' : 'border-zinc-600'
+                            }`}
+                          />
+                          <div>
+                            <span className="text-base font-semibold text-white">{p.name}</span>
+                            <p className="text-xs text-zinc-400">{p.tagline}</p>
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <span className="text-lg font-bold text-white">{p.price}</span>
+                          <span className="block text-[11px] text-zinc-500">/month</span>
+                        </div>
+                      </div>
+                      <ul className="mt-3 space-y-1.5 pl-6">
+                        {p.features.map((f) => (
+                          <li key={f} className="flex items-start gap-2 text-xs text-zinc-300">
+                            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan-400" />
+                            <span>{f}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </button>
+                  )
+                })}
               </div>
             </div>
 
