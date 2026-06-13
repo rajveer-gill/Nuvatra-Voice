@@ -24,6 +24,11 @@ _AFFIRM_RE = re.compile(
 class BookingFieldContext:
     staff_names: frozenset[str]
     service_names: frozenset[str]
+    # Business-local "now" at booking time, used to reject past dates/times. Both are
+    # hashable (so the frozen dataclass stays hashable) and optional so existing callers
+    # and tests that don't pass them keep their prior behavior (no past-date check).
+    today: Optional[date] = None
+    now_minutes: Optional[int] = None
 
 
 def booking_context_from_business(biz: dict[str, Any]) -> BookingFieldContext:
@@ -37,7 +42,22 @@ def booking_context_from_business(biz: dict[str, Any]) -> BookingFieldContext:
         for s in (biz.get("services") or [])
         if (s.get("name") or "").strip()
     }
-    return BookingFieldContext(staff_names=frozenset(staff), service_names=frozenset(services))
+    today: Optional[date] = None
+    now_minutes: Optional[int] = None
+    try:
+        import business_hours
+
+        local_now = business_hours.business_local_now(biz)
+        today = local_now.date()
+        now_minutes = local_now.hour * 60 + local_now.minute
+    except Exception:
+        pass
+    return BookingFieldContext(
+        staff_names=frozenset(staff),
+        service_names=frozenset(services),
+        today=today,
+        now_minutes=now_minutes,
+    )
 
 
 def is_valid_booking_date(raw: object) -> bool:
@@ -178,6 +198,19 @@ def validate_booking_datetime_fields(
         return False, "invalid_date"
     if not looks_like_booking_time(booking.get("time"), ctx):
         return False, "invalid_time"
+    # Reject bookings in the past (business-local). Only enforced when the context
+    # carries a reference "now" — legacy callers without it keep prior behavior.
+    if ctx.today is not None:
+        try:
+            booking_date = date.fromisoformat((booking.get("date") or "").strip())
+        except ValueError:
+            return False, "invalid_date"
+        if booking_date < ctx.today:
+            return False, "past_date"
+        if booking_date == ctx.today and ctx.now_minutes is not None:
+            mins = _time_to_minutes(booking.get("time") or "")
+            if mins is not None and mins < ctx.now_minutes:
+                return False, "past_time"
     return True, None
 
 

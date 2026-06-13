@@ -22,6 +22,11 @@ def test_inbound_sms_uses_resolve_not_phone_only(monkeypatch):
 
 def test_post_booking_links_sms_session(monkeypatch):
     """After confirmation SMS, voice flow should link sms_sessions to appointment id."""
+    from datetime import timedelta
+    import business_hours
+
+    # Future date so booking validation (which now rejects past dates) accepts it.
+    future_date = (business_hours.business_local_now({}) + timedelta(days=5)).date().isoformat()
     linked = []
 
     monkeypatch.setattr("runtime.USE_DB", True)
@@ -32,7 +37,7 @@ def test_post_booking_links_sms_session(monkeypatch):
         lambda booking, client_id_override=None, reserve_slot_immediately=True, **kwargs: {
             "id": 42,
             "name": "Pat",
-            "date": "2026-05-28",
+            "date": future_date,
             "time": "14:00",
             "phone": "+15551110000",
         },
@@ -47,7 +52,7 @@ def test_post_booking_links_sms_session(monkeypatch):
     )
     monkeypatch.setattr(main.client.chat.completions, "create", MagicMock())
     main.client.chat.completions.create.return_value = MagicMock(
-        choices=[MagicMock(message=MagicMock(content="BOOKING: Pat|+15551110000||2026-05-28|14:00|Cut|"))]
+        choices=[MagicMock(message=MagicMock(content=f"BOOKING: Pat|+15551110000||{future_date}|14:00|Cut|"))]
     )
 
     call_sid = "CAeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"

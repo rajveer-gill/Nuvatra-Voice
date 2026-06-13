@@ -36,9 +36,9 @@ async def safe_twilio_call_update(
     (expected race when caller hangs up during Media Streams).
     """
     if require_active_session:
-        import main as m
+        import runtime
 
-        if not m.call_store.exists(call_sid):
+        if not runtime.call_store.exists(call_sid):
             voice_info(
                 "twilio_calls_update_skipped",
                 call_sid=call_sid,

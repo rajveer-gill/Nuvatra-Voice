@@ -11,43 +11,28 @@ export default function SmsConsentPage() {
 
           <div className="prose prose-gray max-w-none space-y-6 text-gray-700">
             <section>
-              <div className="flex items-start gap-3 not-prose">
-                <input
-                  id="sms-opt-in"
-                  type="checkbox"
-                  className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  aria-label="SMS opt-in consent checkbox"
-                />
-                <label htmlFor="sms-opt-in" className="text-gray-700 leading-relaxed">
-                  I agree to receive SMS notifications and updates from Call Surge. Msg &amp; data rates may
-                  apply. Message frequency varies based on your interactions with our service. Reply STOP to opt out
-                  at any time.
-                </label>
-              </div>
+              <p>
+                Callers consent to SMS when they call a Call Surge–powered business line and provide
+                their number, or when a business they contacted enters it on their behalf to send
+                appointment confirmations, reminders, and follow-ups. By providing your mobile number
+                you agree to receive these messages from Call Surge. Msg &amp; data rates may apply;
+                message frequency varies based on your interactions. Reply <strong>STOP</strong> to opt
+                out at any time, or <strong>HELP</strong> for help.
+              </p>
             </section>
 
             <section>
               <p>
                 Privacy Policy:{' '}
-                <a
-                  href="https://call-surge.com/privacy"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-600 hover:underline"
-                >
-                  call-surge.com/privacy
-                </a>
+                <Link href="/privacy" className="text-blue-600 hover:underline">
+                  /privacy
+                </Link>
               </p>
               <p className="mt-2">
                 Terms of Service:{' '}
-                <a
-                  href="https://call-surge.com/terms"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-600 hover:underline"
-                >
-                  call-surge.com/terms
-                </a>
+                <Link href="/terms" className="text-blue-600 hover:underline">
+                  /terms
+                </Link>
               </p>
             </section>
 

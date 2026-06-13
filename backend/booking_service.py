@@ -187,6 +187,43 @@ def _hhmm_to_ampm(hhmm: str) -> str:
         return f"12:{m:02d} PM"
     return f"{h - 12}:{m:02d} PM"
 
+
+def _hourly_slots_for_date(info: dict, day) -> List[str]:
+    """Hourly HH:MM open-time suggestions within the business's configured hours for
+    `day`. Empty when the shop is closed that day. Falls back to 9 AM–5 PM when hours
+    are unparseable or the shop is open 24/7 (so we never suggest 3 AM)."""
+    fallback = [f"{h:02d}:00" for h in range(9, 17)]
+    try:
+        import business_hours
+
+        slot = business_hours.day_slot_for_date(info, day)
+        if slot.closed:
+            return []
+        if business_hours.is_open_247(slot):
+            return fallback
+        open_min = business_hours.time_to_minutes(slot.open)
+        close_min = business_hours.time_to_minutes(slot.close)
+        if open_min < 0 or close_min < 0 or close_min <= open_min:
+            return fallback
+        start_h = open_min // 60
+        last_h = (close_min - 1) // 60  # last hour you can start before closing
+        return [f"{h:02d}:00" for h in range(start_h, last_h + 1)]
+    except Exception:
+        return fallback
+
+
+def _hours_phrase_for_date(info: dict, day) -> str:
+    """Human phrase for a day's open window, e.g. '9 AM–5 PM'. Empty when closed/unknown."""
+    try:
+        import business_hours
+
+        slot = business_hours.day_slot_for_date(info, day)
+        if slot.closed or business_hours.is_open_247(slot):
+            return ""
+        return f"{_hhmm_to_ampm(slot.open)}–{_hhmm_to_ampm(slot.close)}"
+    except Exception:
+        return ""
+
 def _staff_display_name_for_appointment(apt: dict, info: Optional[dict] = None) -> str:
     sid = (apt.get("staff_id") or "").strip()
     if not sid:
@@ -598,7 +635,6 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
     multi_staff = len(roster) >= 2
     id_to_name = {sid: name for sid, name in roster if sid}
     today = now.date()
-    default_times = [f"{h:02d}:00" for h in range(9, 18)]  # 09:00–17:00
     parts: List[str] = []
     suggest_parts: List[str] = []
 
@@ -639,6 +675,10 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
             date_str = day.isoformat()
             if date_str not in dates_with_bookings:
                 continue
+            day_times = _hourly_slots_for_date(info, day)
+            if not day_times:
+                continue  # shop closed that day — don't suggest any times
+            hours_phrase = _hours_phrase_for_date(info, day)
             for sid, name in roster_with_ids:
                 times = by_date_staff.get((date_str, sid), [])
                 taken_set = {
@@ -649,12 +689,13 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
                     if t
                 }
                 if not taken_set:
+                    hrs = f" ({hours_phrase})" if hours_phrase else ""
                     suggest_parts.append(
                         f"For {name} on {date_str} no times are booked for {name}—"
-                        f"standard hours 9 AM–5 PM are available with {name}."
+                        f"all open hours{hrs} are available with {name}."
                     )
                     continue
-                safe = [t for t in default_times if t not in taken_set]
+                safe = [t for t in day_times if t not in taken_set]
                 taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]
                 if safe:
                     safe_display = [_hhmm_to_ampm(t) for t in safe]
@@ -692,7 +733,8 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
                     )
                     if t
                 }
-                safe = [t for t in default_times if t not in taken_set]
+                day_times = _hourly_slots_for_date(info, day)
+                safe = [t for t in day_times if t not in taken_set]
                 if safe:
                     safe_display = [_hhmm_to_ampm(t) for t in safe]
                     taken_display = [_hhmm_to_ampm(t) for t in sorted(taken_set)]

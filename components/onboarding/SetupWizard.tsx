@@ -31,6 +31,12 @@ function buildSteps(status: SetupWizardStatus | null): Step[] {
   const businessDone = !missing.includes('Business name') && !missing.includes('Hours of operation') && !missing.includes('Address')
   const servicesDone = !(status?.warnings ?? []).some((w) => w.startsWith('Add services'))
   const goLiveDone = Boolean(status?.twilio_number_set && status?.webhooks_configured)
+  // Concrete provisioning status + ETA instead of an open-ended "we'll let you know".
+  const goLiveDescription = goLiveDone
+    ? 'Your dedicated phone line is active and answering calls.'
+    : status?.twilio_number_set
+      ? 'Your number is assigned — we’re finishing the connection. This page updates automatically, usually within a few minutes.'
+      : 'We’re provisioning your dedicated phone number. This usually takes just a few minutes — nothing needed from you, and it’ll appear here the moment it’s ready.'
   return [
     {
       id: 'business',
@@ -65,9 +71,7 @@ function buildSteps(status: SetupWizardStatus | null): Step[] {
     {
       id: 'go-live',
       title: 'AI phone line',
-      description: goLiveDone
-        ? 'Your dedicated phone line is active and answering calls.'
-        : "We're setting up your dedicated phone line — nothing needed from you. We'll let you know the moment it's ready.",
+      description: goLiveDescription,
       done: goLiveDone,
       actor: 'us',
     },
@@ -135,7 +139,12 @@ export function SetupWizard({ status, onComplete, completing, compact }: Props) 
                 <span>{i + 1}. {step.title}</span>
                 {step.actor === 'us' && !step.done && (
                   <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
-                    We handle this
+                    Provisioning…
+                  </span>
+                )}
+                {step.id === 'go-live' && step.done && (
+                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+                    Live
                   </span>
                 )}
               </p>

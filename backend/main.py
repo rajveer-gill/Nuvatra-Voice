@@ -467,6 +467,16 @@ _webhook_rate_limit: dict = {}  # ip -> list of timestamps
 _webhook_rate_limit_lock = asyncio.Lock()
 WEBHOOK_RATE_LIMIT_PER_MIN = 120
 WEBHOOK_RATE_LIMIT_MAX_IPS = 5000
+# Unauthenticated public endpoints subject to the per-IP rate limit. The TTS endpoints
+# are included because Twilio <Play> fetches them without auth, so they'd otherwise be a
+# free, uncapped path into paid OpenAI TTS. Legitimate playback is ~1 fetch/turn — well
+# under the limit; the cap only bites scripted abuse.
+_RATE_LIMITED_PATHS = (
+    "/api/phone/incoming",
+    "/api/sms/incoming",
+    "/api/phone/tts-audio",
+    "/api/phone/tts-audio-hd",
+)
 
 
 def _rate_limit_client_ip(request: Request) -> str:
@@ -488,9 +498,9 @@ def _rate_limit_client_ip(request: Request) -> str:
 
 
 async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
-    """Return 429 response if IP over limit for /api/phone/incoming or /api/sms/incoming; else None."""
+    """Return 429 response if IP over the per-IP limit for a rate-limited public path; else None."""
     path = request.url.path
-    if path not in ("/api/phone/incoming", "/api/sms/incoming"):
+    if path not in _RATE_LIMITED_PATHS:
         return None
     ip = _rate_limit_client_ip(request)
     now = datetime.now(timezone.utc).timestamp()
@@ -526,8 +536,8 @@ async def _webhook_rate_limit_check(request: Request) -> Optional[Response]:
 
 @app.middleware("http")
 async def webhook_rate_limit_middleware(request: Request, call_next):
-    """Apply rate limit to phone/SMS webhooks."""
-    if request.url.path in ("/api/phone/incoming", "/api/sms/incoming"):
+    """Apply the per-IP rate limit to unauthenticated public endpoints (phone/SMS webhooks + TTS)."""
+    if request.url.path in _RATE_LIMITED_PATHS:
         resp = await _webhook_rate_limit_check(request)
         if resp is not None:
             return resp

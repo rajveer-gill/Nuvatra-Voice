@@ -1,10 +1,18 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Check } from 'lucide-react'
+import { Check, Play, Pause } from 'lucide-react'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { useApiClient } from '@/lib/api'
+
+// Voices a caller might hear, previewable before paying (static samples in public/).
+const PREVIEW_VOICES = [
+  { id: 'fable', label: 'Fable' },
+  { id: 'nova', label: 'Nova' },
+  { id: 'shimmer', label: 'Shimmer' },
+  { id: 'onyx', label: 'Onyx' },
+] as const
 
 // Prices are display-only — the real charge comes from the Stripe price IDs on the
 // backend. Keep these in sync with your Stripe products. Features mirror backend/plans.py.
@@ -64,6 +72,27 @@ export default function CreateBusinessPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [checking, setChecking] = useState(true)
+  const [playingVoice, setPlayingVoice] = useState<string | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  const playSample = (v: string) => {
+    try {
+      audioRef.current?.pause()
+      if (playingVoice === v) {
+        setPlayingVoice(null)
+        return
+      }
+      const a = new Audio(`/voice-samples/${v}.mp3`)
+      audioRef.current = a
+      a.onended = () => setPlayingVoice(null)
+      setPlayingVoice(v)
+      void a.play().catch(() => setPlayingVoice(null))
+    } catch {
+      setPlayingVoice(null)
+    }
+  }
+
+  useEffect(() => () => audioRef.current?.pause(), [])
 
   // If they already have a live business, skip this and go to the dashboard.
   useEffect(() => {
@@ -142,6 +171,36 @@ export default function CreateBusinessPage() {
                 className="w-full rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
               />
               <p className="mt-1 text-xs text-zinc-500">Callers hear this in your greeting.</p>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-300">
+                Hear your AI receptionist
+              </label>
+              <p className="mb-2 text-xs text-zinc-500">
+                Tap to preview a voice — you can pick and fine-tune yours in Settings after signup.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {PREVIEW_VOICES.map((v) => {
+                  const playing = playingVoice === v.id
+                  return (
+                    <button
+                      type="button"
+                      key={v.id}
+                      onClick={() => playSample(v.id)}
+                      aria-pressed={playing}
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                        playing
+                          ? 'border-cyan-500 bg-cyan-500/10 text-cyan-200'
+                          : 'border-white/10 bg-zinc-950/40 text-zinc-300 hover:border-white/25'
+                      }`}
+                    >
+                      {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                      {v.label}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
 
             <div>

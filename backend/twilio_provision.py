@@ -278,6 +278,93 @@ def purchase_number(
     return result
 
 
+def release_number(
+    *,
+    account_sid: str,
+    auth_token: str,
+    phone_e164: str,
+    number_sid: Optional[str] = None,
+) -> dict[str, Any]:
+    """Release a tenant's Twilio number so it stops billing us after churn/deletion.
+
+    Removes the number from the A2P Messaging Service sender pool (if enrolled) and
+    deletes the IncomingPhoneNumber. Every step is best-effort and idempotent —
+    an already-released/already-removed number is treated as success. Never raises;
+    returns a structured result so callers can log it from inside a webhook.
+    """
+    out: dict[str, Any] = {
+        "released": False,
+        "removed_from_messaging_service": False,
+        "number_sid": number_sid,
+        "errors": [],
+    }
+    if not account_sid or not auth_token:
+        out["errors"].append("twilio_credentials_required")
+        return out
+    if TwilioClient is None:
+        out["errors"].append("twilio_sdk_unavailable")
+        return out
+    try:
+        client = TwilioClient(account_sid, auth_token)
+        sid = (number_sid or "").strip() or None
+        if not sid:
+            number = find_incoming_number(client, phone_e164)
+            if number is None:
+                # Nothing in the account for this number — already gone.
+                out["released"] = True
+                return out
+            sid = getattr(number, "sid", None)
+        out["number_sid"] = sid
+        if not sid:
+            out["released"] = True
+            return out
+
+        # 1) Remove from the A2P Messaging Service sender pool (best-effort).
+        msid = a2p_messaging_service_sid()
+        if msid:
+            try:
+                if _number_in_messaging_service(client, msid, sid):
+                    client.messaging.v1.services(msid).phone_numbers(sid).delete()
+                out["removed_from_messaging_service"] = True
+            except Exception as e:
+                # If it's no longer in the service, treat removal as done.
+                if not _number_in_messaging_service(client, msid, sid):
+                    out["removed_from_messaging_service"] = True
+                else:
+                    out["errors"].append("messaging_service_remove_failed")
+                    _log.warning(
+                        "twilio_messaging_service_remove_failed number_sid=%s code=%s err=%s",
+                        sid,
+                        getattr(e, "code", None),
+                        type(e).__name__,
+                    )
+
+        # 2) Delete the number itself.
+        try:
+            client.incoming_phone_numbers(sid).delete()
+            out["released"] = True
+        except Exception as e:
+            # A 404 means it's already released — idempotent success.
+            if getattr(e, "status", None) == 404 or getattr(e, "code", None) == 20404:
+                out["released"] = True
+            else:
+                out["errors"].append("twilio_release_failed")
+                _log.warning(
+                    "twilio_release_number_failed number_sid=%s code=%s err=%s",
+                    sid,
+                    getattr(e, "code", None),
+                    type(e).__name__,
+                )
+    except Exception as e:
+        out["errors"].append("twilio_release_failed")
+        _log.warning(
+            "twilio_release_number_unexpected phone=%s err=%s",
+            normalize_e164(phone_e164),
+            type(e).__name__,
+        )
+    return out
+
+
 def verify_webhooks_match(
     *,
     account_sid: str,

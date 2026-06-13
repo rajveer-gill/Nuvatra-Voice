@@ -14,18 +14,32 @@ export default function OnboardingPage() {
   const [loading, setLoading] = useState(true)
   const [completing, setCompleting] = useState(false)
 
-  const load = useCallback(() => {
-    setLoading(true)
-    api
-      .get<SetupWizardStatus>('/api/setup-status')
-      .then((r) => setStatus(r.data))
-      .catch(() => setStatus(null))
-      .finally(() => setLoading(false))
-  }, [api])
+  const load = useCallback(
+    (opts?: { silent?: boolean }) => {
+      if (!opts?.silent) setLoading(true)
+      return api
+        .get<SetupWizardStatus>('/api/setup-status')
+        .then((r) => setStatus(r.data))
+        .catch(() => setStatus(null))
+        .finally(() => {
+          if (!opts?.silent) setLoading(false)
+        })
+    },
+    [api],
+  )
 
   useEffect(() => {
     load()
   }, [load])
+
+  // While the line is still being provisioned, poll quietly so the "AI phone line"
+  // step flips to Live on its own without the user refreshing. Stops once live.
+  const lineLive = Boolean(status?.twilio_number_set && status?.webhooks_configured)
+  useEffect(() => {
+    if (lineLive) return
+    const id = setInterval(() => void load({ silent: true }), 15000)
+    return () => clearInterval(id)
+  }, [lineLive, load])
 
   const handleComplete = async () => {
     setCompleting(true)

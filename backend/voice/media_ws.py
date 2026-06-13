@@ -222,9 +222,10 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                 call_sid = cs
                 token = (cp or {}).get("token") or ""
                 import main as m
+                import runtime
 
                 row = m.active_calls.get(call_sid) or {}
-                max_gen = m.call_store.get_media_stream_max_gen(call_sid)
+                max_gen = runtime.call_store.get_media_stream_max_gen(call_sid)
                 if max_gen < 1:
                     max_gen = int(row.get("media_stream_gen") or 0)
                 tok_gen = token_stream_generation(token)
@@ -275,7 +276,7 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                     await websocket.close(code=4400)
                     return
                 if base_source == "env" and not session_has_base:
-                    m.call_store.merge_session(
+                    runtime.call_store.merge_session(
                         call_sid, {"twilio_public_base_url": base_url}
                     )
                 voice_info(

@@ -213,6 +213,9 @@ def _provision_number_for_tenant(tenant: dict, area_code: Optional[str], request
     )
     if res.get("ok") and res.get("phone_e164"):
         database.db_tenant_set_twilio_phone(tenant["id"], res["phone_e164"])
+        # Store the number SID so we can release it reliably on churn without a lookup.
+        if res.get("number_sid"):
+            database.db_tenant_set_twilio_number_sid(tenant["id"], res["number_sid"])
         deps.audit_log(
             "system",
             "self_serve_number_provisioned",
@@ -233,6 +236,47 @@ def _provision_number_for_tenant(tenant: dict, area_code: Optional[str], request
             details={"errors": res.get("errors")},
             request=request,
         )
+
+
+def _release_tenant_twilio_number(tenant: Optional[dict], request: Optional[Request] = None) -> None:
+    """Release a churned tenant's Twilio number (remove from A2P service + delete) and
+    clear it from the tenant row. Best-effort — never raises into a webhook handler."""
+    if not tenant:
+        return
+    phone = (tenant.get("twilio_phone_number") or "").strip()
+    if not phone:
+        return  # pending tenant that never got a number — nothing to release
+    import twilio_provision
+
+    acct = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+    tok = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    if not (acct and tok):
+        logger.error("twilio_release_skipped: missing Twilio creds tenant=%s", tenant.get("id"))
+        return
+    try:
+        res = twilio_provision.release_number(
+            account_sid=acct,
+            auth_token=tok,
+            phone_e164=phone,
+            number_sid=(tenant.get("twilio_number_sid") or None),
+        )
+        database.db_tenant_clear_twilio(tenant["id"])
+        deps.audit_log(
+            "system",
+            "twilio_number_released",
+            resource_type="tenant",
+            resource_id=tenant["id"],
+            client_id=tenant.get("client_id"),
+            details={
+                "phone_e164": phone,
+                "released": res.get("released"),
+                "removed_from_messaging_service": res.get("removed_from_messaging_service"),
+                "errors": res.get("errors"),
+            },
+            request=request,
+        )
+    except Exception as e:
+        logger.exception("twilio_release_unexpected tenant=%s: %s", tenant.get("id"), e)
 
 
 @router.post("/api/stripe-webhook")
@@ -295,10 +339,19 @@ async def stripe_webhook(request: Request):
                     )
         elif etype == "customer.subscription.updated":
             sub_id = obj.get("id")
-            tenant_id = (obj.get("metadata") or {}).get("tenant_id")
+            meta = obj.get("metadata") or {}
+            tenant_id = meta.get("tenant_id")
             status = obj.get("status")
+            # Customer-Portal-initiated events often carry no tenant_id metadata;
+            # resolve by the stored subscription id instead (mirrors payment_failed).
+            if not tenant_id and sub_id:
+                t = database.db_tenant_get_by_stripe_subscription_id(sub_id)
+                if t:
+                    tenant_id = t.get("id")
             if tenant_id and sub_id:
-                plan = (obj.get("metadata") or {}).get("plan") or "starter"
+                # plan is None when metadata is absent → leave the existing plan
+                # untouched rather than silently downgrading a paying tenant to starter.
+                plan = meta.get("plan")
                 database.db_tenant_update_subscription(
                     tenant_id,
                     stripe_subscription_id=sub_id,
@@ -316,7 +369,13 @@ async def stripe_webhook(request: Request):
                     request=request,
                 )
         elif etype == "customer.subscription.deleted":
+            sub_id = obj.get("id")
             tenant_id = (obj.get("metadata") or {}).get("tenant_id")
+            # Portal/Stripe-initiated cancellations may lack metadata; resolve by sub id.
+            if not tenant_id and sub_id:
+                t = database.db_tenant_get_by_stripe_subscription_id(sub_id)
+                if t:
+                    tenant_id = t.get("id")
             if tenant_id:
                 tenant = database.db_tenant_get_by_id(tenant_id)
                 database.db_tenant_update_subscription(tenant_id, subscription_status="canceled")
@@ -329,6 +388,9 @@ async def stripe_webhook(request: Request):
                     details={},
                     request=request,
                 )
+                # Stripe dunning is exhausted at this point — release the Twilio number
+                # so we stop paying for a churned tenant. Best-effort; never 500s.
+                _release_tenant_twilio_number(tenant, request=request)
         elif etype == "invoice.payment_failed":
             sub_id = obj.get("subscription")
             if sub_id:

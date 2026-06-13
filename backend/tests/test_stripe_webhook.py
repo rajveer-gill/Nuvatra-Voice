@@ -101,3 +101,120 @@ def test_checkout_completed_activates_subscription(client, monkeypatch):
             assert updates.get("plan") == "growth"
     finally:
         os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
+
+def _post_event(client, billing, event_dict):
+    with patch.object(billing, "stripe") as mock_stripe:
+        mock_stripe.Webhook.construct_event.return_value = MagicMock()  # signature OK
+        return client.post(
+            "/api/stripe-webhook",
+            content=json.dumps(event_dict).encode(),
+            headers={"Content-Type": "application/json", "stripe-signature": "v0,fake"},
+        )
+
+
+def test_subscription_updated_resolves_by_sub_id_when_metadata_absent(client, monkeypatch):
+    """Portal-initiated updates lack metadata.tenant_id → resolve via stored sub id,
+    and do NOT clobber the plan to starter."""
+    import database
+    import deps
+    import runtime
+    from routers import billing
+
+    monkeypatch.setattr(runtime, "USE_DB", True)
+    os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test"
+    updates = {}
+    monkeypatch.setattr(
+        database, "db_tenant_get_by_stripe_subscription_id",
+        lambda sub_id: {"id": "t-9", "client_id": "c-9"},
+    )
+    monkeypatch.setattr(
+        database, "db_tenant_update_subscription",
+        lambda tid, **kw: updates.update(tenant_id=tid, **kw) or True,
+    )
+    monkeypatch.setattr(database, "db_tenant_get_by_id", lambda tid: {"id": tid, "client_id": "c-9"})
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    try:
+        resp = _post_event(client, billing, {
+            "type": "customer.subscription.updated",
+            "data": {"object": {"id": "sub_9", "status": "active", "metadata": {}}},
+        })
+        assert resp.status_code == 200
+        assert updates.get("tenant_id") == "t-9"
+        assert updates.get("subscription_status") == "active"
+        assert updates.get("plan") is None  # not clobbered to starter
+    finally:
+        os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
+
+def test_subscription_deleted_releases_twilio_number(client, monkeypatch):
+    import database
+    import deps
+    import runtime
+    import twilio_provision
+    from routers import billing
+
+    monkeypatch.setattr(runtime, "USE_DB", True)
+    os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test"
+    os.environ["TWILIO_ACCOUNT_SID"] = "AC"
+    os.environ["TWILIO_AUTH_TOKEN"] = "tok"
+    released = {}
+    cleared = {}
+    monkeypatch.setattr(
+        database, "db_tenant_get_by_stripe_subscription_id",
+        lambda sub_id: {"id": "t-7", "client_id": "c-7",
+                        "twilio_phone_number": "+15557770000", "twilio_number_sid": "PN7"},
+    )
+    monkeypatch.setattr(database, "db_tenant_get_by_id",
+                        lambda tid: {"id": tid, "client_id": "c-7",
+                                     "twilio_phone_number": "+15557770000", "twilio_number_sid": "PN7"})
+    monkeypatch.setattr(database, "db_tenant_update_subscription", lambda tid, **kw: True)
+    monkeypatch.setattr(database, "db_tenant_clear_twilio", lambda tid: cleared.update(tid=tid) or True)
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        twilio_provision, "release_number",
+        lambda **kw: released.update(kw) or {"released": True, "errors": []},
+    )
+    try:
+        resp = _post_event(client, billing, {
+            "type": "customer.subscription.deleted",
+            "data": {"object": {"id": "sub_7", "metadata": {}}},
+        })
+        assert resp.status_code == 200
+        assert released.get("phone_e164") == "+15557770000"
+        assert released.get("number_sid") == "PN7"
+        assert cleared.get("tid") == "t-7"
+    finally:
+        for k in ("STRIPE_WEBHOOK_SECRET", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"):
+            os.environ.pop(k, None)
+
+
+def test_payment_failed_does_not_release_number(client, monkeypatch):
+    import database
+    import deps
+    import runtime
+    import twilio_provision
+    from routers import billing
+
+    monkeypatch.setattr(runtime, "USE_DB", True)
+    os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test"
+    calls = {"released": False}
+    monkeypatch.setattr(
+        database, "db_tenant_get_by_stripe_subscription_id",
+        lambda sub_id: {"id": "t-5", "client_id": "c-5", "twilio_phone_number": "+15555550000"},
+    )
+    monkeypatch.setattr(database, "db_tenant_update_subscription", lambda tid, **kw: True)
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        twilio_provision, "release_number",
+        lambda **kw: calls.update(released=True) or {"released": True, "errors": []},
+    )
+    try:
+        resp = _post_event(client, billing, {
+            "type": "invoice.payment_failed",
+            "data": {"object": {"subscription": "sub_5"}},
+        })
+        assert resp.status_code == 200
+        assert calls["released"] is False  # past_due must NOT release the number
+    finally:
+        os.environ.pop("STRIPE_WEBHOOK_SECRET", None)

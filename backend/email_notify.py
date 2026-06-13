@@ -45,6 +45,25 @@ def send_appointment_email(
     return _send_via_smtp(to_addr, from_addr, subject, html_body, text)
 
 
+def send_operator_alert(subject: str, html_body: str, text_body: Optional[str] = None) -> bool:
+    """Send an operational alert to the operator (e.g. a tenant crossing its usage cap).
+
+    Recipient is OPERATOR_ALERT_EMAIL. No-op (returns False) when unset, so this is safe
+    to call best-effort from a hot path. Reuses the same Resend/SMTP transport."""
+    to_addr = (os.getenv("OPERATOR_ALERT_EMAIL") or "").strip()
+    if not to_addr or "@" not in to_addr:
+        logger.info("operator_alert_skipped reason=no_recipient")
+        return False
+    from_addr = _from_address()
+    if not from_addr:
+        logger.info("operator_alert_skipped reason=no_from_address")
+        return False
+    text = (text_body or "").strip() or _html_to_plain(html_body)
+    if _send_via_resend(to_addr, from_addr, subject, html_body, text):
+        return True
+    return _send_via_smtp(to_addr, from_addr, subject, html_body, text)
+
+
 def _html_to_plain(html: str) -> str:
     return re.sub(r"<[^>]+>", "", html or "").replace("&nbsp;", " ").strip()
 

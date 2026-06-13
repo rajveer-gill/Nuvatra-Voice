@@ -38,6 +38,10 @@ class BillingExemptUpdate(BaseModel):
     extend_trial_months: Optional[int] = None
 
 
+class AccountPausedUpdate(BaseModel):
+    paused: bool
+
+
 class AdminCreateTenantRequest(BaseModel):
     client_id: str
     name: str
@@ -555,6 +559,10 @@ def admin_update_tenant_twilio_phone(
         base_url=base,
     )
     public_config = public_webhook_result(webhook_config)
+    # Store the number SID so the line can be released reliably on churn/deletion.
+    if webhook_config.get("number_sid"):
+        database.db_tenant_set_twilio_number_sid(tenant_id, webhook_config["number_sid"])
+        updated = database.db_tenant_get_by_id(tenant_id)
     deps.audit_log(
         "admin",
         "tenant_twilio_phone_updated",
@@ -569,6 +577,44 @@ def admin_update_tenant_twilio_phone(
         request=request,
     )
     return {"success": True, "tenant": updated, "webhook_config": public_config}
+
+
+def _release_tenant_twilio_number_for_delete(tenant: dict, admin_user_id: str, request: Request) -> None:
+    """Release the tenant's Twilio number on admin delete. Best-effort; never raises."""
+    phone = (tenant.get("twilio_phone_number") or "").strip()
+    if not phone:
+        return
+    acct = (TWILIO_ACCOUNT_SID or "").strip()
+    tok = (TWILIO_AUTH_TOKEN or "").strip()
+    if not (acct and tok):
+        print(f"[Admin] twilio_release_skipped: missing Twilio creds tenant={tenant.get('id')}")
+        return
+    try:
+        from twilio_provision import release_number
+
+        res = release_number(
+            account_sid=acct,
+            auth_token=tok,
+            phone_e164=phone,
+            number_sid=(tenant.get("twilio_number_sid") or None),
+        )
+        deps.audit_log(
+            "admin",
+            "twilio_number_released",
+            actor_id=admin_user_id,
+            resource_type="tenant",
+            resource_id=tenant.get("id"),
+            client_id=tenant.get("client_id"),
+            details={
+                "phone_e164": phone,
+                "released": res.get("released"),
+                "removed_from_messaging_service": res.get("removed_from_messaging_service"),
+                "errors": res.get("errors"),
+            },
+            request=request,
+        )
+    except Exception as e:
+        print(f"[Admin] twilio_release_unexpected tenant={tenant.get('id')}: {e}")
 
 
 @router.delete("/api/admin/tenants/{tenant_id}")
@@ -592,6 +638,9 @@ def admin_delete_tenant(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     member_ids = database.db_tenant_get_members(tenant_id)
+    # Release the Twilio number BEFORE deleting the tenant row, while we still know it.
+    # Best-effort: a Twilio hiccup must not block tenant deletion.
+    _release_tenant_twilio_number_for_delete(tenant, admin_user_id, request)
     archive_id = database.db_archive_purge_and_delete_tenant(
         tenant_id, tenant, actor_clerk_id=admin_user_id
     )
@@ -760,6 +809,35 @@ def admin_tenant_billing_exempt(
         status_code=400,
         detail="Provide exempt_until, extend_months, or extend_trial_months",
     )
+
+
+@router.patch("/api/admin/tenants/{tenant_id}/account-paused")
+def admin_tenant_account_paused(
+    tenant_id: str,
+    req: AccountPausedUpdate,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Manually pause/resume a tenant. While paused, the tenant's voice and SMS
+    webhooks decline service (via the shared subscription-access gate). Admin only."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if not database.db_tenant_set_account_paused(tenant_id, req.paused):
+        raise HTTPException(status_code=500, detail="Failed to update pause state")
+    deps.audit_log(
+        "admin",
+        "account_paused",
+        actor_id=admin_user_id,
+        resource_type="tenant",
+        resource_id=tenant_id,
+        client_id=tenant.get("client_id"),
+        details={"paused": bool(req.paused)},
+        request=request,
+    )
+    return {"success": True, "account_paused": bool(req.paused)}
 
 
 @router.post("/api/admin/tenants/{tenant_id}/members")

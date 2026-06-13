@@ -172,6 +172,61 @@ def audit_log(
         pass
 
 
+def maybe_alert_usage_cap(
+    *,
+    client_id: str,
+    month: str,
+    channel: str,
+    voice_minutes: int,
+    voice_cap: int,
+    sms_count: int,
+    sms_cap: int,
+    request: Optional[Request] = None,
+) -> None:
+    """Emit a one-per-tenant-per-month operator alert when a usage cap is crossed.
+
+    Alert-only policy: service is NOT cut off — this just notifies the operator (who can
+    manually pause the account if needed). Idempotent via usage_alert_sent. Best-effort;
+    never raises into the call/SMS path."""
+    if not runtime.USE_DB or not client_id:
+        return
+    try:
+        if database.db_usage_alert_exists(client_id, month):
+            return
+        audit_log(
+            "usage",
+            "usage_cap_alert",
+            client_id=client_id,
+            details={
+                "month": month,
+                "channel": channel,
+                "voice_minutes": voice_minutes,
+                "voice_cap": voice_cap,
+                "sms_count": sms_count,
+                "sms_cap": sms_cap,
+            },
+            request=request,
+        )
+        try:
+            import email_notify
+
+            subject = f"[Nuvatra] Tenant {client_id} crossed its {channel} usage cap"
+            html = (
+                f"<p>Tenant <strong>{client_id}</strong> has exceeded its plan cap for {month}.</p>"
+                f"<p>Voice minutes: {voice_minutes} / {voice_cap}<br>"
+                f"SMS: {sms_count} / {sms_cap}</p>"
+                f"<p>Service continues (overage is billed). Pause the account from the admin "
+                f"console if this looks like abuse.</p>"
+            )
+            email_notify.send_operator_alert(subject, html)
+        except Exception:
+            pass
+        # Record after attempting the alert so we don't re-alert every call this month.
+        database.db_usage_alert_insert(client_id, month)
+    except Exception:
+        pass
+
+
 def _ensure_db_ready() -> None:
     """Block briefly to let background init_db finish if it hasn't yet."""
     if runtime.USE_DB or not runtime._db_imported or not os.getenv("DATABASE_URL"):

@@ -68,10 +68,14 @@ def test_normalize_rejects_jake_time_even_after_empty():
 
 
 def test_normalize_accepts_repaired_booking_with_time():
+    from datetime import timedelta
+    import business_hours
+
     ctx = _ctx()
+    future_date = (business_hours.business_local_now({}) + timedelta(days=5)).date().isoformat()
     booking = {
         "name": "Raj",
-        "date": "2026-06-09",
+        "date": future_date,
         "time": "15:00",
         "reason": "Long Cut",
         "staff": "Jake",

@@ -8,7 +8,7 @@ export default function PrivacyPage() {
       <main className="min-h-screen bg-gray-50 py-12 px-4">
         <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow-lg p-8 md:p-12">
           <h1 className="text-3xl font-bold text-gray-900 mb-6">Privacy Policy</h1>
-          <p className="text-sm text-gray-500 mb-8">Last updated: {new Date().toLocaleDateString('en-US')}</p>
+          <p className="text-sm text-gray-500 mb-8">Last updated: June 13, 2026</p>
 
           <div className="prose prose-gray max-w-none space-y-6 text-gray-700">
             <section>

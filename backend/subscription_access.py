@@ -81,13 +81,16 @@ def get_tenant_subscription_state(tenant: Optional[dict]) -> dict[str, Any]:
             except Exception:
                 trial_active = True
     paid_active = subscription_status == "active"
-    can_use_app = exempt_active or trial_active or paid_active
+    # Admin manual kill-switch overrides everything (even an active trial/subscription).
+    paused = bool(tenant.get("account_paused"))
+    can_use_app = (exempt_active or trial_active or paid_active) and not paused
     return {
         "can_use_app": can_use_app,
         "trial_ends_at": trial_ends_at,
         "subscription_status": subscription_status,
         "plan": plan,
         "billing_exempt_until": billing_exempt_until,
+        "account_paused": paused,
     }
 
 
@@ -109,6 +112,8 @@ def webhook_access_denial_reason(tenant: Optional[dict]) -> Optional[str]:
     state = get_tenant_subscription_state(tenant)
     if state.get("can_use_app"):
         return None
+    if state.get("account_paused"):
+        return "account_paused"
     status = (state.get("subscription_status") or "").lower()
     if status == "trialing":
         return "trial_expired"

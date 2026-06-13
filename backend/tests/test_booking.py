@@ -329,11 +329,17 @@ def test_extract_booking_rejects_misaligned_time(monkeypatch):
 
 def test_extract_booking_line_from_conversation(monkeypatch):
     captured = {}
+    # Use a clearly-future date (booking validation rejects past dates), computed
+    # dynamically so the test never goes stale as the calendar advances.
+    from datetime import timedelta
+    import business_hours
+
+    future_date = (business_hours.business_local_now({}) + timedelta(days=5)).date().isoformat()
 
     def fake_create(**kwargs):
         captured["messages"] = kwargs.get("messages")
         class Msg:
-            content = "BOOKING: Raj|||2026-06-05|15:00|Long Cut|Jake"
+            content = f"BOOKING: Raj|||{future_date}|15:00|Long Cut|Jake"
 
         class Choice:
             message = Msg()
@@ -361,7 +367,7 @@ def test_extract_booking_line_from_conversation(monkeypatch):
     )
     assert got is not None
     assert got["name"] == "Raj"
-    assert got["date"] == "2026-06-05"
+    assert got["date"] == future_date
     assert got["staff"] == "Jake"
 
 

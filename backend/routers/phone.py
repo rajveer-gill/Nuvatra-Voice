@@ -11,6 +11,7 @@ import base64
 import io
 import logging
 import math
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import quote
@@ -60,6 +61,9 @@ except ImportError:  # pragma: no cover
     get_plan_limits = None  # type: ignore
 
 router = APIRouter()
+
+# Max characters accepted by the unauthenticated TTS endpoints (cost-abuse guard).
+TTS_MAX_INPUT_CHARS = 600
 
 
 class TTSRequest(BaseModel):
@@ -360,6 +364,9 @@ def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
     Generate HD TTS audio for Twilio phone calls (ultra-smooth, no choppiness).
     Used specifically for the initial greeting to ensure perfect quality.
     """
+    # These endpoints are unauthenticated (Twilio <Play> can't send auth), so bound the
+    # input to keep an attacker from looping huge strings into paid OpenAI TTS.
+    text = (text or "")[:TTS_MAX_INPUT_CHARS]
     try:
         # Use tts-1-hd for ultra-smooth, natural speech (no choppiness)
         response = runtime.client.audio.speech.create(
@@ -392,6 +399,8 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     Generate TTS audio for phone calls.
     This endpoint is called by Twilio to play OpenAI TTS audio.
     """
+    # Bound unauthenticated input (see tts-audio-hd note) before paying for TTS.
+    text = (text or "")[:TTS_MAX_INPUT_CHARS]
     try:
         # Use tts-1 for faster generation while maintaining quality
         # tts-1 is faster than tts-1-hd but still sounds natural and smooth
@@ -510,22 +519,36 @@ async def handle_incoming_call(request: Request):
                 media_type="application/xml",
             )
 
-        # Pre-call usage check: allow overage, log for billing (Option B)
+        # Pre-call usage check: alert-only, never cut off. Voice minutes are metered
+        # independently of SMS (each has its own plan cap); overage is billed monthly.
         if runtime.USE_DB and tenant and get_plan_limits:
             limits = get_plan_limits(tenant)
             month = datetime.now(timezone.utc).strftime("%Y-%m")
             usage = database.db_usage_get(tenant["client_id"], month)
-            total = (usage.get("voice_minutes") or 0) + (usage.get("sms_count") or 0)
-            if total >= limits.get("minutes_cap", 999999):
+            voice_minutes = usage.get("voice_minutes") or 0
+            sms_count = usage.get("sms_count") or 0
+            voice_cap = limits.get("minutes_cap", 999999)
+            if voice_minutes >= voice_cap:
                 deps.audit_log(
                     "usage",
                     "overage_exceeded",
                     client_id=tenant["client_id"],
                     details={
                         "month": month,
-                        "total": total,
-                        "cap": limits.get("minutes_cap"),
+                        "channel": "voice",
+                        "voice_minutes": voice_minutes,
+                        "cap": voice_cap,
                     },
+                    request=request,
+                )
+                deps.maybe_alert_usage_cap(
+                    client_id=tenant["client_id"],
+                    month=month,
+                    channel="voice",
+                    voice_minutes=voice_minutes,
+                    voice_cap=voice_cap,
+                    sms_count=sms_count,
+                    sms_cap=limits.get("sms_cap", 999999),
                     request=request,
                 )
 
@@ -588,6 +611,8 @@ async def handle_incoming_call(request: Request):
             "conversation_history": [],
             "detected_language": "English",
             "started_at": datetime.now().isoformat(),
+            "started_at_epoch": time.time(),
+            "turn_count": 0,
             "caller_memory": caller_memory,
             "twilio_public_base_url": base_url,
         }
@@ -1224,6 +1249,9 @@ async def handle_no_speech(request: Request):
         return Response(content=str(response), media_type="application/xml")
 
 
+MAX_RESPOND_POLLS = 6  # ~10-12s of waiting before we stop looping and hand off
+
+
 def _append_pending_filler(response, base_url: str, call_sid: Optional[str]) -> None:
     """Append one wait-loop turn: a varied filler clip (or brief silence on the first
     poll, since the caller just heard 'Got it, one moment.'), a short pause, and a
@@ -1236,6 +1264,29 @@ def _append_pending_filler(response, base_url: str, call_sid: Optional[str]) -> 
             count = int(sess.get("respond_poll_count") or 0)
         except (TypeError, ValueError):
             count = 0
+    # Bail-out: GPT response has been pending for too many polls (likely stalled). Stop
+    # the polite-filler loop and hand off rather than stranding the caller in it forever.
+    if count >= MAX_RESPOND_POLLS:
+        forwarding_phone = (config_service.get_business_info().get("forwarding_phone") or "").strip()
+        logger.warning(
+            "respond_poll_bailout call_sid=%s polls=%s forward=%s",
+            call_sid,
+            count,
+            bool(forwarding_phone),
+        )
+        if forwarding_phone:
+            response.say(
+                "Sorry, this is taking longer than expected. Let me connect you with someone who can help.",
+                voice="alice",
+            )
+            response.dial(forwarding_phone)
+        else:
+            response.say(
+                "I'm sorry, I'm having trouble on my end right now. Please call back in a few minutes. Goodbye.",
+                voice="alice",
+            )
+            response.hangup()
+        return
     pick = voice_service.pending_filler_for_poll(count)
     if pick is not None:
         idx, _phrase = pick

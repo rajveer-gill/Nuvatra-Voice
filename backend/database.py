@@ -335,6 +335,8 @@ def init_db() -> bool:
             ("business_vertical", "TEXT"),
             ("billing_period_anchor_at", "TIMESTAMPTZ"),
             ("business_config", "JSONB"),
+            ("account_paused", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("twilio_number_sid", "TEXT"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {typ}")
@@ -534,6 +536,15 @@ def init_db() -> bool:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sms_automations_client ON sms_automations(client_id)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS overage_processed (
+                client_id TEXT NOT NULL,
+                month TEXT NOT NULL CHECK (month ~ '^\\d{4}-\\d{2}$'),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (client_id, month)
+            )
+        """)
+        # Dedup guard so a usage-cap alert fires at most once per tenant per month.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS usage_alert_sent (
                 client_id TEXT NOT NULL,
                 month TEXT NOT NULL CHECK (month ~ '^\\d{4}-\\d{2}$'),
                 created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -751,13 +762,15 @@ def _row_to_tenant(row) -> dict:
         base["billing_period_anchor_at"] = row[12].isoformat() if hasattr(row[12], "isoformat") else row[12]
     else:
         base["billing_period_anchor_at"] = base.get("created_at")
+    base["account_paused"] = bool(row[13]) if len(row) >= 14 else False
+    base["twilio_number_sid"] = row[14] if len(row) >= 15 else None
     return base
 
 def _tenant_select_cols():
     return (
         "id, client_id, name, twilio_phone_number, plan, created_at, trial_ends_at, "
         "subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, "
-        "business_vertical, billing_period_anchor_at"
+        "business_vertical, billing_period_anchor_at, account_paused, twilio_number_sid"
     )
 
 def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
@@ -1501,6 +1514,76 @@ def db_tenant_set_twilio_phone(tenant_id: str, twilio_phone_number: str) -> bool
         return ok
     except Exception as e:
         print(f"[DB] Failed to set tenant Twilio phone: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+def db_tenant_set_account_paused(tenant_id: str, paused: bool) -> bool:
+    """Set the admin manual-pause kill-switch for a tenant. Returns True on success."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tenants SET account_paused = %s WHERE id = %s",
+            (bool(paused), tenant_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to set account_paused: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+def db_tenant_set_twilio_number_sid(tenant_id: str, number_sid: Optional[str]) -> bool:
+    """Store the Twilio incoming-number SID (PNxxxx) so releases don't need a lookup."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    sid = (number_sid or "").strip() or None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tenants SET twilio_number_sid = %s WHERE id = %s",
+            (sid, tenant_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to set twilio_number_sid: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+def db_tenant_clear_twilio(tenant_id: str) -> bool:
+    """Clear both the Twilio number and its SID after the number is released."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tenants SET twilio_phone_number = NULL, twilio_number_sid = NULL WHERE id = %s",
+            (tenant_id,),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to clear tenant Twilio: {e}")
         try:
             conn.rollback()
         except Exception:
@@ -2800,6 +2883,36 @@ def db_overage_processed_insert(client_id: str, month: str) -> bool:
         return True
     except Exception as e:
         print(f"[DB] Failed to insert overage_processed: {e}")
+        return False
+
+def db_usage_alert_exists(client_id: str, month: str) -> bool:
+    """True if a usage-cap alert has already been recorded for this client/month."""
+    if not client_id or not month:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM usage_alert_sent WHERE client_id = %s AND month = %s LIMIT 1", (client_id, month))
+    row = cur.fetchone()
+    cur.close()
+    return row is not None
+
+def db_usage_alert_insert(client_id: str, month: str) -> bool:
+    """Record that a usage-cap alert was sent for this client/month (idempotent)."""
+    if not client_id or not month:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO usage_alert_sent (client_id, month) VALUES (%s, %s) ON CONFLICT DO NOTHING", (client_id, month))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to insert usage_alert_sent: {e}")
         return False
 
 # --- Call log ---

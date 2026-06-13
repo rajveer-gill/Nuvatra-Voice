@@ -156,10 +156,15 @@ def cron_process_overage(request: Request):
         if run_id:
             database.db_cron_run_finish(run_id, "success", result)
         return result
-    from billing_config import get_overage_price_per_minute
+    from billing_config import get_overage_price_per_minute, get_overage_price_per_sms
 
     price_per_min = get_overage_price_per_minute()
-    prev_month = (datetime.now(timezone.utc) - timedelta(days=28)).strftime("%Y-%m")
+    price_per_sms = get_overage_price_per_sms()
+    # Previous calendar month: first-of-this-month minus one day always lands in it,
+    # regardless of month length (avoids the "-28 days" bug late in long months).
+    now = datetime.now(timezone.utc)
+    first_of_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month = (first_of_this_month - timedelta(days=1)).strftime("%Y-%m")
     tenants_processed = 0
     invoices_created = 0
     errors = 0
@@ -185,26 +190,39 @@ def cron_process_overage(request: Request):
         if database.db_overage_processed_exists(cid, prev_month):
             continue
         limits = get_plan_limits(t) if get_plan_limits else {}
-        cap = limits.get("minutes_cap", 999999)
+        voice_cap = limits.get("minutes_cap", 999999)
+        sms_cap = limits.get("sms_cap", 999999)
         usage = database.db_usage_get(cid, prev_month)
         voice_minutes = usage.get("voice_minutes") or 0
-        overage = max(0, voice_minutes - cap)
-        if overage <= 0:
+        sms_count = usage.get("sms_count") or 0
+        voice_over = max(0, voice_minutes - voice_cap)
+        sms_over = max(0, sms_count - sms_cap)
+        voice_cents = int(voice_over * price_per_min * 100)
+        sms_cents = int(sms_over * price_per_sms * 100)
+        if voice_cents <= 0 and sms_cents <= 0:
             database.db_overage_processed_insert(cid, prev_month)
             tenants_processed += 1
             continue
         try:
-            amount_cents = int(overage * price_per_min * 100)
-            if amount_cents <= 0:
-                continue
-            stripe.InvoiceItem.create(
-                customer=t["stripe_customer_id"],
-                amount=amount_cents,
-                currency="usd",
-                description=f"Extra minutes ({prev_month})",
-            )
+            # Bill voice and SMS overage as separate line items. Both are created before
+            # the processed marker so a re-run cannot double-bill either channel.
+            if voice_cents > 0:
+                stripe.InvoiceItem.create(
+                    customer=t["stripe_customer_id"],
+                    amount=voice_cents,
+                    currency="usd",
+                    description=f"Extra minutes ({prev_month})",
+                )
+                invoices_created += 1
+            if sms_cents > 0:
+                stripe.InvoiceItem.create(
+                    customer=t["stripe_customer_id"],
+                    amount=sms_cents,
+                    currency="usd",
+                    description=f"Extra texts ({prev_month})",
+                )
+                invoices_created += 1
             database.db_overage_processed_insert(cid, prev_month)
-            invoices_created += 1
         except Exception as e:
             logger.error(
                 "overage_invoice_failed",

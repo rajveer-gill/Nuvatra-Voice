@@ -11,20 +11,27 @@ _log = logging.getLogger("nuvatra")
 
 # USD per extra voice minute (monthly overage cron).
 OVERAGE_PRICE_PER_MINUTE_DEFAULT = 0.15
+# USD per extra SMS over the plan cap (monthly overage cron).
+OVERAGE_PRICE_PER_SMS_DEFAULT = 0.03
 
 
-def get_overage_price_per_minute() -> float:
-    """Resolve overage price from env or default."""
-    raw = (os.getenv("OVERAGE_PRICE_PER_MINUTE") or "").strip()
+def _resolve_price(env_var: str, default: float) -> float:
+    raw = (os.getenv(env_var) or "").strip()
     if raw:
         try:
             price = float(raw)
             if price >= 0:
                 return price
         except ValueError:
-            _log.warning(
-                "[BILLING] invalid_OVERAGE_PRICE_PER_MINUTE value=%r using default=%s",
-                raw,
-                OVERAGE_PRICE_PER_MINUTE_DEFAULT,
-            )
-    return OVERAGE_PRICE_PER_MINUTE_DEFAULT
+            _log.warning("[BILLING] invalid_%s value=%r using default=%s", env_var, raw, default)
+    return default
+
+
+def get_overage_price_per_minute() -> float:
+    """Resolve voice overage price from env or default."""
+    return _resolve_price("OVERAGE_PRICE_PER_MINUTE", OVERAGE_PRICE_PER_MINUTE_DEFAULT)
+
+
+def get_overage_price_per_sms() -> float:
+    """Resolve SMS overage price from env or default."""
+    return _resolve_price("OVERAGE_PRICE_PER_SMS", OVERAGE_PRICE_PER_SMS_DEFAULT)

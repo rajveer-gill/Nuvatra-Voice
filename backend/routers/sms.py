@@ -531,30 +531,41 @@ async def handle_incoming_sms(request: Request):
                 content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 media_type="application/xml",
             )
-        # Pre-SMS usage check: allow overage, log for billing (Option B)
+        # Pre-SMS usage check: alert-only, never cut off. SMS is metered independently
+        # of voice minutes (its own plan cap); overage is billed monthly.
         if get_plan_limits:
             limits = get_plan_limits(tenant)
             month = datetime.now(timezone.utc).strftime("%Y-%m")
             usage = database.db_usage_get(tenant["client_id"], month)
-            total = (usage.get("voice_minutes") or 0) + (usage.get("sms_count") or 0)
-            cap = limits.get("minutes_cap", 999999)
+            voice_minutes = usage.get("voice_minutes") or 0
+            sms_count = usage.get("sms_count") or 0
+            sms_cap = limits.get("sms_cap", 999999)
             sms_trace(
                 "inbound_usage_snapshot",
                 request_id=rid,
                 client_id=tenant["client_id"],
                 month=month,
-                voice_minutes=usage.get("voice_minutes") or 0,
-                sms_count=usage.get("sms_count") or 0,
-                combined_total=total,
-                minutes_cap=cap,
-                at_or_over_cap=total >= cap,
+                voice_minutes=voice_minutes,
+                sms_count=sms_count,
+                sms_cap=sms_cap,
+                at_or_over_sms_cap=sms_count >= sms_cap,
             )
-            if total >= cap:
+            if sms_count >= sms_cap:
                 deps.audit_log(
                     "usage",
                     "overage_exceeded",
                     client_id=tenant["client_id"],
-                    details={"month": month, "total": total, "cap": cap},
+                    details={"month": month, "channel": "sms", "sms_count": sms_count, "cap": sms_cap},
+                    request=request,
+                )
+                deps.maybe_alert_usage_cap(
+                    client_id=tenant["client_id"],
+                    month=month,
+                    channel="sms",
+                    voice_minutes=voice_minutes,
+                    voice_cap=limits.get("minutes_cap", 999999),
+                    sms_count=sms_count,
+                    sms_cap=sms_cap,
                     request=request,
                 )
         apt = None

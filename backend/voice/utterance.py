@@ -8,12 +8,18 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 from urllib.parse import quote
 
+import runtime  # the live call-session store singleton lives here (not on main)
 from observability import voice_call_phase, voice_debug, voice_forward, voice_info, voice_warning
 from voice.call_session_store import UtteranceLockError
 from voice.stt_runtime import deepgram_stt_active
 from voice.twiml_stt import empty_retry_twiml
 
 _log = logging.getLogger("nuvatra")
+
+# Hard ceilings for a single call so a runaway/abusive/looping caller can't run up
+# unbounded OpenAI + Twilio cost. These bound one call; account-level usage is alert-only.
+MAX_CALL_SECONDS = 600  # ~10 minutes of wall-clock
+MAX_USER_TURNS = 25     # caller speaking turns
 
 
 @dataclass
@@ -45,7 +51,7 @@ async def apply_caller_utterance(
     )
 
     try:
-        async with m.call_store.utterance_lock(call_sid):
+        async with runtime.call_store.utterance_lock(call_sid):
             return await _apply_caller_utterance_locked(
                 call_sid, speech_result, confidence, base_url
             )
@@ -77,7 +83,7 @@ async def _apply_caller_utterance_locked(
     """Process utterance while holding the per-call lock."""
     import main as m
 
-    if not call_sid or not m.call_store.exists(call_sid):
+    if not call_sid or not runtime.call_store.exists(call_sid):
         forwarding_phone = m.get_business_info().get("forwarding_phone")
         if forwarding_phone:
             voice_forward(
@@ -127,7 +133,44 @@ async def _apply_caller_utterance_locked(
         m._persist_call_session(call_sid, call_data)
         return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
 
-    current_detected_lang = m.detect_language(speech_result)
+    # Per-call hard ceiling: a real (non-empty) utterance counts as a turn. If the call
+    # has run too long or taken too many turns, wrap up gracefully and hang up rather than
+    # letting cost accrue unbounded.
+    call_data["turn_count"] = int(call_data.get("turn_count") or 0) + 1
+    started_epoch = call_data.get("started_at_epoch")
+    elapsed = (time.time() - started_epoch) if isinstance(started_epoch, (int, float)) else 0.0
+    if call_data["turn_count"] > MAX_USER_TURNS or elapsed > MAX_CALL_SECONDS:
+        voice_warning(
+            "utterance_call_limit_reached",
+            call_sid=call_sid,
+            turn_count=call_data["turn_count"],
+            elapsed_sec=int(elapsed),
+        )
+        wrap_twiml = m.VoiceResponse()
+        forwarding_phone = m.get_business_info().get("forwarding_phone")
+        if forwarding_phone:
+            wrap_twiml.say(
+                "Let me connect you with someone who can finish helping you. One moment.",
+                voice="alice",
+            )
+            wrap_twiml.dial(forwarding_phone)
+        else:
+            wrap_twiml.say(
+                "Thanks for calling. I've noted everything we discussed and someone will follow up. Goodbye.",
+                voice="alice",
+            )
+            wrap_twiml.hangup()
+        m._persist_call_session(call_sid, call_data)
+        return UtteranceResult(mode="replace_call_twiml", replacement_twiml=str(wrap_twiml))
+
+    # Plainly-Latin speech is always treated as English downstream (see the force-English
+    # branch below), so skip the per-turn language-detection GPT call for it — that's the
+    # common case, and it removes a full blocking round-trip of dead air before every reply.
+    # Non-Latin transcripts still go through detection so the record/translate path can fire.
+    if m._text_looks_latin(speech_result):
+        current_detected_lang = "English"
+    else:
+        current_detected_lang = m.detect_language(speech_result)
     confidence_float = float(confidence) if confidence else 0.0
     previous_lang = call_data.get("detected_language")
     is_first_input = previous_lang is None

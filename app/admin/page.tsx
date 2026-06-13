@@ -26,6 +26,7 @@ interface Tenant {
   trial_ends_at?: string | null
   subscription_status?: string | null
   billing_exempt_until?: string | null
+  account_paused?: boolean
   business_vertical?: string | null
   owner_email?: string | null
   pending_invite_email?: string | null
@@ -220,6 +221,7 @@ export default function AdminPage() {
   const [submitting, setSubmitting] = useState(false)
   const [success, setSuccess] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [pausing, setPausing] = useState<string | null>(null)
   const [form, setForm] = useState({
     client_id: '',
     name: '',
@@ -450,6 +452,30 @@ export default function AdminPage() {
       setError(err.response?.data?.detail || 'Failed to remove tenant')
     } finally {
       setDeleting(null)
+    }
+  }
+
+  const handleTogglePause = async (tenant: Tenant) => {
+    const next = !tenant.account_paused
+    if (
+      next &&
+      !confirm(
+        `Pause "${tenant.name}"? Their AI phone line and SMS will immediately stop answering until you resume.`,
+      )
+    )
+      return
+    setPausing(tenant.id)
+    setError(null)
+    setSuccess(null)
+    try {
+      await api.patch(`/api/admin/tenants/${tenant.id}/account-paused`, { paused: next }, adminApi)
+      setSuccess(next ? `"${tenant.name}" paused.` : `"${tenant.name}" resumed.`)
+      fetchTenants()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      setError(err.response?.data?.detail || 'Failed to update pause state')
+    } finally {
+      setPausing(null)
     }
   }
 
@@ -952,6 +978,11 @@ export default function AdminPage() {
                           {t.subscription_status && (
                             <span className="text-xs text-zinc-500">status: {t.subscription_status}</span>
                           )}
+                          {t.account_paused && (
+                            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                              Paused
+                            </span>
+                          )}
                         </div>
                         <div className="mt-3 flex max-w-xl flex-wrap items-end gap-2">
                           <div className="min-w-[200px] flex-1">
@@ -1079,6 +1110,22 @@ export default function AdminPage() {
                             {exempting === t.id ? 'Applying…' : 'Apply'}
                           </button>
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => handleTogglePause(t)}
+                          disabled={pausing === t.id}
+                          className={`rounded-lg border px-3 py-1.5 text-sm motion-safe-transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                            t.account_paused
+                              ? 'border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10'
+                              : 'border-amber-500/40 text-amber-300 hover:bg-amber-500/10'
+                          }`}
+                        >
+                          {pausing === t.id
+                            ? 'Saving…'
+                            : t.account_paused
+                              ? 'Resume'
+                              : 'Pause'}
+                        </button>
                         <button
                           type="button"
                           onClick={() => handleDelete(t)}

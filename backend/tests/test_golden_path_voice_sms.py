@@ -13,6 +13,11 @@ import sms_service
 
 def test_generate_response_async_links_sms_session_on_booking(monkeypatch):
     """Happy path: BOOKING line creates appointment and links SMS session."""
+    from datetime import timedelta
+    import business_hours
+
+    # Future date so booking validation (which now rejects past dates) accepts it.
+    future_date = (business_hours.business_local_now({}) + timedelta(days=5)).date().isoformat()
     linked = []
     monkeypatch.setattr("runtime.USE_DB", True)
     monkeypatch.setattr(config_service, "staff_roster_ready_for_booking", lambda info=None: True)
@@ -22,7 +27,7 @@ def test_generate_response_async_links_sms_session_on_booking(monkeypatch):
         lambda booking, client_id_override=None, reserve_slot_immediately=True, **kwargs: {
             "id": 99,
             "name": "Alex",
-            "date": "2026-06-10",
+            "date": future_date,
             "time": "15:00",
             "phone": "+15551234567",
             "status": "pending_customer",
@@ -39,7 +44,7 @@ def test_generate_response_async_links_sms_session_on_booking(monkeypatch):
         choices=[
             MagicMock(
                 message=MagicMock(
-                    content="BOOKING: Alex|+15551234567||2026-06-10|15:00|Haircut|"
+                    content=f"BOOKING: Alex|+15551234567||{future_date}|15:00|Haircut|"
                 )
             )
         ]

@@ -358,9 +358,12 @@ def build_system_prompt(
                 "Never say a slot or day is 'taken', 'not available', or 'fully booked'—every time the caller "
                 "asks for is available. Offer to book their requested time."
             )
-        today_utc = datetime.now(timezone.utc).date()
-        today_str = today_utc.isoformat()
-        tomorrow_str = (today_utc + timedelta(days=1)).isoformat()
+        # Business-local "today" so the AI's date math matches the caller's day, not UTC.
+        from business_hours import business_local_now
+
+        today_local = business_local_now(business_info).date()
+        today_str = today_local.isoformat()
+        tomorrow_str = (today_local + timedelta(days=1)).isoformat()
         staff_booking_rules = ""
         if multi_staff:
             staff_booking_rules = (

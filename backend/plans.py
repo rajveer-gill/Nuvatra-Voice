@@ -77,5 +77,8 @@ def get_plan_limits(tenant: Optional[dict]) -> dict:
         "has_export": PLAN_HAS_EXPORT.get(effective, False),
         "has_call_recording": PLAN_HAS_CALL_RECORDING.get(effective, False),
         "conversational_sms_sessions_cap": PLAN_CONVERSATIONAL_SMS_SESSIONS.get(effective, 100),
+        # SMS cap reuses the conversational-SMS-session quota (same metered unit as
+        # tenant_usage.sms_count); exposed under a dedicated key for usage gating/billing.
+        "sms_cap": PLAN_CONVERSATIONAL_SMS_SESSIONS.get(effective, 100),
         "is_trial": _is_trial_active(tenant),
     }

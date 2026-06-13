@@ -47,6 +47,7 @@ from booking_fields import (
 )
 from business_hours import (
     after_hours_prompt_block,
+    business_local_now,
     is_past_closing_for_date,
     same_day_after_hours_message,
 )
@@ -376,7 +377,9 @@ def _extract_booking_line_from_conversation(
 ) -> Optional[dict]:
     """Second GPT pass: emit BOOKING: line only from agreed transcript details."""
     biz = config_service.get_business_info()
-    today = datetime.now(timezone.utc).date()
+    # Use business-local "today" so date math matches the caller's day, not UTC's
+    # (which is already tomorrow on the US west coast after ~5pm).
+    today = business_local_now(biz).date()
     today_str = today.isoformat()
     tomorrow_str = (today + timedelta(days=1)).isoformat()
     staff_names = [
@@ -846,7 +849,10 @@ async def generate_response_async(
                 ),
             }
         ]
-        messages.extend(call_data["conversation_history"])
+        # Cap history sent to GPT to the recent tail — long calls would otherwise grow
+        # the prompt (and token cost) unbounded turn over turn. The system prompt above
+        # carries the durable context (business info, booked slots, caller memory).
+        messages.extend(call_data["conversation_history"][-16:])
         nudge = _voice_booking_nudge_message(call_data["conversation_history"])
         if nudge:
             messages.append({"role": "system", "content": nudge})
