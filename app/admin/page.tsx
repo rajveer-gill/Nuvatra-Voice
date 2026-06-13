@@ -20,7 +20,7 @@ interface Tenant {
   id: string
   client_id: string
   name: string
-  twilio_phone_number: string
+  twilio_phone_number: string | null
   plan: string
   created_at: string | null
   trial_ends_at?: string | null
@@ -83,16 +83,17 @@ function fullUsE164FromNationalInput(nationalRaw: string): string {
   return US_E164_PREFIX + digitsOnly(nationalRaw).slice(0, 10)
 }
 
-function nationalDigitsForUsTwilioInput(full: string): string {
-  const p = full.trim()
+function nationalDigitsForUsTwilioInput(full: string | null | undefined): string {
+  const p = (full || '').trim()
   if (p.startsWith(US_E164_PREFIX)) return digitsOnly(p.slice(US_E164_PREFIX.length)).slice(0, 10)
   const d = digitsOnly(p)
   if (d.length === 11 && d.startsWith('1')) return d.slice(1, 11)
   return d.slice(0, 10)
 }
 
-function isUsTenantTwilioDraft(raw: string | undefined): boolean {
-  return raw === undefined || raw === '' || raw.startsWith(US_E164_PREFIX)
+function isUsTenantTwilioDraft(raw: string | undefined | null): boolean {
+  // Pending self-serve tenants have a null number until checkout completes — treat as US.
+  return !raw || raw.startsWith(US_E164_PREFIX)
 }
 
 type InviteLinkResult = {
@@ -352,7 +353,7 @@ export default function AdminPage() {
     setTwilioDraft((prev) => {
       const next = { ...prev }
       for (const t of tenants) {
-        if (next[t.id] === undefined) next[t.id] = t.twilio_phone_number
+        if (next[t.id] === undefined) next[t.id] = t.twilio_phone_number || US_E164_PREFIX
       }
       return next
     })
@@ -943,7 +944,7 @@ export default function AdminPage() {
                             </p>
                           )}
                         <div className="mt-1 flex flex-wrap items-center gap-3">
-                          <span className="text-sm text-zinc-400">{t.twilio_phone_number}</span>
+                          <span className="text-sm text-zinc-400">{t.twilio_phone_number || 'No number yet'}</span>
                           <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-300">{t.plan}</span>
                           {t.business_vertical && (
                             <span className="text-xs text-zinc-500">vertical: {t.business_vertical}</span>
