@@ -258,6 +258,17 @@ def _provision_number_for_tenant(tenant: dict, area_code: Optional[str], request
             details={"errors": res.get("errors")},
             request=request,
         )
+        # A paying customer with no phone line is urgent — alert so it can be fixed manually.
+        try:
+            import alerts
+
+            alerts.notify_failure(
+                "provision", "number_purchase_failed", tenant.get("id"),
+                f"Self-serve number provisioning failed for {tenant.get('client_id')}",
+                payload={"errors": res.get("errors")},
+            )
+        except Exception:
+            pass
 
 
 def _release_tenant_twilio_number(tenant: Optional[dict], request: Optional[Request] = None) -> None:
@@ -589,4 +600,12 @@ async def stripe_webhook(request: Request):
                 _process_referral_commission(obj, inv_sub_id, request)
     except Exception as e:
         logger.exception("stripe_webhook handler error event_type=%s: %s", etype, e)
+        # Record + alert: a swallowed Stripe failure can mean a missed cancellation,
+        # un-released number, or unrecorded payout — never let it vanish into logs.
+        try:
+            import alerts
+
+            alerts.notify_failure("stripe", etype, (evt.get("id") if isinstance(evt, dict) else None), str(e))
+        except Exception:
+            pass
     return {"received": True}

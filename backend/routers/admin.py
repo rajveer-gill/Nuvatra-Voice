@@ -57,6 +57,10 @@ class CommissionPaidUpdate(BaseModel):
     paid: bool = True
 
 
+class FailedEventResolveUpdate(BaseModel):
+    resolved: bool = True
+
+
 class AdminCreateTenantRequest(BaseModel):
     client_id: str
     name: str
@@ -940,6 +944,40 @@ def admin_mark_referral_commission_paid(
         details={}, request=request,
     )
     return {"success": True, "paid": True}
+
+
+# --- System health / incidents ---
+
+@router.get("/api/admin/failed-events")
+def admin_list_failed_events(include_resolved: bool = False, _: str = Depends(deps.require_admin)):
+    """List recorded failures (webhook/cron/task) for the System Health panel. Admin only."""
+    if not runtime.USE_DB:
+        return {"events": [], "unresolved_count": 0, "db_enabled": False}
+    return {
+        "events": database.db_failed_events_list(include_resolved=include_resolved),
+        "unresolved_count": database.db_failed_events_unresolved_count(),
+        "db_enabled": True,
+    }
+
+
+@router.patch("/api/admin/failed-events/{event_id}")
+def admin_resolve_failed_event(
+    event_id: int, req: FailedEventResolveUpdate, request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Mark an incident resolved once you've handled it. Admin only."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    if not req.resolved:
+        raise HTTPException(status_code=400, detail="Only resolving is supported")
+    if not database.db_failed_event_resolve(event_id):
+        raise HTTPException(status_code=500, detail="Failed to resolve")
+    deps.audit_log(
+        "admin", "failed_event_resolved", actor_id=admin_user_id,
+        resource_type="failed_event", resource_id=str(event_id),
+        details={}, request=request,
+    )
+    return {"success": True, "resolved": True}
 
 
 @router.post("/api/admin/tenants/{tenant_id}/members")

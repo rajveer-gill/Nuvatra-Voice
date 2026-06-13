@@ -1155,6 +1155,12 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
             request_id=rid,
         )
         logger.exception("SMS webhook error: %s", e)
+        try:
+            import alerts
+
+            alerts.notify_failure("twilio_sms", "inbound_unhandled", rid, str(e), sms=False)
+        except Exception:
+            pass
         return Response(
             content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
             media_type="application/xml",

@@ -77,6 +77,21 @@ services:
       - key: OVERAGE_PRICE_PER_MINUTE
         sync: false
         optional: true
+      - key: OVERAGE_PRICE_PER_SMS
+        sync: false
+        optional: true
+      # Operator alerting (reporting/fallback). Email is the baseline; SMS is for urgent
+      # failures. SMS needs a Twilio number you own as OPERATOR_ALERT_SMS_FROM (or it
+      # falls back to the A2P messaging service).
+      - key: OPERATOR_ALERT_EMAIL
+        sync: false
+        optional: true
+      - key: OPERATOR_ALERT_SMS
+        sync: false
+        optional: true
+      - key: OPERATOR_ALERT_SMS_FROM
+        sync: false
+        optional: true
       - key: RETENTION_DAYS
         sync: false
         optional: true
@@ -164,6 +179,20 @@ services:
     schedule: "15 6 * * *"
     dockerCommand: |
       curl -sf -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${PUBLIC_BASE_URL}/api/cron/export-snapshot"
+    envVars:
+      - key: CRON_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+
+  # Daily heartbeat: emails the operator a status digest each morning and texts on problems.
+  - type: cron
+    name: nuvatra-cron-health-digest
+    env: docker
+    region: virginia
+    schedule: "0 15 * * *"
+    dockerCommand: |
+      curl -sf -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${PUBLIC_BASE_URL}/api/cron/health-digest"
     envVars:
       - key: CRON_SECRET
         sync: false

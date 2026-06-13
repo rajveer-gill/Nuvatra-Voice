@@ -595,6 +595,16 @@ async def handle_incoming_call(request: Request):
                 "or ensure the reverse proxy forwards Host and X-Forwarded-Proto."
             )
             voice_info("incoming_call_missing_public_base_url", call_sid=call_sid)
+            # This breaks EVERY call, not just one — alert (throttled) so it's caught fast.
+            try:
+                import alerts
+
+                alerts.notify_failure(
+                    "twilio_voice", "missing_public_base_url", call_sid,
+                    "Inbound call could not be served — PUBLIC_BASE_URL is not configured.",
+                )
+            except Exception:
+                pass
             fail_twiml = VoiceResponse()
             fail_twiml.say(
                 "Sorry, this phone line is not fully configured yet. Please try again later.",

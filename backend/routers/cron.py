@@ -283,3 +283,96 @@ def cron_export_snapshot(request: Request):
     out = {"ok": True, "exported": True, **result}
     database.db_cron_run_finish(run_id, "success", out)
     return out
+
+
+def _stale_daily_crons() -> List[str]:
+    """Daily cron jobs with no successful run in the last 36 hours."""
+    last_success = database.db_cron_runs_last_success()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=36)
+    stale: List[str] = []
+    for job in database.DAILY_CRON_JOBS:
+        ts = last_success.get(job)
+        if not ts:
+            stale.append(job)
+            continue
+        try:
+            finished = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if finished.tzinfo is None:
+                finished = finished.replace(tzinfo=timezone.utc)
+            if finished < cutoff:
+                stale.append(job)
+        except Exception:
+            stale.append(job)
+    return stale
+
+
+@router.post("/api/cron/health-digest")
+def cron_health_digest(request: Request):
+    """Daily heartbeat: email the operator a status digest every morning, and escalate by
+    SMS if anything is actually wrong (stale crons, unresolved incidents, DB down)."""
+    if not _verify_cron_secret(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    run_id = database.db_cron_run_start("health-digest") if runtime.USE_DB else None
+    if not runtime.USE_DB:
+        return {"ok": True, "sent": False}
+    try:
+        db_ok = database.db_ping()
+        stale = _stale_daily_crons() if db_ok else []
+        failed_open = database.db_failed_events_unresolved_count() if db_ok else 0
+        tenants = database.db_tenant_list_all() if db_ok else []
+        past_due = [t for t in tenants if (t.get("subscription_status") == "past_due")]
+        paused = [t for t in tenants if t.get("account_paused")]
+        unpaid = database.db_referral_commissions_list_all(include_paid=False) if db_ok else []
+        unpaid_total = sum(c["amount_cents"] for c in unpaid)
+
+        problems = []
+        if not db_ok:
+            problems.append("Database is unreachable")
+        if stale:
+            problems.append(f"Stale cron jobs: {', '.join(stale)}")
+        if failed_open:
+            problems.append(f"{failed_open} unresolved incident(s) in the failed-events log")
+
+        lines = [
+            f"Database: {'OK' if db_ok else 'UNREACHABLE'}",
+            f"Cron jobs: {'all healthy' if not stale else 'STALE: ' + ', '.join(stale)}",
+            f"Unresolved incidents: {failed_open}",
+            f"Active tenants: {len(tenants)}",
+            f"Past-due tenants: {len(past_due)}",
+            f"Paused tenants: {len(paused)}",
+            f"Unpaid referral payouts: {len(unpaid)} (${unpaid_total / 100:.2f})",
+        ]
+        body = "\n".join(lines)
+        healthy = not problems
+        subject = "Daily health digest — all systems healthy" if healthy else f"Daily health digest — {len(problems)} issue(s)"
+
+        # Always email the heartbeat; escalate by SMS only when something is wrong.
+        try:
+            import email_notify
+
+            html = f"<p><strong>{subject}</strong></p><pre>{body}</pre>"
+            if problems:
+                html += "<p><strong>Needs attention:</strong></p><ul>" + "".join(f"<li>{p}</li>" for p in problems) + "</ul>"
+            email_notify.send_operator_alert(f"[Call Surge] {subject}", html, body + ("\n\nNeeds attention:\n- " + "\n- ".join(problems) if problems else ""))
+        except Exception as e:
+            logger.warning("health_digest_email_failed: %s", e)
+        if problems:
+            try:
+                import alerts
+
+                alerts.report_critical(
+                    "health_digest_problems",
+                    f"{len(problems)} system issue(s) need attention",
+                    "; ".join(problems),
+                )
+            except Exception:
+                pass
+
+        out = {"ok": True, "sent": True, "healthy": healthy, "problems": problems}
+        database.db_cron_run_finish(run_id, "success", out)
+        return out
+    except Exception as e:
+        logger.exception("health_digest_failed: %s", e)
+        out = {"ok": False, "error": str(e)[:200]}
+        database.db_cron_run_finish(run_id, "error", out)
+        return out

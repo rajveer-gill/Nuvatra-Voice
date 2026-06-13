@@ -639,6 +639,22 @@ def init_db() -> bool:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_commissions_unpaid ON referral_commissions(paid)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_commissions_redemption ON referral_commissions(redemption_id)")
+        # Dead-letter / incident log: swallowed failures (webhooks, crons, tasks) land here
+        # so they're visible + retryable instead of disappearing into logs.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS failed_events (
+                id BIGSERIAL PRIMARY KEY,
+                source TEXT NOT NULL,
+                event_type TEXT,
+                ref TEXT,
+                error TEXT,
+                payload JSONB,
+                resolved BOOLEAN NOT NULL DEFAULT FALSE,
+                resolved_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_failed_events_unresolved ON failed_events(resolved, created_at DESC)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cron_runs (
                 id SERIAL PRIMARY KEY,
@@ -3344,6 +3360,86 @@ def db_referral_commission_mark_paid(commission_id: int) -> bool:
         return True
     except Exception as e:
         print(f"[DB] Failed to mark commission paid: {e}")
+        return False
+
+# --- Failed-event / incident log ---
+
+def db_failed_event_insert(source: str, event_type: Optional[str], ref: Optional[str],
+                           error: Optional[str], payload: Optional[dict] = None) -> Optional[int]:
+    """Record a swallowed failure (webhook/cron/task) for visibility + manual retry."""
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        payload_json = json.dumps(payload) if payload is not None else None
+        cur.execute(
+            """INSERT INTO failed_events (source, event_type, ref, error, payload)
+               VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+            (source, event_type, ref, (error or "")[:2000], payload_json),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] Failed to insert failed_event: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def db_failed_events_list(include_resolved: bool = False, limit: int = 100) -> List[dict]:
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    sql = "SELECT id, source, event_type, ref, error, resolved, resolved_at, created_at FROM failed_events"
+    if not include_resolved:
+        sql += " WHERE resolved = FALSE"
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    cur.execute(sql, (limit,))
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {
+            "id": r[0], "source": r[1], "event_type": r[2], "ref": r[3],
+            "error": r[4], "resolved": bool(r[5]),
+            "resolved_at": r[6].isoformat() if r[6] else None,
+            "created_at": r[7].isoformat() if r[7] else None,
+        }
+        for r in rows
+    ]
+
+
+def db_failed_events_unresolved_count() -> int:
+    conn = _get_conn()
+    if not conn:
+        return 0
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM failed_events WHERE resolved = FALSE")
+    row = cur.fetchone()
+    cur.close()
+    return int(row[0]) if row else 0
+
+
+def db_failed_event_resolve(event_id: int) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE failed_events SET resolved = TRUE, resolved_at = NOW() WHERE id = %s AND resolved = FALSE",
+            (event_id,),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to resolve failed_event: {e}")
         return False
 
 # --- Call log ---

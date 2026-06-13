@@ -10,6 +10,7 @@ import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
 import { ReferralsPanel } from '@/components/admin/ReferralsPanel'
+import { SystemHealthPanel } from '@/components/admin/SystemHealthPanel'
 import { AuditLog } from '@/components/admin/AuditLog'
 import { FleetHealthSummary } from '@/components/admin/FleetHealthSummary'
 import { CollapsibleSection } from '@/components/ui/CollapsibleSection'
@@ -760,6 +761,8 @@ export default function AdminPage() {
               Redis security checklist: <code className="text-zinc-400">docs/REDIS-SECURITY.md</code> in the repo.
             </p>
           </CollapsibleSection>
+
+          <SystemHealthPanel />
 
           <ProvisioningPanel />
 

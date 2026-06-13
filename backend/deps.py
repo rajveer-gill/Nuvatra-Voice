@@ -99,8 +99,14 @@ def create_tracked_task(coro: Any, *, name: str) -> "asyncio.Task":
             _ = t.result()
         except asyncio.CancelledError:
             logger.info("background_task_cancelled name=%s", name)
-        except Exception:
+        except Exception as e:
             logger.exception("background_task_failed name=%s", name)
+            try:
+                import alerts
+
+                alerts.notify_failure("task", name, None, str(e), sms=False)
+            except Exception:
+                pass
 
     task.add_done_callback(_done)
     return task
