@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -77,6 +77,9 @@ class CreateCheckoutSessionRequest(BaseModel):
     plan: Literal["starter", "growth", "pro"]
     # Self-serve signup: preferred area code for the number provisioned after checkout.
     area_code: Optional[str] = None
+    # Optional referral code; validated server-side in the webhook (free month is granted
+    # only after the card/email anti-abuse check passes).
+    referral_code: Optional[str] = None
 
 
 @router.post("/api/create-checkout-session")
@@ -125,8 +128,13 @@ def create_checkout_session(
     # A tenant with no number yet is a fresh self-serve signup — give it the card-on-file
     # free trial; existing tenants upgrading from trial get charged normally.
     needs_trial = not (tenant.get("twilio_phone_number") or "").strip()
-    subscription_data: dict = {"metadata": {"tenant_id": str(tenant_id), "plan": req.plan}}
+    ref_code = (req.referral_code or "").strip().upper()
+    subscription_data: dict = {
+        "metadata": {"tenant_id": str(tenant_id), "plan": req.plan, "referral_code": ref_code}
+    }
     if needs_trial:
+        # Normal 7-day trial here; a valid referral extends it to a free month in the
+        # webhook, AFTER the card/email anti-abuse check.
         subscription_data["trial_period_days"] = 7
     try:
         session = stripe.checkout.Session.create(
@@ -139,12 +147,26 @@ def create_checkout_session(
                 "tenant_id": str(tenant_id),
                 "plan": req.plan,
                 "area_code": (req.area_code or "").strip(),
+                "referral_code": ref_code,
             },
             subscription_data=subscription_data,
         )
         return {"url": session.url}
     except Exception as e:
         raise deps._server_error("Stripe checkout session failed", e)
+
+
+@router.get("/api/referral/validate")
+def validate_referral_code(code: str, tenant: Optional[dict] = Depends(deps.require_tenant)):
+    """Tenant-auth check so the signup page can confirm a code before checkout. Returns the
+    MINIMUM (valid + referrer first name) — never the referrer's contact or payout terms."""
+    if not runtime.USE_DB:
+        return {"valid": False}
+    rc = database.db_referral_code_get_by_code(code, active_only=True)
+    if not rc:
+        return {"valid": False}
+    first_name = (rc.get("referrer_name") or "").strip().split(" ")[0]
+    return {"valid": True, "referrer_first_name": first_name}
 
 
 @router.post("/api/create-portal-session")
@@ -279,6 +301,151 @@ def _release_tenant_twilio_number(tenant: Optional[dict], request: Optional[Requ
         logger.exception("twilio_release_unexpected tenant=%s: %s", tenant.get("id"), e)
 
 
+def _referral_card_fingerprint_and_email(session_obj: dict, sub_id, customer_id):
+    """Best-effort: return (card_fingerprint, email, subscription_obj). Null-safe."""
+    fp = None
+    email = None
+    sub_obj = None
+    try:
+        cd = session_obj.get("customer_details") or {}
+        email = (cd.get("email") or "").strip() or None
+    except Exception:
+        pass
+    try:
+        if sub_id:
+            sub_obj = stripe.Subscription.retrieve(sub_id, expand=["default_payment_method"])
+            pm = getattr(sub_obj, "default_payment_method", None)
+            card = getattr(pm, "card", None) if pm else None
+            fp = getattr(card, "fingerprint", None) if card else None
+        if not fp and customer_id:
+            pms = stripe.PaymentMethod.list(customer=customer_id, type="card")
+            data = getattr(pms, "data", None) or []
+            if data:
+                card = getattr(data[0], "card", None)
+                fp = getattr(card, "fingerprint", None) if card else None
+        if not email and customer_id:
+            cust = stripe.Customer.retrieve(customer_id)
+            email = (getattr(cust, "email", None) or "").strip() or None
+    except Exception as e:
+        logger.warning("referral_fingerprint_lookup_failed sub=%s: %s", sub_id, e)
+    return fp, email, sub_obj
+
+
+def _process_referral_on_checkout(session_obj, meta, tenant_id, sub_id, customer_id, plan, request):
+    """Record the signup's card/email (global anti-abuse ledger) and, if a valid referral
+    code was used, grant the free month or flag the redemption. Best-effort; never raises."""
+    try:
+        fp, email, sub_obj = _referral_card_fingerprint_and_email(session_obj, sub_id, customer_id)
+        # Always record the signup fingerprint/email so future signups can be deduped.
+        try:
+            database.db_signup_payment_method_record(tenant_id, fp, email)
+        except Exception:
+            pass
+
+        code = (meta.get("referral_code") or "").strip().upper()
+        if not code:
+            return
+        rc = database.db_referral_code_get_by_code(code, active_only=True)
+        if not rc:
+            deps.audit_log(
+                "stripe", "referral_code_invalid", resource_type="tenant",
+                resource_id=tenant_id, details={"code": code}, request=request,
+            )
+            return
+        red_id = database.db_referral_redemption_create(
+            tenant_id, rc["id"], code, rc["referrer_name"], plan, sub_id
+        )
+        if not red_id:
+            return
+        database.db_referral_redemption_update(red_id, card_fingerprint=fp, signup_email=email)
+
+        # Anti-abuse: a card or email already used by a DIFFERENT prior signup blocks the
+        # free month (exclude our own just-recorded row via exclude_tenant_id).
+        dup_card = bool(fp) and database.db_signup_fingerprint_seen(fp, exclude_tenant_id=tenant_id)
+        dup_email = bool(email) and database.db_signup_email_seen(email, exclude_tenant_id=tenant_id)
+        if dup_card or dup_email:
+            reason = "duplicate_card" if dup_card else "duplicate_email"
+            database.db_referral_redemption_update(red_id, status="flagged", flagged_reason=reason, free_month_granted=False)
+            deps.audit_log(
+                "stripe", "referral_redemption_flagged", resource_type="tenant",
+                resource_id=tenant_id, details={"code": code, "reason": reason}, request=request,
+            )
+            return
+
+        # Grant the free month by extending the Stripe trial to ~30 days from start, so
+        # the customer is genuinely not charged. Anchored off the subscription start.
+        from plans import REFERRAL_FREE_MONTH_DAYS
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        started = int(getattr(sub_obj, "created", 0) or now_ts) if sub_obj else now_ts
+        trial_end = max(started, now_ts) + REFERRAL_FREE_MONTH_DAYS * 86400
+        if trial_end <= now_ts + 60:
+            trial_end = now_ts + REFERRAL_FREE_MONTH_DAYS * 86400
+        stripe.Subscription.modify(sub_id, trial_end=trial_end, proration_behavior="none")
+        database.db_referral_redemption_update(red_id, status="granted", free_month_granted=True)
+        deps.audit_log(
+            "stripe", "referral_free_month_granted", resource_type="tenant",
+            resource_id=tenant_id, details={"code": code, "days": REFERRAL_FREE_MONTH_DAYS}, request=request,
+        )
+    except Exception as e:
+        logger.exception("referral_checkout_processing_failed tenant=%s: %s", tenant_id, e)
+
+
+def _process_referral_commission(invoice_obj, sub_id, request):
+    """On a real paid invoice for a referred subscription, create the $200 signup bounty
+    (once, on the first paid charge) and a 25%-of-plan-price commission for the month
+    (capped at 12 months / 1 year). Idempotent via DB unique constraints. Never raises."""
+    try:
+        from plans import REFERRAL_SIGNUP_BOUNTY_CENTS, REFERRAL_MRR_MONTHS_CAP, referral_mrr_commission_cents
+
+        red = database.db_referral_redemption_get_by_subscription(sub_id)
+        if not red or red.get("status") not in ("granted", "converted"):
+            return  # no redemption, or flagged → never earns a payout
+        red_id = red["id"]
+        # Use the tenant's CURRENT plan so upgrades/downgrades follow the price.
+        tenant = database.db_tenant_get_by_id(red["tenant_id"]) if red.get("tenant_id") else None
+        plan = (tenant or {}).get("plan") or red.get("plan_at_signup") or "starter"
+        invoice_id = invoice_obj.get("id") or "unknown"
+        now = datetime.now(timezone.utc)
+
+        first_paid_dt = None
+        if red.get("first_paid_at"):
+            try:
+                first_paid_dt = datetime.fromisoformat(red["first_paid_at"].replace("Z", "+00:00"))
+            except Exception:
+                first_paid_dt = None
+
+        # First paid charge → set converted + create the $200 signup bounty (idempotent).
+        if not first_paid_dt:
+            database.db_referral_redemption_update(red_id, status="converted", first_paid_at=now)
+            first_paid_dt = now
+            database.db_referral_commission_insert(
+                red_id, "signup_bounty", "signup", REFERRAL_SIGNUP_BOUNTY_CENTS,
+                plan, red["code_snapshot"], red["referrer_name_snapshot"],
+            )
+            deps.audit_log(
+                "stripe", "referral_bounty_earned", resource_type="tenant",
+                resource_id=red.get("tenant_id"), details={"amount_cents": REFERRAL_SIGNUP_BOUNTY_CENTS}, request=request,
+            )
+
+        # Recurring 25% MRR for this paid month — capped at 12 entries / within 1 year.
+        if first_paid_dt and now > first_paid_dt + timedelta(days=365):
+            return
+        if database.db_referral_commission_count_mrr(red_id) >= REFERRAL_MRR_MONTHS_CAP:
+            return
+        amount = referral_mrr_commission_cents(plan)
+        inserted = database.db_referral_commission_insert(
+            red_id, "mrr", invoice_id, amount, plan, red["code_snapshot"], red["referrer_name_snapshot"],
+        )
+        if inserted:
+            deps.audit_log(
+                "stripe", "referral_mrr_earned", resource_type="tenant",
+                resource_id=red.get("tenant_id"), details={"amount_cents": amount, "invoice": invoice_id}, request=request,
+            )
+    except Exception as e:
+        logger.exception("referral_commission_processing_failed sub=%s: %s", sub_id, e)
+
+
 @router.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhooks: subscription and payment events. Raw body required for signature verification."""
@@ -337,6 +504,12 @@ async def stripe_webhook(request: Request):
                     _provision_number_for_tenant(
                         tenant, area_code=(meta.get("area_code") or "").strip() or None, request=request
                     )
+                # Referral: record the signup's card/email and (if a valid code) grant the
+                # free month or flag for abuse. Runs after provisioning so a Stripe call
+                # here can never delay number setup. Best-effort; never breaks the webhook.
+                _process_referral_on_checkout(
+                    obj, meta, tenant_id, sub_id, customer_id, plan, request
+                )
         elif etype == "customer.subscription.updated":
             sub_id = obj.get("id")
             meta = obj.get("metadata") or {}
@@ -408,6 +581,12 @@ async def stripe_webhook(request: Request):
                         details={"subscription_id": sub_id},
                         request=request,
                     )
+        elif etype == "invoice.payment_succeeded":
+            # A real (non-trial) payment cleared → referral commission(s) may be due.
+            amount_paid = obj.get("amount_paid") or 0
+            inv_sub_id = obj.get("subscription")
+            if amount_paid > 0 and inv_sub_id:
+                _process_referral_commission(obj, inv_sub_id, request)
     except Exception as e:
         logger.exception("stripe_webhook handler error event_type=%s: %s", etype, e)
     return {"received": True}

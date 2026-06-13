@@ -9,6 +9,7 @@ import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
+import { ReferralsPanel } from '@/components/admin/ReferralsPanel'
 import { AuditLog } from '@/components/admin/AuditLog'
 import { FleetHealthSummary } from '@/components/admin/FleetHealthSummary'
 import { CollapsibleSection } from '@/components/ui/CollapsibleSection'
@@ -761,6 +762,8 @@ export default function AdminPage() {
           </CollapsibleSection>
 
           <ProvisioningPanel />
+
+          <ReferralsPanel />
 
           <AuditLog />
 

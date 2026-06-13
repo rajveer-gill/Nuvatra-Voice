@@ -9,6 +9,7 @@ module-qualified so monkeypatches target the owning module.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -40,6 +41,20 @@ class BillingExemptUpdate(BaseModel):
 
 class AccountPausedUpdate(BaseModel):
     paused: bool
+
+
+class ReferralCodeCreate(BaseModel):
+    code: str = Field(..., min_length=2, max_length=40)
+    referrer_name: str = Field(..., min_length=1, max_length=200)
+    referrer_contact: Optional[str] = Field(default=None, max_length=200)
+
+
+class ReferralCodeActiveUpdate(BaseModel):
+    active: bool
+
+
+class CommissionPaidUpdate(BaseModel):
+    paid: bool = True
 
 
 class AdminCreateTenantRequest(BaseModel):
@@ -838,6 +853,93 @@ def admin_tenant_account_paused(
         request=request,
     )
     return {"success": True, "account_paused": bool(req.paused)}
+
+
+# --- Referral program ---
+
+@router.post("/api/admin/referral-codes")
+def admin_create_referral_code(
+    req: ReferralCodeCreate, request: Request, admin_user_id: str = Depends(deps.require_admin)
+):
+    """Create a shareable referral code tied to a referrer. Admin only."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    code = (req.code or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9-]{2,40}", code):
+        raise HTTPException(status_code=400, detail="Code must be 2–40 letters, numbers, or hyphens")
+    code_id = database.db_referral_code_create(
+        code, req.referrer_name.strip(), (req.referrer_contact or "").strip() or None, admin_user_id
+    )
+    if not code_id:
+        raise HTTPException(status_code=409, detail="That code already exists")
+    deps.audit_log(
+        "admin", "referral_code_created", actor_id=admin_user_id,
+        resource_type="referral_code", resource_id=str(code_id),
+        details={"code": code, "referrer_name": req.referrer_name.strip()}, request=request,
+    )
+    return {"success": True, "id": code_id, "code": code}
+
+
+@router.get("/api/admin/referral-codes")
+def admin_list_referral_codes(_: str = Depends(deps.require_admin)):
+    """List referral codes with signup/conversion counts. Admin only."""
+    if not runtime.USE_DB:
+        return {"codes": [], "db_enabled": False}
+    return {"codes": database.db_referral_codes_list_with_counts(), "db_enabled": True}
+
+
+@router.patch("/api/admin/referral-codes/{code_id}")
+def admin_update_referral_code(
+    code_id: int, req: ReferralCodeActiveUpdate, request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Activate/deactivate a referral code. Admin only."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    if not database.db_referral_code_set_active(code_id, req.active):
+        raise HTTPException(status_code=404, detail="Code not found")
+    deps.audit_log(
+        "admin", "referral_code_updated", actor_id=admin_user_id,
+        resource_type="referral_code", resource_id=str(code_id),
+        details={"active": bool(req.active)}, request=request,
+    )
+    return {"success": True, "active": bool(req.active)}
+
+
+@router.get("/api/admin/referral-commissions")
+def admin_list_referral_commissions(_: str = Depends(deps.require_admin)):
+    """List referral payout line items + totals. Admin only."""
+    if not runtime.USE_DB:
+        return {"commissions": [], "unpaid_total_cents": 0, "paid_total_cents": 0, "db_enabled": False}
+    items = database.db_referral_commissions_list_all(include_paid=True)
+    unpaid = sum(c["amount_cents"] for c in items if not c["paid"])
+    paid = sum(c["amount_cents"] for c in items if c["paid"])
+    return {
+        "commissions": items,
+        "unpaid_total_cents": unpaid,
+        "paid_total_cents": paid,
+        "db_enabled": True,
+    }
+
+
+@router.patch("/api/admin/referral-commissions/{commission_id}")
+def admin_mark_referral_commission_paid(
+    commission_id: int, req: CommissionPaidUpdate, request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Mark a referral payout line item as paid (record-keeping only — sends no money)."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    if not req.paid:
+        raise HTTPException(status_code=400, detail="Only marking paid is supported")
+    if not database.db_referral_commission_mark_paid(commission_id):
+        raise HTTPException(status_code=500, detail="Failed to mark paid")
+    deps.audit_log(
+        "admin", "referral_commission_paid", actor_id=admin_user_id,
+        resource_type="referral_commission", resource_id=str(commission_id),
+        details={}, request=request,
+    )
+    return {"success": True, "paid": True}
 
 
 @router.post("/api/admin/tenants/{tenant_id}/members")

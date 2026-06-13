@@ -74,6 +74,9 @@ export default function CreateBusinessPage() {
   const [checking, setChecking] = useState(true)
   const [playingVoice, setPlayingVoice] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [referralCode, setReferralCode] = useState('')
+  const [referralState, setReferralState] = useState<'idle' | 'checking' | 'valid' | 'invalid'>('idle')
+  const [referrerName, setReferrerName] = useState('')
 
   const playSample = (v: string) => {
     try {
@@ -93,6 +96,32 @@ export default function CreateBusinessPage() {
   }
 
   useEffect(() => () => audioRef.current?.pause(), [])
+
+  // Live-validate the referral code (debounced) so the user sees the free month apply.
+  useEffect(() => {
+    const code = referralCode.trim()
+    if (!code) {
+      setReferralState('idle')
+      setReferrerName('')
+      return
+    }
+    setReferralState('checking')
+    const handle = setTimeout(() => {
+      api
+        .get(`/api/referral/validate?code=${encodeURIComponent(code)}`)
+        .then((r) => {
+          if (r?.data?.valid) {
+            setReferralState('valid')
+            setReferrerName(r.data.referrer_first_name || '')
+          } else {
+            setReferralState('invalid')
+            setReferrerName('')
+          }
+        })
+        .catch(() => setReferralState('invalid'))
+    }, 450)
+    return () => clearTimeout(handle)
+  }, [referralCode, api])
 
   // If they already have a live business, skip this and go to the dashboard.
   useEffect(() => {
@@ -115,6 +144,7 @@ export default function CreateBusinessPage() {
       const res = await api.post('/api/create-checkout-session', {
         plan,
         area_code: areaCode.trim() || undefined,
+        referral_code: referralCode.trim() || undefined,
       })
       const url = res?.data?.url
       if (url) {
@@ -271,6 +301,32 @@ export default function CreateBusinessPage() {
               <p className="mt-1 text-xs text-zinc-500">We&rsquo;ll try to get you a number in this area code.</p>
             </div>
 
+            <div>
+              <label className="mb-1 block text-sm font-medium text-zinc-300">
+                Have a referral code? <span className="text-zinc-500">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={referralCode}
+                onChange={(e) => setReferralCode(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 40))}
+                placeholder="e.g. JANE"
+                className="w-48 rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
+              />
+              {referralState === 'valid' && (
+                <p className="mt-1 text-xs font-medium text-emerald-400">
+                  🎉 First month free{referrerName ? ` — referred by ${referrerName}` : ''}!
+                </p>
+              )}
+              {referralState === 'invalid' && referralCode.trim() && (
+                <p className="mt-1 text-xs text-zinc-500">
+                  We don&rsquo;t recognize that code — you&rsquo;ll still get the standard 7-day trial.
+                </p>
+              )}
+              {referralState === 'checking' && (
+                <p className="mt-1 text-xs text-zinc-500">Checking code…</p>
+              )}
+            </div>
+
             <button
               type="submit"
               disabled={submitting || !name.trim()}
@@ -278,7 +334,9 @@ export default function CreateBusinessPage() {
             >
               {submitting ? 'Starting checkout…' : 'Continue to payment'}
             </button>
-            <p className="text-center text-xs text-zinc-500">Free for 7 days · cancel anytime</p>
+            <p className="text-center text-xs text-zinc-500">
+              {referralState === 'valid' ? 'First month free · cancel anytime' : 'Free for 7 days · cancel anytime'}
+            </p>
           </form>
         </div>
       </main>

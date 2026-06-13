@@ -573,6 +573,72 @@ def init_db() -> bool:
             "CREATE INDEX IF NOT EXISTS idx_conv_sms_sessions_client_period "
             "ON conversational_sms_session_keys(client_id, billing_period_key)"
         )
+        # --- Referral program ---
+        # Global anti-abuse ledger: one row per completed signup (referred or not), so a
+        # card/email reused across ANY prior signup can be detected.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS signup_payment_methods (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id TEXT,
+                card_fingerprint TEXT,
+                signup_email TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signup_pm_fingerprint ON signup_payment_methods(card_fingerprint)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signup_pm_email ON signup_payment_methods(signup_email)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS referral_codes (
+                id BIGSERIAL PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                referrer_name TEXT NOT NULL,
+                referrer_contact TEXT,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_by TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_codes_active ON referral_codes(active)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS referral_redemptions (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id TEXT NOT NULL UNIQUE,
+                referral_code_id BIGINT REFERENCES referral_codes(id) ON DELETE SET NULL,
+                code_snapshot TEXT NOT NULL,
+                referrer_name_snapshot TEXT NOT NULL,
+                plan_at_signup TEXT,
+                card_fingerprint TEXT,
+                signup_email TEXT,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','granted','flagged','converted')),
+                free_month_granted BOOLEAN NOT NULL DEFAULT FALSE,
+                flagged_reason TEXT,
+                stripe_subscription_id TEXT,
+                first_paid_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_redemptions_sub ON referral_redemptions(stripe_subscription_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_redemptions_fp ON referral_redemptions(card_fingerprint)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_redemptions_email ON referral_redemptions(signup_email)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS referral_commissions (
+                id BIGSERIAL PRIMARY KEY,
+                redemption_id BIGINT REFERENCES referral_redemptions(id) ON DELETE SET NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('signup_bounty','mrr')),
+                period_key TEXT NOT NULL,
+                amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+                plan_snapshot TEXT,
+                code_snapshot TEXT NOT NULL,
+                referrer_name_snapshot TEXT NOT NULL,
+                paid BOOLEAN NOT NULL DEFAULT FALSE,
+                paid_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (redemption_id, kind, period_key)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_commissions_unpaid ON referral_commissions(paid)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_referral_commissions_redemption ON referral_commissions(redemption_id)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cron_runs (
                 id SERIAL PRIMARY KEY,
@@ -1599,6 +1665,9 @@ _RESET_TABLES = (
     "sms_opt_out", "sms_consent", "sms_automations", "tenant_usage",
     "overage_processed", "conversational_sms_period_usage",
     "conversational_sms_session_keys", "provisioning_jobs", "provisioning_tasks",
+    # Referral signup/payout data is tenant-scoped test data; referral_codes are
+    # operator config and are intentionally NOT reset.
+    "signup_payment_methods", "referral_redemptions", "referral_commissions",
 )
 
 
@@ -2913,6 +2982,368 @@ def db_usage_alert_insert(client_id: str, month: str) -> bool:
         return True
     except Exception as e:
         print(f"[DB] Failed to insert usage_alert_sent: {e}")
+        return False
+
+# --- Referral program ---
+
+def _norm_code(code: Optional[str]) -> str:
+    return (code or "").strip().upper()
+
+
+def _norm_email(email: Optional[str]) -> str:
+    return (email or "").strip().lower()
+
+
+def db_signup_payment_method_record(tenant_id: str, card_fingerprint: Optional[str], signup_email: Optional[str]) -> bool:
+    """Record a completed signup's card fingerprint + email (global anti-abuse ledger)."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    fp = (card_fingerprint or "").strip() or None
+    email = _norm_email(signup_email) or None
+    if not fp and not email:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO signup_payment_methods (tenant_id, card_fingerprint, signup_email) VALUES (%s, %s, %s)",
+            (tenant_id, fp, email),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to record signup payment method: {e}")
+        return False
+
+
+def db_signup_fingerprint_seen(card_fingerprint: Optional[str], exclude_tenant_id: Optional[str] = None) -> bool:
+    """True if this card fingerprint was used by a different prior signup."""
+    fp = (card_fingerprint or "").strip()
+    if not fp:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM signup_payment_methods WHERE card_fingerprint = %s AND (tenant_id IS DISTINCT FROM %s) LIMIT 1",
+        (fp, exclude_tenant_id),
+    )
+    row = cur.fetchone()
+    cur.close()
+    return row is not None
+
+
+def db_signup_email_seen(signup_email: Optional[str], exclude_tenant_id: Optional[str] = None) -> bool:
+    """True if this email was used by a different prior signup."""
+    email = _norm_email(signup_email)
+    if not email:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM signup_payment_methods WHERE signup_email = %s AND (tenant_id IS DISTINCT FROM %s) LIMIT 1",
+        (email, exclude_tenant_id),
+    )
+    row = cur.fetchone()
+    cur.close()
+    return row is not None
+
+
+def db_referral_code_create(code: str, referrer_name: str, referrer_contact: Optional[str], created_by: Optional[str]) -> Optional[int]:
+    """Create a referral code (uppercased). Returns id, or None if it already exists/fails."""
+    c = _norm_code(code)
+    name = (referrer_name or "").strip()
+    if not c or not name:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO referral_codes (code, referrer_name, referrer_contact, created_by)
+               VALUES (%s, %s, %s, %s) ON CONFLICT (code) DO NOTHING RETURNING id""",
+            (c, name, (referrer_contact or "").strip() or None, created_by),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] Failed to create referral code: {e}")
+        return None
+
+
+def db_referral_code_get_by_code(code: str, active_only: bool = True) -> Optional[dict]:
+    """Look up a referral code (case-insensitive). active_only filters to active codes."""
+    c = _norm_code(code)
+    if not c:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    sql = "SELECT id, code, referrer_name, referrer_contact, active, created_at FROM referral_codes WHERE code = %s"
+    if active_only:
+        sql += " AND active = TRUE"
+    cur.execute(sql + " LIMIT 1", (c,))
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return None
+    return {
+        "id": row[0], "code": row[1], "referrer_name": row[2], "referrer_contact": row[3],
+        "active": bool(row[4]), "created_at": row[5].isoformat() if row[5] else None,
+    }
+
+
+def db_referral_codes_list_with_counts() -> List[dict]:
+    """List all codes with signup count and converted (paying) count."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT c.id, c.code, c.referrer_name, c.referrer_contact, c.active, c.created_at,
+               COUNT(r.id) AS signups,
+               COUNT(r.id) FILTER (WHERE r.status = 'converted') AS converted,
+               COUNT(r.id) FILTER (WHERE r.status = 'flagged') AS flagged
+        FROM referral_codes c
+        LEFT JOIN referral_redemptions r ON r.referral_code_id = c.id
+        GROUP BY c.id
+        ORDER BY c.created_at DESC
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {
+            "id": r[0], "code": r[1], "referrer_name": r[2], "referrer_contact": r[3],
+            "active": bool(r[4]), "created_at": r[5].isoformat() if r[5] else None,
+            "signups": int(r[6] or 0), "converted": int(r[7] or 0), "flagged": int(r[8] or 0),
+        }
+        for r in rows
+    ]
+
+
+def db_referral_code_set_active(code_id: int, active: bool) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE referral_codes SET active = %s WHERE id = %s", (bool(active), code_id))
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to set referral code active: {e}")
+        return False
+
+
+def _row_to_redemption(row) -> dict:
+    return {
+        "id": row[0], "tenant_id": row[1], "referral_code_id": row[2],
+        "code_snapshot": row[3], "referrer_name_snapshot": row[4], "plan_at_signup": row[5],
+        "card_fingerprint": row[6], "signup_email": row[7], "status": row[8],
+        "free_month_granted": bool(row[9]), "flagged_reason": row[10],
+        "stripe_subscription_id": row[11],
+        "first_paid_at": row[12].isoformat() if row[12] else None,
+        "created_at": row[13].isoformat() if row[13] else None,
+    }
+
+
+_REDEMPTION_COLS = (
+    "id, tenant_id, referral_code_id, code_snapshot, referrer_name_snapshot, plan_at_signup, "
+    "card_fingerprint, signup_email, status, free_month_granted, flagged_reason, "
+    "stripe_subscription_id, first_paid_at, created_at"
+)
+
+
+def db_referral_redemption_create(
+    tenant_id: str, referral_code_id: int, code_snapshot: str, referrer_name_snapshot: str,
+    plan_at_signup: Optional[str], stripe_subscription_id: Optional[str],
+) -> Optional[int]:
+    """Create a redemption (one per tenant). Returns id, or existing id on conflict."""
+    if not tenant_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO referral_redemptions
+               (tenant_id, referral_code_id, code_snapshot, referrer_name_snapshot, plan_at_signup, stripe_subscription_id)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT (tenant_id) DO NOTHING RETURNING id""",
+            (tenant_id, referral_code_id, _norm_code(code_snapshot), referrer_name_snapshot, plan_at_signup, stripe_subscription_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        if row:
+            cur.close()
+            return row[0]
+        # Already existed — return its id.
+        cur.execute("SELECT id FROM referral_redemptions WHERE tenant_id = %s", (tenant_id,))
+        existing = cur.fetchone()
+        cur.close()
+        return existing[0] if existing else None
+    except Exception as e:
+        print(f"[DB] Failed to create referral redemption: {e}")
+        return None
+
+
+def db_referral_redemption_get_by_tenant(tenant_id: str) -> Optional[dict]:
+    if not tenant_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute(f"SELECT {_REDEMPTION_COLS} FROM referral_redemptions WHERE tenant_id = %s", (tenant_id,))
+    row = cur.fetchone()
+    cur.close()
+    return _row_to_redemption(row) if row else None
+
+
+def db_referral_redemption_get_by_subscription(sub_id: str) -> Optional[dict]:
+    if not sub_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    cur.execute(f"SELECT {_REDEMPTION_COLS} FROM referral_redemptions WHERE stripe_subscription_id = %s LIMIT 1", (sub_id,))
+    row = cur.fetchone()
+    cur.close()
+    return _row_to_redemption(row) if row else None
+
+
+def db_referral_redemption_update(redemption_id: int, **fields) -> bool:
+    """Partial update of a redemption row. Allowed fields only."""
+    allowed = {
+        "status", "free_month_granted", "flagged_reason", "card_fingerprint",
+        "signup_email", "first_paid_at", "stripe_subscription_id",
+    }
+    sets = []
+    params: list = []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        if k == "signup_email":
+            v = _norm_email(v) or None
+        sets.append(f"{k} = %s")
+        params.append(v)
+    if not sets:
+        return True
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        params.append(redemption_id)
+        cur.execute(f"UPDATE referral_redemptions SET {', '.join(sets)} WHERE id = %s", params)
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to update referral redemption: {e}")
+        return False
+
+
+def db_referral_commission_insert(
+    redemption_id: int, kind: str, period_key: str, amount_cents: int,
+    plan_snapshot: Optional[str], code_snapshot: str, referrer_name_snapshot: str,
+) -> Optional[int]:
+    """Insert a commission line item. Idempotent on (redemption_id, kind, period_key)."""
+    if kind not in ("signup_bounty", "mrr") or amount_cents < 0:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO referral_commissions
+               (redemption_id, kind, period_key, amount_cents, plan_snapshot, code_snapshot, referrer_name_snapshot)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (redemption_id, kind, period_key) DO NOTHING RETURNING id""",
+            (redemption_id, kind, period_key, int(amount_cents), plan_snapshot, _norm_code(code_snapshot), referrer_name_snapshot),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] Failed to insert referral commission: {e}")
+        return None
+
+
+def db_referral_commission_count_mrr(redemption_id: int) -> int:
+    conn = _get_conn()
+    if not conn:
+        return 0
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM referral_commissions WHERE redemption_id = %s AND kind = 'mrr'", (redemption_id,))
+    row = cur.fetchone()
+    cur.close()
+    return int(row[0]) if row else 0
+
+
+def db_referral_commissions_list_all(include_paid: bool = True) -> List[dict]:
+    """All commission line items joined to the referred business name (best-effort)."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    sql = """
+        SELECT cm.id, cm.kind, cm.period_key, cm.amount_cents, cm.plan_snapshot,
+               cm.code_snapshot, cm.referrer_name_snapshot, cm.paid, cm.paid_at, cm.created_at,
+               t.name AS business_name
+        FROM referral_commissions cm
+        LEFT JOIN referral_redemptions r ON r.id = cm.redemption_id
+        LEFT JOIN tenants t ON t.id::text = r.tenant_id
+    """
+    if not include_paid:
+        sql += " WHERE cm.paid = FALSE"
+    sql += " ORDER BY cm.created_at DESC"
+    cur.execute(sql)
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {
+            "id": r[0], "kind": r[1], "period_key": r[2], "amount_cents": int(r[3] or 0),
+            "plan_snapshot": r[4], "code_snapshot": r[5], "referrer_name": r[6],
+            "paid": bool(r[7]), "paid_at": r[8].isoformat() if r[8] else None,
+            "created_at": r[9].isoformat() if r[9] else None, "business_name": r[10],
+        }
+        for r in rows
+    ]
+
+
+def db_referral_commission_mark_paid(commission_id: int) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE referral_commissions SET paid = TRUE, paid_at = NOW() WHERE id = %s AND paid = FALSE",
+            (commission_id,),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to mark commission paid: {e}")
         return False
 
 # --- Call log ---
