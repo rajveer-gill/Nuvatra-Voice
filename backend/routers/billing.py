@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -251,94 +252,100 @@ async def stripe_webhook(request: Request):
     assert event is not None
     if not runtime.USE_DB:
         return {"received": True}
-    # Handle events
-    if event.type == "checkout.session.completed":
-        session = event.data.object
-        meta = session.get("metadata") or {}
-        tenant_id = meta.get("tenant_id")
-        plan = meta.get("plan") or "starter"
-        sub_id = session.get("subscription")
-        customer_id = session.get("customer")
-        if tenant_id and (sub_id or customer_id):
-            database.db_tenant_update_subscription(
-                tenant_id,
-                stripe_customer_id=customer_id,
-                stripe_subscription_id=sub_id,
-                subscription_status="active",
-                plan=plan,
-            )
-            tenant = database.db_tenant_get_by_id(tenant_id)
-            deps.audit_log(
-                "stripe",
-                "checkout.session.completed",
-                resource_type="tenant",
-                resource_id=tenant_id,
-                client_id=tenant["client_id"] if tenant else None,
-                details={"plan": plan, "subscription_id": sub_id},
-                request=request,
-            )
-            # Self-serve: provision the number now that payment is set up.
-            if tenant and not (tenant.get("twilio_phone_number") or "").strip():
-                try:
+    # Work off the verified raw payload as a plain dict — robust across Stripe SDK /
+    # API-version differences (the typed event object's dict access can vary and was
+    # 500ing the handler). Signature is already verified above.
+    try:
+        evt = json.loads(payload)
+    except Exception:
+        evt = {}
+    etype = evt.get("type") or getattr(event, "type", "") or ""
+    obj = ((evt.get("data") or {}).get("object")) or {}
+
+    # Never 500 on a processing error — that makes Stripe retry the event forever.
+    try:
+        if etype == "checkout.session.completed":
+            meta = obj.get("metadata") or {}
+            tenant_id = meta.get("tenant_id")
+            plan = meta.get("plan") or "starter"
+            sub_id = obj.get("subscription")
+            customer_id = obj.get("customer")
+            if tenant_id and (sub_id or customer_id):
+                database.db_tenant_update_subscription(
+                    tenant_id,
+                    stripe_customer_id=customer_id,
+                    stripe_subscription_id=sub_id,
+                    subscription_status="active",
+                    plan=plan,
+                )
+                tenant = database.db_tenant_get_by_id(tenant_id)
+                deps.audit_log(
+                    "stripe",
+                    "checkout.session.completed",
+                    resource_type="tenant",
+                    resource_id=tenant_id,
+                    client_id=tenant["client_id"] if tenant else None,
+                    details={"plan": plan, "subscription_id": sub_id},
+                    request=request,
+                )
+                # Self-serve: provision the number now that payment is set up.
+                if tenant and not (tenant.get("twilio_phone_number") or "").strip():
                     _provision_number_for_tenant(
                         tenant, area_code=(meta.get("area_code") or "").strip() or None, request=request
                     )
-                except Exception as e:
-                    logger.error("self_serve_provision_exception tenant=%s err=%s", tenant_id, e)
-    elif event.type == "customer.subscription.updated":
-        sub = event.data.object
-        sub_id = sub.get("id")
-        tenant_id = (sub.get("metadata") or {}).get("tenant_id")
-        status = sub.get("status")
-        if tenant_id and sub_id:
-            plan = (sub.get("metadata") or {}).get("plan") or "starter"
-            database.db_tenant_update_subscription(
-                tenant_id,
-                stripe_subscription_id=sub_id,
-                subscription_status=status,
-                plan=plan,
-            )
-            tenant = database.db_tenant_get_by_id(tenant_id)
-            deps.audit_log(
-                "stripe",
-                "customer.subscription.updated",
-                resource_type="tenant",
-                resource_id=tenant_id,
-                client_id=tenant["client_id"] if tenant else None,
-                details={"status": status, "plan": plan},
-                request=request,
-            )
-    elif event.type == "customer.subscription.deleted":
-        sub = event.data.object
-        tenant_id = (sub.get("metadata") or {}).get("tenant_id")
-        if tenant_id:
-            tenant = database.db_tenant_get_by_id(tenant_id)
-            database.db_tenant_update_subscription(tenant_id, subscription_status="canceled")
-            deps.audit_log(
-                "stripe",
-                "customer.subscription.deleted",
-                resource_type="tenant",
-                resource_id=tenant_id,
-                client_id=tenant["client_id"] if tenant else None,
-                details={},
-                request=request,
-            )
-    elif event.type == "invoice.payment_failed":
-        inv = event.data.object
-        sub_id = inv.get("subscription")
-        if sub_id and runtime.USE_DB:
-            tenant = database.db_tenant_get_by_stripe_subscription_id(sub_id)
-            if tenant:
+        elif etype == "customer.subscription.updated":
+            sub_id = obj.get("id")
+            tenant_id = (obj.get("metadata") or {}).get("tenant_id")
+            status = obj.get("status")
+            if tenant_id and sub_id:
+                plan = (obj.get("metadata") or {}).get("plan") or "starter"
                 database.db_tenant_update_subscription(
-                    tenant["id"], subscription_status="past_due"
+                    tenant_id,
+                    stripe_subscription_id=sub_id,
+                    subscription_status=status,
+                    plan=plan,
                 )
+                tenant = database.db_tenant_get_by_id(tenant_id)
                 deps.audit_log(
                     "stripe",
-                    "invoice.payment_failed",
+                    "customer.subscription.updated",
                     resource_type="tenant",
-                    resource_id=tenant["id"],
-                    client_id=tenant.get("client_id"),
-                    details={"subscription_id": sub_id},
+                    resource_id=tenant_id,
+                    client_id=tenant["client_id"] if tenant else None,
+                    details={"status": status, "plan": plan},
                     request=request,
                 )
+        elif etype == "customer.subscription.deleted":
+            tenant_id = (obj.get("metadata") or {}).get("tenant_id")
+            if tenant_id:
+                tenant = database.db_tenant_get_by_id(tenant_id)
+                database.db_tenant_update_subscription(tenant_id, subscription_status="canceled")
+                deps.audit_log(
+                    "stripe",
+                    "customer.subscription.deleted",
+                    resource_type="tenant",
+                    resource_id=tenant_id,
+                    client_id=tenant["client_id"] if tenant else None,
+                    details={},
+                    request=request,
+                )
+        elif etype == "invoice.payment_failed":
+            sub_id = obj.get("subscription")
+            if sub_id:
+                tenant = database.db_tenant_get_by_stripe_subscription_id(sub_id)
+                if tenant:
+                    database.db_tenant_update_subscription(
+                        tenant["id"], subscription_status="past_due"
+                    )
+                    deps.audit_log(
+                        "stripe",
+                        "invoice.payment_failed",
+                        resource_type="tenant",
+                        resource_id=tenant["id"],
+                        client_id=tenant.get("client_id"),
+                        details={"subscription_id": sub_id},
+                        request=request,
+                    )
+    except Exception as e:
+        logger.exception("stripe_webhook handler error event_type=%s: %s", etype, e)
     return {"received": True}
