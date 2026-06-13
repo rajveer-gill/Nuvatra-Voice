@@ -121,6 +121,33 @@ def test_health_digest_escalates_on_problems(client, monkeypatch):
 
 # --- admin failed-events endpoints ---
 
+def test_test_alert_requires_admin(client):
+    assert client.post("/api/admin/test-alert").status_code in (401, 403)
+
+
+def test_test_alert_reports_channel_status(client, monkeypatch):
+    import alerts
+    import deps
+    from deps import require_admin
+
+    monkeypatch.setenv("OPERATOR_ALERT_EMAIL", "ops@example.com")
+    monkeypatch.delenv("OPERATOR_ALERT_SMS", raising=False)
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(alerts, "_send_alert_sms", lambda text: False)
+    app.dependency_overrides[require_admin] = lambda: "admin-test"
+    try:
+        with patch("email_notify.send_operator_alert", lambda *a, **k: True):
+            r = client.post("/api/admin/test-alert")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["email_sent"] is True
+            assert body["email_target_set"] is True
+            assert body["sms_sent"] is False
+            assert body["sms_target_set"] is False
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_failed_events_require_admin(client):
     assert client.get("/api/admin/failed-events").status_code in (401, 403)
     assert client.patch("/api/admin/failed-events/1", json={"resolved": True}).status_code in (401, 403)

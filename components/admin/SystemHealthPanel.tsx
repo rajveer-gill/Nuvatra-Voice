@@ -45,6 +45,8 @@ export function SystemHealthPanel() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -66,6 +68,40 @@ export function SystemHealthPanel() {
   useEffect(() => {
     void load()
   }, [load])
+
+  const sendTestAlert = async () => {
+    setTesting(true)
+    setTestResult(null)
+    setError(null)
+    try {
+      const { data } = await api.post<{
+        email_sent: boolean
+        sms_sent: boolean
+        email_target_set: boolean
+        sms_target_set: boolean
+      }>('/api/admin/test-alert', {}, adminApi)
+      const parts: string[] = []
+      parts.push(
+        data.email_sent
+          ? '✅ Email sent'
+          : data.email_target_set
+            ? '⚠️ Email failed (check RESEND_API_KEY / APPOINTMENT_EMAIL_FROM)'
+            : '⚠️ Email skipped (set OPERATOR_ALERT_EMAIL)',
+      )
+      parts.push(
+        data.sms_sent
+          ? '✅ Text sent'
+          : data.sms_target_set
+            ? '⚠️ Text failed (set OPERATOR_ALERT_SMS_FROM to a Twilio number)'
+            : '⚠️ Text skipped (set OPERATOR_ALERT_SMS)',
+      )
+      setTestResult(parts.join(' · '))
+    } catch {
+      setError('Test alert request failed.')
+    } finally {
+      setTesting(false)
+    }
+  }
 
   const resolve = async (id: number) => {
     setSavingId(id)
@@ -106,13 +142,27 @@ export function SystemHealthPanel() {
         <Status ok={open.length === 0} label={open.length === 0 ? 'No open incidents' : `${open.length} open incident(s)`} />
         <button
           type="button"
+          onClick={() => void sendTestAlert()}
+          disabled={testing}
+          className="ml-auto rounded-lg border border-cyan-500/40 px-3 py-1.5 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50"
+        >
+          {testing ? 'Sending…' : 'Send test alert'}
+        </button>
+        <button
+          type="button"
           onClick={() => void load()}
           disabled={loading}
-          className="ml-auto rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-white/5 disabled:opacity-50"
+          className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-white/5 disabled:opacity-50"
         >
           {loading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
+
+      {testResult && (
+        <div className="mb-4 rounded-xl border border-white/10 bg-zinc-950/40 px-4 py-3 text-sm text-zinc-300">
+          {testResult}
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">

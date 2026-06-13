@@ -948,6 +948,37 @@ def admin_mark_referral_commission_paid(
 
 # --- System health / incidents ---
 
+@router.post("/api/admin/test-alert")
+def admin_send_test_alert(request: Request, admin_user_id: str = Depends(deps.require_admin)):
+    """Send a test operator alert (email + SMS) so you can confirm alerting is wired up.
+    Reports which channels actually delivered so missing config is obvious. Admin only."""
+    import alerts
+    import email_notify
+
+    subject = "Test alert"
+    msg = "This is a test operator alert from Call Surge. If you received this, alerting works."
+    email_ok = False
+    try:
+        email_ok = email_notify.send_operator_alert(f"[Call Surge] {subject}", f"<p>{msg}</p>", msg)
+    except Exception as e:
+        print(f"[Admin] test-alert email failed: {e}")
+    sms_ok = False
+    try:
+        sms_ok = alerts._send_alert_sms(f"[Call Surge] {msg}")
+    except Exception as e:
+        print(f"[Admin] test-alert sms failed: {e}")
+    deps.audit_log(
+        "admin", "test_alert_sent", actor_id=admin_user_id,
+        details={"email_sent": email_ok, "sms_sent": sms_ok}, request=request,
+    )
+    return {
+        "email_sent": email_ok,
+        "sms_sent": sms_ok,
+        "email_target_set": bool((os.getenv("OPERATOR_ALERT_EMAIL") or "").strip()),
+        "sms_target_set": bool((os.getenv("OPERATOR_ALERT_SMS") or "").strip()),
+    }
+
+
 @router.get("/api/admin/failed-events")
 def admin_list_failed_events(include_resolved: bool = False, _: str = Depends(deps.require_admin)):
     """List recorded failures (webhook/cron/task) for the System Health panel. Admin only."""
