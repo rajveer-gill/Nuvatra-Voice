@@ -75,16 +75,15 @@ export default function DashboardPage() {
   const [setupStatus, setSetupStatus] = useState<SetupStatusSnapshot | null>(null)
 
   const tabs = useMemo(() => {
-    const base: { id: typeof activeTab; label: string }[] = [
+    // Leads is always shown; when the plan doesn't include it (e.g. Starter after the
+    // trial) the tab renders a locked upsell instead of being hidden.
+    return [
       { id: 'appointments', label: 'Appointments' },
       { id: 'dashboard', label: 'Dashboard' },
-    ]
-    if (subscription?.limits?.has_lead_capture) {
-      base.push({ id: 'leads', label: 'Leads' })
-    }
-    base.push({ id: 'settings', label: 'Settings' })
-    return base
-  }, [subscription?.limits?.has_lead_capture])
+      { id: 'leads', label: 'Leads' },
+      { id: 'settings', label: 'Settings' },
+    ] as { id: typeof activeTab; label: string }[]
+  }, [])
 
   const applySubscriptionError = useCallback((err: { response?: { status?: number; data?: { detail?: string } } }) => {
     const status = err.response?.status
@@ -243,12 +242,6 @@ export default function DashboardPage() {
       window.removeEventListener('focus', refresh)
     }
   }, [access, fetchSubscription])
-
-  useEffect(() => {
-    if (!subscription?.limits?.has_lead_capture && activeTab === 'leads') {
-      setActiveTab('appointments')
-    }
-  }, [subscription?.limits?.has_lead_capture, activeTab])
 
   useEffect(() => {
     if (access !== 'granted') return
@@ -539,7 +532,7 @@ export default function DashboardPage() {
               transition={panelTransition}
             >
               {activeTab === 'appointments' && <Appointments />}
-              {activeTab === 'leads' && <Leads />}
+              {activeTab === 'leads' && <Leads locked={!subscription?.limits?.has_lead_capture} />}
               {activeTab === 'dashboard' && <Dashboard />}
               {activeTab === 'settings' && <Settings />}
             </motion.div>

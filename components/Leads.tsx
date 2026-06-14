@@ -6,6 +6,7 @@ import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient } from '@/lib/api'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { LockedFeature } from '@/components/ui/LockedFeature'
 import { Reveal } from '@/components/motion'
 
 interface Lead {
@@ -17,7 +18,7 @@ interface Lead {
   created_at: string
 }
 
-export default function Leads() {
+export default function Leads({ locked = false }: { locked?: boolean }) {
   const api = useApiClient()
   const reduce = useReducedMotion()
   const [leads, setLeads] = useState<Lead[]>([])
@@ -28,12 +29,30 @@ export default function Leads() {
   const [note, setNote] = useState<{ id: number; text: string; ok: boolean } | null>(null)
 
   useEffect(() => {
+    if (locked) {
+      setLoading(false)
+      return
+    }
     api
       .get('/api/leads')
       .then((res) => setLeads(res.data?.leads || []))
       .catch(() => setLeads([]))
       .finally(() => setLoading(false))
-  }, [api])
+  }, [api, locked])
+
+  if (locked) {
+    return (
+      <LockedFeature
+        title="Capture every lead"
+        tagline="When a caller is interested but doesn't book, Call Surge saves them here so you can follow up with one tap—and never lose a potential customer to a missed call again."
+        bullets={[
+          'Automatically captures callers who didn’t book',
+          'One-tap follow-up text to win them back',
+          'See who called, when, and why',
+        ]}
+      />
+    )
+  }
 
   const sendText = async (id: number) => {
     const body = text.trim()
