@@ -1672,44 +1672,6 @@ def db_tenant_clear_twilio(tenant_id: str) -> bool:
             pass
         return False
 
-# --- TEMPORARY: full data reset for pre-launch testing. Remove before launch. ---
-# Wipes all tenant/operational data so you can re-test signup from scratch. Preserves
-# schema, alembic_version, audit_events, and compliance tables (legal_holds, backups).
-_RESET_TABLES = (
-    "tenants", "tenant_members", "tenant_invites", "appointments", "messages",
-    "leads", "call_log", "caller_memory", "booked_slots", "sms_sessions",
-    "sms_opt_out", "sms_consent", "sms_automations", "tenant_usage",
-    "overage_processed", "conversational_sms_period_usage",
-    "conversational_sms_session_keys", "provisioning_jobs", "provisioning_tasks",
-    # Referral signup/payout data is tenant-scoped test data; referral_codes are
-    # operator config and are intentionally NOT reset.
-    "signup_payment_methods", "referral_redemptions", "referral_commissions",
-)
-
-
-def db_reset_all_tenant_data() -> bool:
-    """TEMPORARY (pre-launch testing): truncate all tenant/operational tables so signup
-    can be tested from scratch. Returns True on success. Remove before launch."""
-    conn = _get_conn()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "TRUNCATE TABLE " + ", ".join(_RESET_TABLES) + " RESTART IDENTITY CASCADE"
-        )
-        conn.commit()
-        cur.close()
-        return True
-    except Exception as e:
-        print(f"[DB] db_reset_all_tenant_data failed: {e}")
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False
-
-
 def db_tenant_extend_trial(tenant_id: str, trial_ends_at: datetime) -> bool:
     """Set trial_ends_at for a tenant (admin). Returns True on success."""
     conn = _get_conn()
