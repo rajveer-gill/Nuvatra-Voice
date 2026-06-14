@@ -120,7 +120,7 @@ def test_prompt_staff_linked_services(minimal_business):
     assert "Alex: any listed service" in p
 
 
-def test_prompt_multi_staff_requires_stylist_question():
+def test_prompt_multi_staff_asks_service_before_stylist():
     biz = {
         "name": "Test Salon",
         "services": [{"id": "s1", "name": "Haircut", "price": 30, "duration_minutes": 30}],
@@ -128,9 +128,9 @@ def test_prompt_multi_staff_requires_stylist_question():
     }
     p = build_system_prompt(business_info=biz, include_booked_slots=True, booked_slots_prompt_text="")
     assert "Multiple team members" in p
-    assert "MUST ask which stylist" in p
-    assert "BEFORE asking which service" in p
-    assert "ask stylist preference first" in p
+    # Service-first: ask the service, then suggest stylists who provide it.
+    assert "Ask which SERVICE they want FIRST" in p
+    assert "do not ask for the stylist before the service" in p
 
 
 def test_prompt_empty_slots_branch(minimal_business):

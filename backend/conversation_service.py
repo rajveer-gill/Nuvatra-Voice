@@ -271,32 +271,31 @@ def _voice_booking_nudge_message(
             "After answering, invite them to continue scheduling if they were booking."
         )
 
-    if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(
-        user_text, biz
-    ):
-        if turns >= 2:
+    services = config_service._normalize_service_entries(biz.get("services") or [])
+    ctx = booking_context_from_business(biz)
+
+    # Service-first: when a service menu exists, get the service before the stylist.
+    if services and not service_choice_resolved(conversation_history, ctx):
+        if turns >= 2 and not assistant_asked_service_recently(conversation_history):
             return (
                 f"BOOKING REMINDER: This caller wants an appointment ({turns} user turns). "
-                "You have NOT confirmed a stylist yet. Ask ONE short question: which stylist "
-                "they prefer (or anyone is fine). Do NOT ask which service yet—after they choose "
-                "a stylist, offer only that person's services from the roster."
+                "Ask ONE short question: which service from the menu they'd like. Do NOT ask which "
+                "stylist yet—after they choose a service, suggest only the stylists who provide it."
+            )
+        return None
+
+    # Service chosen (or no menu) → now resolve the stylist if required.
+    if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
+        if turns >= 2:
+            return (
+                f"BOOKING REMINDER: Caller picked a service ({turns} turns) but no stylist yet. "
+                "Ask ONE short question: which stylist they prefer (or anyone is fine), suggesting "
+                "only those who provide the chosen service."
             )
         return None
 
     if turns < 3:
         return None
-
-    services = config_service._normalize_service_entries(biz.get("services") or [])
-    ctx = booking_context_from_business(biz)
-    if services and not service_choice_resolved(conversation_history, ctx):
-        if assistant_asked_service_recently(conversation_history):
-            return None
-        return (
-            f"BOOKING REMINDER: This caller wants an appointment after {turns} turns. "
-            "Ask ONE short question: which service from the menu (only services their stylist provides). "
-            "When name, date, time, service, and stylist are confirmed, you MUST output BOOKING: on this turn. "
-            "Never tell the caller they are booked until BOOKING is output."
-        )
     return (
         f"BOOKING REMINDER: After {turns} turns you have enough details. "
         "Output BOOKING: name|phone|email|date|time|reason|staff on this turn. "
@@ -605,6 +604,30 @@ def _apply_booking_customer_name(
         booking["name"] = mem_name
 
 
+def _stylists_offering_service(biz: dict, service_name: Optional[str]) -> list:
+    """Names of stylists who provide the given service (their service_ids include it, or an
+    empty service_ids means they do everything). Falls back to all stylists when the service
+    is unknown or none match."""
+    staff_rows = [s for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
+    all_names = [(s.get("name") or "").strip() for s in staff_rows if (s.get("name") or "").strip()]
+    if not service_name:
+        return all_names
+    svc_id = None
+    for s in config_service._normalize_service_entries(biz.get("services") or []):
+        if (s.get("name") or "").strip().lower() == service_name.strip().lower():
+            svc_id = (s.get("id") or "").strip()
+            break
+    matched = []
+    for st in staff_rows:
+        nm = (st.get("name") or "").strip()
+        if not nm:
+            continue
+        ids = st.get("service_ids") or []
+        if not ids or (svc_id and svc_id in ids):
+            matched.append(nm)
+    return matched or all_names
+
+
 def _validate_booking_requirements(
     booking: dict,
     info: Optional[dict] = None,
@@ -619,42 +642,7 @@ def _validate_booking_requirements(
     user_text = _conversation_user_text(conversation_history)
     staff_rows = [s for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
     staff_id = resolve_staff_id_from_booking_fragment(booking.get("staff"))
-    staff_name = ""
-    if staff_id:
-        for s in staff_rows:
-            if (s.get("id") or "").strip() == staff_id:
-                staff_name = (s.get("name") or "").strip()
-                break
-    if staff_rows and not staff_id:
-        no_pref = any(p in user_text.lower() for p in _STYLIST_NO_PREF_PHRASES)
-        if not (_caller_indicated_stylist_choice(user_text, biz) and no_pref):
-            choices = ", ".join(
-                (s.get("name") or "").strip()
-                for s in staff_rows[:5]
-                if (s.get("name") or "").strip()
-            )
-            msg = (
-                "Absolutely — which stylist would you like to see?"
-                + (f" We currently have {choices}." if choices else "")
-                + " You can also say anyone if you have no preference."
-            )
-            return False, msg, None, None
-    if (
-        staff_id
-        and _staff_choice_required(biz)
-        and not _caller_indicated_stylist_choice(user_text, biz)
-    ):
-        choices = ", ".join(
-            (s.get("name") or "").strip()
-            for s in staff_rows[:5]
-            if (s.get("name") or "").strip()
-        )
-        msg = (
-            "Before I lock this in, which stylist would you like?"
-            + (f" We have {choices}." if choices else "")
-            + " Or say anyone if you have no preference."
-        )
-        return False, msg, None, None
+
     service_name, service_required = booking_service._normalize_service_choice_for_booking(
         booking.get("reason"), biz
     )
@@ -676,6 +664,7 @@ def _validate_booking_requirements(
         )
     except Exception:
         pass
+
     booking_date = (booking.get("date") or "").strip()
     if booking_date:
         try:
@@ -686,34 +675,48 @@ def _validate_booking_requirements(
                 return False, same_day_after_hours_message(biz), staff_id, None
         except ValueError:
             pass
-    if service_required and not service_name:
-        service_choices = ", ".join(
-            (s.get("name") or "").strip()
-            for s in config_service._normalize_service_entries(biz.get("services") or [])[:5]
-            if (s.get("name") or "").strip()
-        )
-        ctx = booking_context_from_business(biz)
-        msg = service_prompt_message(
-            staff_name=staff_name,
-            service_choices=service_choices,
-            already_asked=assistant_asked_service_recently(conversation_history),
-        )
-        return False, msg, staff_id, None
+
     ctx = booking_context_from_business(biz)
-    if service_required and service_name and not service_choice_resolved(
-        conversation_history, ctx, canonical_service=service_name
-    ):
-        service_choices = ", ".join(
-            (s.get("name") or "").strip()
-            for s in config_service._normalize_service_entries(biz.get("services") or [])[:5]
-            if (s.get("name") or "").strip()
-        )
+    service_choices = ", ".join(
+        (s.get("name") or "").strip()
+        for s in config_service._normalize_service_entries(biz.get("services") or [])[:5]
+        if (s.get("name") or "").strip()
+    )
+    # SERVICE FIRST — get the service before the stylist. Trust a service that normalized to a
+    # real menu item (the extraction only sets it when the caller named one); no redundant
+    # re-confirm (which previously caused loops when STT phrasing differed, e.g. "shortcut").
+    if service_required and not service_name:
         msg = service_prompt_message(
-            staff_name=staff_name,
+            staff_name="",  # don't tie to a stylist yet — the stylist comes after the service
             service_choices=service_choices,
             already_asked=assistant_asked_service_recently(conversation_history),
         )
         return False, msg, staff_id, None
+
+    # THEN STYLIST — suggest only the stylists who provide the chosen service.
+    if staff_rows and not staff_id:
+        no_pref = any(p in user_text.lower() for p in _STYLIST_NO_PREF_PHRASES)
+        if not (_caller_indicated_stylist_choice(user_text, biz) and no_pref):
+            choices = ", ".join(_stylists_offering_service(biz, service_name)[:5])
+            msg = (
+                "Great — which stylist would you like to see?"
+                + (f" For that, we have {choices}." if choices else "")
+                + " You can also say anyone if you have no preference."
+            )
+            return False, msg, None, None
+    if (
+        staff_id
+        and _staff_choice_required(biz)
+        and not _caller_indicated_stylist_choice(user_text, biz)
+    ):
+        choices = ", ".join(_stylists_offering_service(biz, service_name)[:5])
+        msg = (
+            "Before I lock this in, which stylist would you like?"
+            + (f" For that service we have {choices}." if choices else "")
+            + " Or say anyone if you have no preference."
+        )
+        return False, msg, None, None
+
     return True, None, staff_id, service_name
 
 
@@ -1190,8 +1193,8 @@ async def generate_response_async(
                 client_id=str(call_data.get("client_id") or ""),
             )
             ai_text = (
-                "I'm still putting your visit together—I haven't locked in the time yet. "
-                "Let me confirm the details with you first, then I'll text you to confirm."
+                "I haven't locked anything in just yet—I want to make sure I've got it right. "
+                "Can you confirm the service, day, and time you'd like? Then I'll text you to confirm."
             )
 
         # Never send BOOKING: machine line to TTS or conversation history

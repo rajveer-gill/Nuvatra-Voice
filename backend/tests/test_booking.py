@@ -201,7 +201,7 @@ def test_voice_booking_nudge_after_three_turns():
     assert "BOOKING REMINDER" in nudge
 
 
-def test_voice_booking_nudge_prioritizes_stylist_before_service(monkeypatch):
+def test_voice_booking_nudge_prioritizes_service_before_stylist(monkeypatch):
     monkeypatch.setattr(
         "config_service.get_business_info",
         lambda: {
@@ -218,12 +218,11 @@ def test_voice_booking_nudge_prioritizes_stylist_before_service(monkeypatch):
     ]
     nudge = _voice_booking_nudge_message(history)
     assert nudge is not None
-    assert "stylist" in nudge.lower()
-    assert "Do NOT ask which service yet" in nudge
-    assert "service (ask which from the menu)" not in nudge
+    assert "service" in nudge.lower()
+    assert "Do NOT ask which stylist yet" in nudge
 
 
-def test_voice_booking_nudge_stylist_at_two_turns(monkeypatch):
+def test_voice_booking_nudge_service_at_two_turns(monkeypatch):
     monkeypatch.setattr(
         "config_service.get_business_info",
         lambda: {
@@ -238,7 +237,7 @@ def test_voice_booking_nudge_stylist_at_two_turns(monkeypatch):
     ]
     nudge = _voice_booking_nudge_message(history)
     assert nudge is not None
-    assert "stylist" in nudge.lower()
+    assert "service" in nudge.lower()
 
 
 def test_ai_implies_committed_booking_detects_false_confirm():
