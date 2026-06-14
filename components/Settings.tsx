@@ -31,6 +31,7 @@ import {
   VOICE_SAMPLE_TEXT,
 } from '@/components/settings/constants'
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
+import { LockedFeature } from '@/components/ui/LockedFeature'
 import { StaffMembersSection, normalizeStaffFromApi, type StaffRow } from '@/components/settings/StaffMembersSection'
 import {
   TransferTargetsSection,
@@ -653,8 +654,8 @@ export default function Settings() {
         )}
       </SettingsSection>
 
-      {/* SMS Automations (Growth/Pro) */}
-      {smsAutomationsMax != null && smsAutomationsMax > 0 && (
+      {/* SMS Automations (Growth/Pro) — locked upsell on plans without it (e.g. Starter). */}
+      {smsAutomationsMax != null && smsAutomationsMax > 0 ? (
         <SmsAutomationsSection
           automations={automations}
           smsAutomationsMax={smsAutomationsMax}
@@ -662,7 +663,20 @@ export default function Settings() {
           onAdd={(a) => setAutomations((prev) => [...prev, a])}
           api={api}
         />
-      )}
+      ) : smsAutomationsMax === 0 ? (
+        <div className="mb-8">
+          <LockedFeature
+            variant="light"
+            title="SMS automations"
+            tagline="Automatically text customers at the right moment—after an inquiry or a missed call—so you stay top of mind without lifting a finger."
+            bullets={[
+              'Auto-text after an inquiry or post-call',
+              'Custom templates for each trigger',
+              'Set it once and it runs on every call',
+            ]}
+          />
+        </div>
+      ) : null}
 
       {/* Billing */}
       <SettingsSection delay={3}>

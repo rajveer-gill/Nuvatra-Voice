@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, Fragment } from 'react'
-import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loader2, RefreshCw } from 'lucide-react'
+import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loader2, RefreshCw, Lock } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -395,7 +395,7 @@ export default function Dashboard() {
               <BarChart3 className="w-5 h-5 mr-2" />
               Call Analytics
             </h2>
-            {hasExport && (
+            {hasExport ? (
               <button
                 type="button"
                 disabled={exporting}
@@ -419,6 +419,22 @@ export default function Dashboard() {
                 className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
               >
                 {exporting ? 'Exporting…' : 'Export CSV'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                title="CSV export is available on Growth and Pro"
+                onClick={async () => {
+                  try {
+                    const { data } = await api.post<{ url: string }>('/api/create-portal-session')
+                    if (data?.url) window.location.href = data.url
+                  } catch {
+                    // ignore — keep the user on the page
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border border-gray-300 text-gray-500 hover:bg-gray-50"
+              >
+                <Lock className="w-3.5 h-3.5" /> Export CSV · Pro
               </button>
             )}
           </div>
