@@ -28,10 +28,17 @@ type SetupStatusSnapshot = {
   onboarding_completed_at?: string | null
 }
 
-const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false })
-const Appointments = dynamic(() => import('@/components/Appointments'), { ssr: false })
-const Settings = dynamic(() => import('@/components/Settings'), { ssr: false })
-const Leads = dynamic(() => import('@/components/Leads'), { ssr: false })
+// Loading fallback so a tab never shows a blank panel while its chunk loads (which
+// looked like "Settings needs a second click").
+const TabLoading = () => (
+  <div className="flex justify-center py-20" role="status" aria-label="Loading">
+    <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-400/30 border-t-cyan-400" />
+  </div>
+)
+const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false, loading: TabLoading })
+const Appointments = dynamic(() => import('@/components/Appointments'), { ssr: false, loading: TabLoading })
+const Settings = dynamic(() => import('@/components/Settings'), { ssr: false, loading: TabLoading })
+const Leads = dynamic(() => import('@/components/Leads'), { ssr: false, loading: TabLoading })
 
 export type SubscriptionState = {
   can_use_app: boolean

@@ -157,9 +157,10 @@ def create_checkout_session(
 
 
 @router.get("/api/referral/validate")
-def validate_referral_code(code: str, tenant: Optional[dict] = Depends(deps.require_tenant)):
-    """Tenant-auth check so the signup page can confirm a code before checkout. Returns the
-    MINIMUM (valid + referrer first name) — never the referrer's contact or payout terms."""
+def validate_referral_code(code: str, _user_id: str = Depends(deps.require_user)):
+    """Signed-in check so the signup page can confirm a code before checkout. Uses
+    require_user (NOT require_tenant) because the user has no tenant yet mid-signup.
+    Returns the MINIMUM (valid + referrer first name) — never contact or payout terms."""
     if not runtime.USE_DB:
         return {"valid": False}
     rc = database.db_referral_code_get_by_code(code, active_only=True)

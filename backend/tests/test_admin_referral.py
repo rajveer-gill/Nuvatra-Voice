@@ -97,6 +97,32 @@ def test_list_commissions_totals(client, monkeypatch):
         app.dependency_overrides.clear()
 
 
+def test_referral_validate_works_for_signed_in_user_without_tenant(client, monkeypatch):
+    """The signup-page validate endpoint must work for a signed-in user who has no tenant
+    yet (require_user, not require_tenant) — regression for the 403 banner bug."""
+    import database
+    import runtime
+    from deps import require_user
+
+    monkeypatch.setattr(runtime, "USE_DB", True)
+    monkeypatch.setattr(database, "db_referral_code_get_by_code",
+                        lambda code, active_only=True: {"id": 1, "referrer_name": "Final Test"})
+    # Signed-in user but NO tenant — this previously 403'd under require_tenant.
+    app.dependency_overrides[require_user] = lambda: "user_abc"
+    try:
+        r = client.get("/api/referral/validate?code=LAUNCH")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["valid"] is True
+        assert body["referrer_first_name"] == "Final"  # first name only, no contact/terms
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_referral_validate_requires_auth(client):
+    assert client.get("/api/referral/validate?code=LAUNCH").status_code in (401, 403)
+
+
 def test_mark_commission_paid_audits(client, monkeypatch):
     import database, deps, runtime
     from deps import require_admin
