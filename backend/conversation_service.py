@@ -658,6 +658,24 @@ def _validate_booking_requirements(
     service_name, service_required = booking_service._normalize_service_choice_for_booking(
         booking.get("reason"), biz
     )
+    # DIAGNOSTIC: pinpoint why the service is (re)asked — what was captured vs the menu,
+    # and whether the conversation already indicates a service the matcher is missing.
+    try:
+        import booking_fields as _bf
+
+        _ctx_dbg = booking_context_from_business(biz)
+        system_info(
+            "booking_service_check",
+            service_required=service_required,
+            reason_raw=(booking.get("reason") or "")[:40],
+            normalized_service=service_name or "",
+            service_resolved_in_convo=service_choice_resolved(conversation_history, _ctx_dbg),
+            last_user_named_service=_bf.user_indicated_service_name(user_text, _ctx_dbg.service_names),
+            menu=", ".join(sorted(_ctx_dbg.service_names))[:120],
+            user_text_tail=(user_text or "")[-60:],
+        )
+    except Exception:
+        pass
     booking_date = (booking.get("date") or "").strip()
     if booking_date:
         try:
@@ -942,6 +960,9 @@ async def generate_response_async(
                         name_initial=name_initial_for_log(booking.get("name")),
                         date=booking.get("date"),
                         time=booking.get("time"),
+                        # DIAGNOSTIC: what service/stylist did the extraction capture?
+                        service_captured=(booking.get("reason") or "")[:40],
+                        stylist_captured=(booking.get("staff") or "")[:40],
                         from_number=from_num or None,
                         to_number=to_num or None,
                         client_id=cid_raw or None,
