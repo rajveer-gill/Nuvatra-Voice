@@ -206,6 +206,37 @@ def test_tts_audio_truncates_long_text(monkeypatch):
         assert len(call_kw["input"]) <= phone_router.TTS_MAX_INPUT_CHARS + 50
 
 
+def test_utterance_binds_tenant_context(monkeypatch):
+    """The Deepgram utterance path must bind the tenant context so get_business_info loads
+    the right tenant (regression: forward-to-human loaded an empty config → no transfer)."""
+    import asyncio
+    import time as _time
+
+    from voice.call_session_store import MemoryCallSessionStore, reset_call_session_store_for_tests
+    import main
+    import database
+    from voice import utterance as utt
+
+    reset_call_session_store_for_tests(MemoryCallSessionStore())
+    bound = []
+    monkeypatch.setattr(database, "set_request_client_id", lambda cid: bound.append(cid))
+    monkeypatch.setattr(main, "get_business_info", lambda: {"forwarding_phone": "", "name": "Ctx Test"})
+
+    call_sid = "CAbbbbccccddddeeeeffff000011112222"
+    main.active_calls[call_sid] = {
+        "client_id": "ctx-test", "conversation_history": [], "detected_language": "English",
+        "started_at_epoch": _time.time(), "turn_count": 0, "empty_speech_turns": 0,
+    }
+    # The tenant context binding runs early (right after the session is loaded), before the
+    # rest of the utterance handling — so it's bound regardless of what the empty-speech
+    # path does next in this stub harness.
+    try:
+        asyncio.run(utt.apply_caller_utterance(call_sid, "", 0.0, "https://voice.example.test"))
+    except Exception:
+        pass
+    assert "ctx-test" in bound
+
+
 def test_call_turn_cap_wraps_up_and_hangs_up(monkeypatch):
     """Exceeding the per-call turn cap returns terminal wrap-up TwiML instead of looping."""
     import asyncio

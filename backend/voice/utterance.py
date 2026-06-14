@@ -100,6 +100,15 @@ async def _apply_caller_utterance_locked(
 
     call_data = m.active_calls[call_sid]
 
+    # Bind the tenant context for THIS asyncio task. The Deepgram media-stream path runs in
+    # its own context where the HTTP middleware never set client_id, so get_business_info()
+    # would otherwise load an empty tenant (no forwarding number, services, hours, etc.).
+    _cid = str(call_data.get("client_id") or "").strip()
+    if _cid:
+        import database
+
+        database.set_request_client_id(_cid)
+
     if not (speech_result or "").strip():
         n = int(call_data.get("empty_speech_turns") or 0) + 1
         call_data["empty_speech_turns"] = n
@@ -246,14 +255,13 @@ async def _apply_caller_utterance_locked(
     ):
         _biz = m.get_business_info()
         forwarding_phone = (_biz.get("forwarding_phone") or "").strip()
-        # DIAGNOSTIC: what tenant/config did the call actually load when deciding to forward?
+        # DIAGNOSTIC: confirm the call loaded the right tenant config at the forward decision.
         voice_info(
             "forward_lookup",
             call_sid=call_sid,
             session_client_id=str(call_data.get("client_id") or ""),
             loaded_biz_name=str(_biz.get("name") or "")[:40],
-            has_forwarding_phone=bool(forwarding_phone),
-            forwarding_phone_len=len(forwarding_phone),
+            has_forward_number=bool(forwarding_phone),
         )
         if forwarding_phone:
             voice_forward(
