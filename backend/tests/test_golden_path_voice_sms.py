@@ -11,6 +11,36 @@ import config_service
 import sms_service
 
 
+def test_no_transfer_number_speaks_honest_fallback(monkeypatch):
+    """Caller asked for a human (forward_unavailable flagged) but no forwarding number is
+    configured → the AI must speak the honest take-a-message line, never pretend to be human."""
+    import asyncio
+    import runtime
+
+    monkeypatch.setattr(config_service, "get_business_info",
+                        lambda: {"name": "Test Cuts", "forwarding_phone": "", "staff": [], "services": []})
+    monkeypatch.setattr(config_service, "staff_roster_ready_for_booking", lambda info=None: False)
+    # GPT tries to claim it's a person — the override must replace this.
+    monkeypatch.setattr(main.client.chat.completions, "create", MagicMock())
+    main.client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="I'm a real person, here to help you!"))]
+    )
+
+    call_sid = "CAhonestfallbackaaaaaaaaaaaaaaaaaa"
+    call_data = {
+        "client_id": "test-cuts",
+        "from_number": "+15551230000",
+        "to_number": "+15559876543",
+        "conversation_history": [{"role": "user", "content": "can I talk to a real person"}],
+        "forward_unavailable": True,
+    }
+    asyncio.run(main.generate_response_async(call_sid, call_data, "English", "https://api.example.com"))
+    status = runtime.call_store.response_status.get(call_sid, {})
+    assert status.get("status") == "ready"
+    assert "AI receptionist" in (status.get("ai_text") or "")
+    assert "real person" not in (status.get("ai_text") or "").lower()
+
+
 def test_generate_response_async_links_sms_session_on_booking(monkeypatch):
     """Happy path: BOOKING line creates appointment and links SMS session."""
     from datetime import timedelta

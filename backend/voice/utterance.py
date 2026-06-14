@@ -258,6 +258,9 @@ async def _apply_caller_utterance_locked(
             xml = str(m.forward_call_to_business(forwarding_phone, base_url, detected_lang))
             m._persist_call_session(call_sid, call_data)
             return UtteranceResult(mode="replace_call_twiml", replacement_twiml=xml)
+        # Caller asked for a human but no transfer number is configured — flag it so the
+        # generated reply is an honest "take a message" line, never a fake-human response.
+        call_data["forward_unavailable"] = True
 
     m.response_status[call_sid] = {
         "status": "pending",

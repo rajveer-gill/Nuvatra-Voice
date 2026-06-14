@@ -814,6 +814,14 @@ def get_system_prompt(
 
 # ===== AI conversation turn (the voice/SMS response generator) =====
 
+# Honest reply when a caller asks for a human but no transfer number is configured.
+# Never let the AI claim to be a person — offer a callback/message instead.
+_NO_TRANSFER_FALLBACK_TEXT = (
+    "I'm the AI receptionist, so I can't put a person on the line right now—but I can take "
+    "a message and have the team call you back. What's it regarding, and what's the best "
+    "number to reach you?"
+)
+
 
 async def generate_response_async(
     call_sid: str, call_data: dict, detected_lang: str, base_url: str
@@ -1185,6 +1193,13 @@ async def generate_response_async(
             if not ai_text:
                 ai_text = "Got it—I've passed your message along to the team. Anything else I can help with?"
 
+        # Honest fallback: the caller asked for a human earlier (flagged in the utterance
+        # path) but no transfer number is configured — replace the reply so the AI never
+        # pretends to be a person; offer a callback/message instead.
+        if call_data.pop("forward_unavailable", False):
+            if not (config_service.get_business_info().get("forwarding_phone") or "").strip():
+                ai_text = _NO_TRANSFER_FALLBACK_TEXT
+
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
         call_data["conversation_history"].append(ai_message)
@@ -1243,6 +1258,8 @@ async def generate_response_async(
                     "forwarding_phone": forwarding_phone,
                 }
                 return
+            # AI reply implied a transfer but there's no number — speak the honest line.
+            ai_text = _NO_TRANSFER_FALLBACK_TEXT
 
         # Generate TTS audio URL
         ai_text_encoded = quote(ai_text)

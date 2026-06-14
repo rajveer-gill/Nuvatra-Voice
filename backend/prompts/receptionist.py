@@ -414,16 +414,22 @@ def build_system_prompt(
             f" Your name is {receptionist_name}. When speaking to callers, use this name "
             f"(e.g. “I'm {receptionist_name}”). Do not make up a different name."
         )
+    # Honesty guard: warm and natural, but NEVER claim to be a human.
+    honesty_line = (
+        " You are an AI receptionist. Never claim or imply you are a human or 'a real person.' "
+        "If a caller asks to speak to a person, do not pretend to be one—offer to connect them "
+        "with the team or take a message."
+    )
     if industry_desc:
         header = (
-            f"Friendly, professional AI receptionist for {name}, a {industry_desc}.{identity_line} "
-            "Use natural conversational language and sound like a regular helpful person. "
+            f"Friendly, professional AI receptionist for {name}, a {industry_desc}.{identity_line}{honesty_line} "
+            "Use natural, conversational language and be warm and personable. "
             "Keep responses brief (1-2 short sentences) and clear."
         )
     else:
         header = (
-            f"Friendly, professional AI receptionist for {name}.{identity_line} "
-            "Use natural conversational language and sound like a regular helpful person. "
+            f"Friendly, professional AI receptionist for {name}.{identity_line}{honesty_line} "
+            "Use natural, conversational language and be warm and personable. "
             "Keep responses brief (1-2 short sentences) and clear."
         )
 
