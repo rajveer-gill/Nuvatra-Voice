@@ -73,6 +73,30 @@ def _stripe_price_id(plan: str) -> Optional[str]:
     return (os.getenv(key) or os.getenv("STRIPE_PRICE_ID") or "").strip() or None
 
 
+def _plan_from_price_id(price_id: Optional[str]) -> Optional[str]:
+    """Reverse-map a Stripe price ID to a plan name. Used for Customer-Portal plan
+    switches, where the new plan is carried in the subscription's line items (not our
+    metadata). Returns None for an unrecognized price so we never guess."""
+    pid = (price_id or "").strip()
+    if not pid:
+        return None
+    for plan in ("starter", "growth", "pro"):
+        if (os.getenv(f"STRIPE_{plan.upper()}_PRICE_ID") or "").strip() == pid:
+            return plan
+    return None
+
+
+def _subscription_plan_from_obj(obj: dict) -> Optional[str]:
+    """Derive the plan from a Stripe subscription object's first line-item price."""
+    try:
+        items = ((obj.get("items") or {}).get("data")) or []
+        if items:
+            return _plan_from_price_id((items[0].get("price") or {}).get("id"))
+    except Exception:
+        pass
+    return None
+
+
 class CreateCheckoutSessionRequest(BaseModel):
     plan: Literal["starter", "growth", "pro"]
     # Self-serve signup: preferred area code for the number provisioned after checkout.
@@ -534,9 +558,11 @@ async def stripe_webhook(request: Request):
                 if t:
                     tenant_id = t.get("id")
             if tenant_id and sub_id:
-                # plan is None when metadata is absent → leave the existing plan
-                # untouched rather than silently downgrading a paying tenant to starter.
-                plan = meta.get("plan")
+                # Prefer metadata.plan (set at checkout); for a Customer-Portal plan
+                # switch there's no metadata, so derive the plan from the subscription's
+                # line-item price. Falls back to None (leave plan untouched) only when the
+                # price is unrecognized — never silently downgrades to starter.
+                plan = meta.get("plan") or _subscription_plan_from_obj(obj)
                 database.db_tenant_update_subscription(
                     tenant_id,
                     stripe_subscription_id=sub_id,

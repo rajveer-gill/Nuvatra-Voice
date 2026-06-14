@@ -147,6 +147,39 @@ def test_subscription_updated_resolves_by_sub_id_when_metadata_absent(client, mo
         os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
 
 
+def test_portal_plan_switch_syncs_plan_from_price(client, monkeypatch):
+    """A Customer-Portal plan switch sends subscription.updated with no metadata.plan —
+    the new plan must be derived from the line-item price so DB limits stay in sync."""
+    import database
+    import deps
+    import runtime
+    from routers import billing
+
+    monkeypatch.setattr(runtime, "USE_DB", True)
+    os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test"
+    os.environ["STRIPE_GROWTH_PRICE_ID"] = "price_growth_live"
+    updates = {}
+    monkeypatch.setattr(database, "db_tenant_get_by_stripe_subscription_id",
+                        lambda sub_id: {"id": "t-3", "client_id": "c-3"})
+    monkeypatch.setattr(database, "db_tenant_update_subscription",
+                        lambda tid, **kw: updates.update(tenant_id=tid, **kw) or True)
+    monkeypatch.setattr(database, "db_tenant_get_by_id", lambda tid: {"id": tid, "client_id": "c-3"})
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    try:
+        resp = _post_event(client, billing, {
+            "type": "customer.subscription.updated",
+            "data": {"object": {
+                "id": "sub_3", "status": "active", "metadata": {},
+                "items": {"data": [{"price": {"id": "price_growth_live"}}]},
+            }},
+        })
+        assert resp.status_code == 200
+        assert updates.get("plan") == "growth"  # derived from the price, not metadata
+    finally:
+        os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+        os.environ.pop("STRIPE_GROWTH_PRICE_ID", None)
+
+
 def test_subscription_deleted_releases_twilio_number(client, monkeypatch):
     import database
     import deps
