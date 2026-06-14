@@ -34,8 +34,13 @@ router = APIRouter()
 
 
 @router.get("/api/stats")
-def get_stats(_: None = Depends(deps.require_active_subscription)):
-    apts = database.db_appointments_get_all() if runtime.USE_DB else runtime.appointments
+def get_stats(tenant: Optional[dict] = Depends(deps.require_active_subscription)):
+    # Re-bind tenant context in the handler: a contextvar set inside the sync
+    # require_tenant dependency does not survive into this sync endpoint (separate
+    # threadpool context), so without this the reads fall back to the default
+    # client_id and every tenant sees zeros. Same pattern as the appointments route.
+    cid = deps._bind_tenant_db_context(tenant)
+    apts = database.db_appointments_get_all(client_id=cid) if runtime.USE_DB else runtime.appointments
     msgs = database.db_messages_get_all() if runtime.USE_DB else runtime.messages
     pending = len([a for a in apts if a.get("status") == "pending"])
     return {
@@ -89,6 +94,7 @@ def get_analytics_health(
     _: None = Depends(deps.require_active_subscription),
 ):
     """7-day call health metrics for tenant dashboard (not plan-gated)."""
+    deps._bind_tenant_db_context(tenant)  # contextvar from the dep doesn't reach this sync handler
     period_days = 7
     log = _load_call_log(days=period_days)
     total = len(log)
@@ -147,6 +153,7 @@ def get_analytics_summary(
     """Pro: Peak call times, outcomes, total calls. Filtered by plan (call_log_days).
     by_day_of_week counts only the current ISO week (UTC); full history stays in DB/export.
     """
+    deps._bind_tenant_db_context(tenant)  # contextvar from the dep doesn't reach this sync handler
     days = _call_log_days(tenant)
     log = _load_call_log(days=days)
     week_start, week_end_excl = _analytics_iso_week_bounds_utc()
@@ -202,6 +209,7 @@ def get_analytics_calls(
     _: None = Depends(deps.require_active_subscription),
 ):
     """Pro: Recent calls for dashboard. Filtered by plan (call_log_days). Optional filter by outcome."""
+    deps._bind_tenant_db_context(tenant)  # contextvar from the dep doesn't reach this sync handler
     days = _call_log_days(tenant)
     log = _load_call_log(days=days)
     if outcome:
@@ -223,6 +231,7 @@ def get_analytics_export(
         raise HTTPException(
             status_code=403, detail="Export is available on Growth and Pro plans"
         )
+    deps._bind_tenant_db_context(tenant)  # contextvar from the dep doesn't reach this sync handler
     days = _call_log_days(tenant)
     log = _load_call_log(days=days)
 

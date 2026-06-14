@@ -40,7 +40,10 @@ def get_subscription(tenant: Optional[dict] = Depends(deps.require_tenant)):
     state = get_tenant_subscription_state(tenant)
     if get_plan_limits:
         state["limits"] = get_plan_limits(tenant)
-    cid = database._client_id()
+    # Use the tenant's client_id directly — a contextvar set inside the sync
+    # require_tenant dependency does not survive into this sync endpoint, so
+    # database._client_id() would fall back to "default" and show zero usage.
+    cid = ((tenant or {}).get("client_id") or "").strip() or database._client_id()
     if runtime.USE_DB and cid and cid != "default":
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         usage = database.db_usage_get(cid, month)
