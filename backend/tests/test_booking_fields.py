@@ -103,6 +103,17 @@ def test_service_choice_resolved_when_user_named_service():
     assert service_choice_resolved(history, ctx, canonical_service="Long Cut")
 
 
+def test_service_match_is_whitespace_insensitive():
+    """STT often joins words: 'shortcut' must match the menu item 'Short Cut'."""
+    from booking_fields import user_indicated_service_name
+
+    names = frozenset({"short cut", "long cut"})
+    assert user_indicated_service_name("let's do a shortcut please", names)
+    assert user_indicated_service_name("i'd like a longcut", names)
+    assert user_indicated_service_name("short cut please", names)  # still matches spaced form
+    assert not user_indicated_service_name("just a wash", names)
+
+
 def test_service_choice_resolved_on_yes_after_service_list():
     ctx = _ctx()
     history = [

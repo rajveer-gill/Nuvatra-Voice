@@ -259,8 +259,17 @@ def user_indicated_service_name(user_text: str, service_names: frozenset[str]) -
     t = (user_text or "").lower()
     if not t.strip():
         return False
+    # Whitespace-insensitive comparison too: speech-to-text often runs multi-word service
+    # names together ("short cut" -> "shortcut"), which shouldn't fail the match.
+    t_nospace = re.sub(r"\s+", "", t)
     for nm in service_names:
+        nm = (nm or "").strip()
+        if not nm:
+            continue
         if re.search(rf"\b{re.escape(nm)}\b", t) or nm in t:
+            return True
+        nm_nospace = re.sub(r"\s+", "", nm)
+        if nm_nospace and nm_nospace in t_nospace:
             return True
     return False
 
