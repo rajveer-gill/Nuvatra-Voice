@@ -157,6 +157,17 @@ export function ReferralsPanel() {
     })
   }
 
+  const generateCode = () => {
+    // Readable random code: drop ambiguous chars (0/O, 1/I/L) so it's easy to share by
+    // voice/text. Seed with a slug of the referrer's name when present, for memorability.
+    const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+    const rand = (n: number) =>
+      Array.from({ length: n }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('')
+    const slug = form.referrer_name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5)
+    const code = slug ? `${slug}${rand(3)}` : rand(6)
+    setForm({ ...form, code: code.slice(0, 40) })
+  }
+
   const owed = (commissions || []).filter((c) => !c.paid)
 
   return (
@@ -197,14 +208,24 @@ export function ReferralsPanel() {
             placeholder="Contact (how you'll pay them)"
             className="rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
           />
-          <input
-            value={form.code}
-            onChange={(e) =>
-              setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 40) })
-            }
-            placeholder="Code (letters/numbers)"
-            className="rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm font-mono text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
-          />
+          <div className="flex gap-2">
+            <input
+              value={form.code}
+              onChange={(e) =>
+                setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 40) })
+              }
+              placeholder="Code (or generate →)"
+              className="min-w-0 flex-1 rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm font-mono text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={generateCode}
+              title="Generate a random code"
+              className="shrink-0 rounded-lg border border-white/15 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-white/5"
+            >
+              Generate
+            </button>
+          </div>
         </div>
         <button
           type="submit"
