@@ -43,6 +43,7 @@ def get_subscription(tenant: Optional[dict] = Depends(deps.require_tenant)):
     # Use the tenant's client_id directly — a contextvar set inside the sync
     # require_tenant dependency does not survive into this sync endpoint, so
     # database._client_id() would fall back to "default" and show zero usage.
+    raw_cid_before = database._client_id()  # DIAGNOSTIC
     cid = ((tenant or {}).get("client_id") or "").strip() or database._client_id()
     if runtime.USE_DB and cid and cid != "default":
         month = datetime.now(timezone.utc).strftime("%Y-%m")
@@ -52,6 +53,15 @@ def get_subscription(tenant: Optional[dict] = Depends(deps.require_tenant)):
             "sms_count": usage.get("sms_count") or 0,
             "month": month,
         }
+        logger.info(
+            "dashboard_usage_debug tenant_cid=%s contextvar_cid=%s mismatch=%s month=%s voice_minutes=%s sms_count=%s",
+            cid,
+            raw_cid_before,
+            (raw_cid_before != cid),
+            month,
+            usage.get("voice_minutes") or 0,
+            usage.get("sms_count") or 0,
+        )
     else:
         state["usage"] = {
             "voice_minutes": 0,

@@ -21,6 +21,7 @@ import database
 import deps
 import runtime
 import voice_service
+from observability import system_info
 
 try:
     from plans import get_plan_limits
@@ -39,10 +40,27 @@ def get_stats(tenant: Optional[dict] = Depends(deps.require_active_subscription)
     # require_tenant dependency does not survive into this sync endpoint (separate
     # threadpool context), so without this the reads fall back to the default
     # client_id and every tenant sees zeros. Same pattern as the appointments route.
+    # DIAGNOSTIC: capture what the contextvar resolved to BEFORE we re-bind, to prove
+    # whether the require_tenant dependency's client_id reached this sync handler.
+    raw_cid_before_bind = database._client_id() if runtime.USE_DB else None
     cid = deps._bind_tenant_db_context(tenant)
     apts = database.db_appointments_get_all(client_id=cid) if runtime.USE_DB else runtime.appointments
     msgs = database.db_messages_get_all() if runtime.USE_DB else runtime.messages
     pending = len([a for a in apts if a.get("status") == "pending"])
+    if runtime.USE_DB:
+        diag = database.db_appointments_diagnostics(cid)
+        system_info(
+            "dashboard_stats_debug",
+            tenant_client_id=cid,
+            contextvar_before_bind=raw_cid_before_bind,
+            bind_changed_cid=(raw_cid_before_bind != cid),
+            appointment_count=len(apts),
+            message_count=len(msgs),
+            appts_by_status=diag.get("by_status"),
+            env_client_id=diag.get("env_client_id"),
+            env_appointment_count=diag.get("env_client_id_appointment_count"),
+            likely_client_id_mismatch=bool(diag.get("likely_mismatch")),
+        )
     return {
         "total_appointments": len(apts),
         "total_messages": len(msgs),
@@ -94,9 +112,20 @@ def get_analytics_health(
     _: None = Depends(deps.require_active_subscription),
 ):
     """7-day call health metrics for tenant dashboard (not plan-gated)."""
-    deps._bind_tenant_db_context(tenant)  # contextvar from the dep doesn't reach this sync handler
+    raw_cid_before_bind = database._client_id() if runtime.USE_DB else None  # DIAGNOSTIC
+    cid = deps._bind_tenant_db_context(tenant)  # contextvar from the dep doesn't reach this sync handler
     period_days = 7
     log = _load_call_log(days=period_days)
+    if runtime.USE_DB:
+        all_cid_calls = database.db_call_log_load(limit=5000, days=None)
+        system_info(
+            "dashboard_callhealth_debug",
+            tenant_client_id=cid,
+            contextvar_before_bind=raw_cid_before_bind,
+            bind_changed_cid=(raw_cid_before_bind != cid),
+            calls_last_7d=len(log),
+            calls_all_time_this_tenant=len(all_cid_calls),
+        )
     total = len(log)
     if total == 0:
         return {
