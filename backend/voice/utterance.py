@@ -244,7 +244,17 @@ async def _apply_caller_utterance_locked(
         call_sid=call_sid,
         client_id=str(call_data.get("client_id") or ""),
     ):
-        forwarding_phone = m.get_business_info().get("forwarding_phone")
+        _biz = m.get_business_info()
+        forwarding_phone = (_biz.get("forwarding_phone") or "").strip()
+        # DIAGNOSTIC: what tenant/config did the call actually load when deciding to forward?
+        voice_info(
+            "forward_lookup",
+            call_sid=call_sid,
+            session_client_id=str(call_data.get("client_id") or ""),
+            loaded_biz_name=str(_biz.get("name") or "")[:40],
+            has_forwarding_phone=bool(forwarding_phone),
+            forwarding_phone_len=len(forwarding_phone),
+        )
         if forwarding_phone:
             voice_forward(
                 "caller_requested_human",
