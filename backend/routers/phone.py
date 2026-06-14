@@ -1046,8 +1046,10 @@ async def handle_call_status(request: Request):
 
         # Clean up when call ends + Pro: persist call log and customer memory
         if call_status in ["completed", "failed", "busy", "no-answer", "canceled"]:
-            # Read Twilio Duration and set in voice_service.call_log_entries before voice_service.call_log_end
-            duration_raw = form_data.get("Duration")
+            # Read the call duration before voice_service.call_log_end. Twilio's status
+            # callback sends "CallDuration" (seconds) on the completed event; older/other
+            # contexts use "Duration" — accept either so usage minutes actually record.
+            duration_raw = form_data.get("CallDuration") or form_data.get("Duration")
             if duration_raw is not None:
                 try:
                     dur = int(duration_raw)
@@ -1115,9 +1117,19 @@ async def handle_call_status(request: Request):
             ):
                 try:
                     tenant = database.db_tenant_get_by_client_id(client_id_before)
+                    _has_lead = bool(tenant and get_plan_limits(tenant).get("has_lead_capture"))
+                    # DIAGNOSTIC: why a lead is/ isn't captured for a non-booking call.
+                    system_info(
+                        "lead_capture_check",
+                        client_id=client_id_before,
+                        plan=(tenant or {}).get("plan"),
+                        has_lead_capture=_has_lead,
+                        appointment_created=bool(appointment_created),
+                        has_from_number=bool(from_number_before),
+                    )
                     if (
                         tenant
-                        and get_plan_limits(tenant).get("has_lead_capture")
+                        and _has_lead
                         and not appointment_created
                     ):
                         database.db_leads_insert(
