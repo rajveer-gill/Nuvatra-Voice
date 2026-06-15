@@ -605,7 +605,20 @@ async def persist_generated_session_locked(call_sid: str, call_data: dict) -> No
                 if runtime.call_store.exists(sid):
                     runtime.call_store.save(sid, call_data)
                 return
+            snap_len = len(call_data.get("conversation_history") or [])
+            latest_len = len(latest.get("conversation_history") or [])
             _merge_history_into(latest, call_data)
+            merged_len = len(call_data.get("conversation_history") or [])
+            # DIAGNOSTIC: rescued_turn=True means a caller turn arrived during generation
+            # and the merge preserved it (would have been lost by the old full-overwrite).
+            voice_info(
+                "session_history_merge",
+                call_sid=sid,
+                snapshot_len=snap_len,
+                latest_len=latest_len,
+                merged_len=merged_len,
+                rescued_turn=bool(merged_len > snap_len),
+            )
             runtime.call_store.save(sid, call_data)
     except UtteranceLockError:
         # Lock contended past timeout: still merge best-effort rather than drop the turn.

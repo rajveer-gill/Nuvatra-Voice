@@ -437,6 +437,8 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     cache_key = (text, voice, speed)
     cached = _tts_audio_cache_get(cache_key)
     if cached is not None:
+        # DIAGNOSTIC: confirm repeated phrases (greeting etc.) are served from cache.
+        voice_info("tts_audio_cache_hit", text_prefix=text[:40], voice=voice, bytes=len(cached))
         return Response(
             content=cached,
             media_type="audio/mpeg",
@@ -449,6 +451,7 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     try:
         # Use tts-1 for faster generation while maintaining quality
         # tts-1 is faster than tts-1-hd but still sounds natural and smooth
+        _gen_start = time.time()
         response = runtime.client.audio.speech.create(
             model="tts-1",  # Faster generation, still high quality
             voice=voice,
@@ -457,6 +460,14 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
         )
         data = response.content
         _tts_audio_cache_put(cache_key, data)
+        # DIAGNOSTIC: how long OpenAI TTS took on a cache miss (the 14s-greeting symptom).
+        voice_info(
+            "tts_audio_generated",
+            text_prefix=text[:40],
+            voice=voice,
+            gen_ms=int((time.time() - _gen_start) * 1000),
+            bytes=len(data),
+        )
         return Response(
             content=data,
             media_type="audio/mpeg",
