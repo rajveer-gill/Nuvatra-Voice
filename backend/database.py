@@ -725,6 +725,24 @@ def init_db() -> bool:
             cur.execute("ALTER TABLE booked_slots ADD COLUMN IF NOT EXISTS staff_id TEXT")
         except Exception:
             pass
+        # Concurrency: a unique calendar hold per (tenant, date, time, staff) so two
+        # simultaneous bookings can never double-book the same slot. Dedupe any existing
+        # duplicates first (keep the lowest id) or the unique index creation would fail.
+        try:
+            cur.execute(
+                """
+                DELETE FROM booked_slots a USING booked_slots b
+                WHERE a.id < b.id
+                  AND a.client_id = b.client_id AND a.date = b.date AND a.time = b.time
+                  AND COALESCE(a.staff_id, '') = COALESCE(b.staff_id, '')
+                """
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_booked_slots_unique "
+                "ON booked_slots (client_id, date, time, (COALESCE(staff_id, '')))"
+            )
+        except Exception:
+            pass
         cur.execute("CREATE INDEX IF NOT EXISTS idx_appointments_status_date ON appointments(client_id, status)")
         conn.commit()
         cur.close()
@@ -3755,6 +3773,10 @@ def db_booked_slots_load() -> List[dict]:
     ]
 
 def db_booked_slots_save(slots: List[dict]) -> None:
+    """Bulk rewrite of a tenant's calendar holds (used by reconcile). ON CONFLICT DO
+    NOTHING keeps it safe against the unique slot index. Prefer the incremental
+    db_booked_slot_reserve / db_booked_slot_release for single-booking writes — they
+    avoid the lost-update race of delete-all + re-insert under concurrency."""
     conn = _get_conn()
     if not conn:
         return
@@ -3762,7 +3784,9 @@ def db_booked_slots_save(slots: List[dict]) -> None:
     cur.execute("DELETE FROM booked_slots WHERE client_id = %s", (_client_id(),))
     for s in slots:
         cur.execute(
-            "INSERT INTO booked_slots (client_id, date, time, appointment_id, duration_minutes, staff_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            "INSERT INTO booked_slots (client_id, date, time, appointment_id, duration_minutes, staff_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (client_id, date, time, (COALESCE(staff_id, ''))) DO NOTHING",
             (
                 _client_id(),
                 s["date"],
@@ -3772,6 +3796,42 @@ def db_booked_slots_save(slots: List[dict]) -> None:
                 s.get("staff_id"),
             ),
         )
+    conn.commit()
+    cur.close()
+
+
+def db_booked_slot_reserve(
+    date: str, time: str, appointment_id: int, duration_minutes: int = 30, staff_id: Optional[str] = None
+) -> bool:
+    """Atomically claim one calendar slot. Returns True if reserved, False if the slot
+    was already taken (the unique index rejected it) — closing the check-then-reserve
+    race between two simultaneous bookings. A single INSERT, not read-modify-write."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO booked_slots (client_id, date, time, appointment_id, duration_minutes, staff_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (client_id, date, time, (COALESCE(staff_id, ''))) DO NOTHING",
+        (_client_id(), date, time, appointment_id, duration_minutes, staff_id),
+    )
+    reserved = cur.rowcount == 1
+    conn.commit()
+    cur.close()
+    return reserved
+
+
+def db_booked_slot_release(appointment_id: int) -> None:
+    """Release a single calendar hold by appointment id (incremental delete)."""
+    conn = _get_conn()
+    if not conn:
+        return
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM booked_slots WHERE client_id = %s AND appointment_id = %s",
+        (_client_id(), appointment_id),
+    )
     conn.commit()
     cur.close()
 

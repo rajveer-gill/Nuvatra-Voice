@@ -506,19 +506,28 @@ def reserve_slot(
     appointment_id: int,
     duration_minutes: int = DEFAULT_SLOT_DURATION_MINUTES,
     staff_id: Optional[str] = None,
-) -> None:
-    """Record a slot as booked when creating an appointment."""
-    slots = _load_booked_slots()
-    slots.append(
-        {
-            "date": date,
-            "time": time,
-            "appointment_id": appointment_id,
-            "duration_minutes": duration_minutes,
-            "staff_id": staff_id,
-        }
-    )
-    _save_booked_slots(slots)
+) -> bool:
+    """Record a slot as booked when creating an appointment. Returns True if reserved,
+    False if the slot was already taken by a concurrent booking (DB enforces a unique
+    hold per date/time/staff, so two simultaneous calls can't double-book)."""
+    if runtime.USE_DB:
+        reserved = database.db_booked_slot_reserve(
+            date, time, appointment_id, duration_minutes, staff_id
+        )
+    else:
+        # File-backed single-tenant dev path: no concurrent writers.
+        slots = _load_booked_slots()
+        slots.append(
+            {
+                "date": date,
+                "time": time,
+                "appointment_id": appointment_id,
+                "duration_minutes": duration_minutes,
+                "staff_id": staff_id,
+            }
+        )
+        _save_booked_slots(slots)
+        reserved = True
     _invalidate_booked_slots_cache()
     system_debug(
         "slot_reserved",
@@ -526,13 +535,18 @@ def reserve_slot(
         time=time,
         appointment_id=appointment_id,
         staff_id=staff_id,
+        reserved=reserved,
     )
+    return reserved
 
 def release_slot(appointment_id: int) -> None:
     """Remove slot when appointment is rejected or cancelled."""
-    slots = _load_booked_slots()
-    slots = [s for s in slots if s.get("appointment_id") != appointment_id]
-    _save_booked_slots(slots)
+    if runtime.USE_DB:
+        database.db_booked_slot_release(appointment_id)
+    else:
+        slots = _load_booked_slots()
+        slots = [s for s in slots if s.get("appointment_id") != appointment_id]
+        _save_booked_slots(slots)
     _invalidate_booked_slots_cache()
     system_debug("slot_released", appointment_id=appointment_id)
 

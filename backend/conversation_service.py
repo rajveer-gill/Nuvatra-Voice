@@ -791,7 +791,19 @@ def _create_appointment_from_booking(
         appointment_data["created_at"] = datetime.now().isoformat()
         runtime.appointments.append(appointment_data)
     if reserve_slot_immediately:
-        booking_service.reserve_slot(date, time, apt_id, duration_min, staff_key)
+        if not booking_service.reserve_slot(date, time, apt_id, duration_min, staff_key):
+            # Concurrent booking won the slot between our availability check and reserve.
+            if runtime.USE_DB:
+                try:
+                    database.db_appointments_update(apt_id, status="cancelled", client_id=cid_for_slot)
+                except Exception:
+                    pass
+            booking_service._invalidate_booked_slots_cache()
+            system_info(
+                "booking_create_failed_slot_taken_race",
+                apt_id=apt_id, date=date, time=time, client_id=cid_for_slot,
+            )
+            return None
     appointment_data["id"] = apt_id
     appointment_data.setdefault("created_at", datetime.now().isoformat())
     system_info(

@@ -746,8 +746,14 @@ async def handle_incoming_sms(request: Request):
                 )
                 staff_for = (apt_full.get("staff_id") or "").strip() or None
                 confirm_duration = booking_service._appointment_duration_minutes(apt_full)
+                # Atomic claim: is_slot_available catches duration overlaps; reserve_slot
+                # then claims the exact slot and returns False if a concurrent booking won
+                # the race between the check and the claim. Short-circuit so a lost race
+                # routes to the same "just taken" reply (and never leaves an orphan hold).
                 if not booking_service.is_slot_available(
                     date, time_hhmm, confirm_duration, staff_for
+                ) or not booking_service.reserve_slot(
+                    date, time_hhmm, aid, confirm_duration, staff_for
                 ):
                     sorry = (
                         "Sorry — that time was just taken and we can't hold it anymore. "
@@ -782,9 +788,7 @@ async def handle_incoming_sms(request: Request):
                         content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                         media_type="application/xml",
                     )
-                booking_service.reserve_slot(
-                    date, time_hhmm, aid, confirm_duration, staff_for
-                )
+                # Slot already claimed atomically in the guard above.
                 database.db_appointments_update(
                     aid, status="pending_review", client_id=tenant["client_id"]
                 )

@@ -91,9 +91,18 @@ def create_appointment(
             appointment_data["created_at"] = datetime.now().isoformat()
             runtime.appointments.append(appointment_data)
         if date and time:
-            booking_service.reserve_slot(
+            if not booking_service.reserve_slot(
                 date, time, appointment_id, duration_min, staff_key
-            )
+            ):
+                # A concurrent booking claimed the slot between the availability check
+                # and the reserve. Cancel the row we just created and report the conflict.
+                if runtime.USE_DB:
+                    database.db_appointments_update(
+                        appointment_id, status="cancelled", client_id=cid
+                    )
+                raise HTTPException(
+                    status_code=409, detail="That time slot was just booked. Please pick another time."
+                )
         appointment_data["id"] = appointment_id
         appointment_data.setdefault("created_at", datetime.now().isoformat())
         return {"success": True, "appointment": appointment_data}
