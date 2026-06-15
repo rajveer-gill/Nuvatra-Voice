@@ -158,6 +158,7 @@ export default function Dashboard() {
   const [exporting, setExporting] = useState(false)
   const [usage, setUsage] = useState<{ voice_minutes: number; sms_count: number; month: string } | null>(null)
   const [minutesCap, setMinutesCap] = useState<number | null>(null)
+  const [smsCap, setSmsCap] = useState<number | null>(null)
   const [busyMsgId, setBusyMsgId] = useState<number | null>(null)
   const [replyingId, setReplyingId] = useState<number | null>(null)
   const [replyText, setReplyText] = useState('')
@@ -200,11 +201,12 @@ export default function Dashboard() {
         api.get('/api/sms/threads').catch(() => ({ data: { threads: [] } })),
       ])
 
-      const sub = subRes?.data as { limits?: { has_export?: boolean; has_messages?: boolean; minutes_cap?: number }; usage?: { voice_minutes?: number; sms_count?: number; month?: string } } | null
+      const sub = subRes?.data as { limits?: { has_export?: boolean; has_messages?: boolean; minutes_cap?: number; sms_cap?: number }; usage?: { voice_minutes?: number; sms_count?: number; month?: string } } | null
       const limits = sub?.limits
       setHasExport(!!limits?.has_export)
       setHasMessages(limits?.has_messages !== false)
       setMinutesCap(limits?.minutes_cap ?? null)
+      setSmsCap(limits?.sms_cap ?? null)
       setUsage(
         sub?.usage
           ? {
@@ -359,9 +361,10 @@ export default function Dashboard() {
       {/* Usage widget */}
       {usage != null && minutesCap != null && minutesCap > 0 && (
         <div className="bg-white rounded-lg shadow-md p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-2">Usage this month</h3>
-          <div className="flex items-center gap-4">
-            <div className="flex-1">
+          <h3 className="text-lg font-semibold text-gray-900 mb-3">Usage this month</h3>
+          <div className="space-y-4">
+            {/* Voice minutes */}
+            <div>
               <div className="flex justify-between text-sm text-gray-600 mb-1">
                 <span>Voice minutes: {usage.voice_minutes} / {minutesCap}</span>
                 {usage.voice_minutes > minutesCap && (
@@ -375,7 +378,26 @@ export default function Dashboard() {
                 />
               </div>
             </div>
-            <div className="text-sm text-gray-600">SMS: {usage.sms_count}</div>
+            {/* Text messages */}
+            <div>
+              <div className="flex justify-between text-sm text-gray-600 mb-1">
+                <span>
+                  Text messages: {usage.sms_count}
+                  {smsCap != null && smsCap > 0 ? ` / ${smsCap}` : ''}
+                </span>
+                {smsCap != null && smsCap > 0 && usage.sms_count > smsCap && (
+                  <span className="text-amber-600">Overage: {usage.sms_count - smsCap} extra texts</span>
+                )}
+              </div>
+              {smsCap != null && smsCap > 0 && (
+                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full ${usage.sms_count >= smsCap ? 'bg-amber-500' : 'bg-primary-600'}`}
+                    style={{ width: `${Math.min(100, (usage.sms_count / smsCap) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
