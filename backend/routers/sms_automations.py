@@ -26,7 +26,7 @@ def get_sms_automations(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
     """List SMS automations. Growth/Pro only."""
-    cid = database._client_id()
+    cid = deps._bind_tenant_db_context(tenant)
     if not cid or cid == "default":
         if deps._settings_load_debug_enabled():
             logger.info(
@@ -59,7 +59,7 @@ def create_sms_automation(
     _: None = Depends(deps.require_active_subscription),
 ):
     """Create SMS automation. Growth: max 2, Pro: unlimited."""
-    cid = database._client_id()
+    cid = deps._bind_tenant_db_context(tenant)
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
     if not tenant or not get_plan_limits:
@@ -89,9 +89,9 @@ def create_sms_automation(
 def update_sms_automation(
     automation_id: int,
     req: SmsAutomationUpdate,
-    _: None = Depends(deps.require_active_subscription),
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
-    cid = database._client_id()
+    cid = deps._bind_tenant_db_context(tenant)
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
     ok = database.db_sms_automations_update(
@@ -104,9 +104,10 @@ def update_sms_automation(
 
 @router.delete("/api/sms-automations/{automation_id}")
 def delete_sms_automation(
-    automation_id: int, _: None = Depends(deps.require_active_subscription)
+    automation_id: int,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
-    cid = database._client_id()
+    cid = deps._bind_tenant_db_context(tenant)
     if not cid or cid == "default":
         raise HTTPException(status_code=400, detail="No client context")
     ok = database.db_sms_automations_delete(automation_id, cid)

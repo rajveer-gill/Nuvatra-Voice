@@ -31,7 +31,10 @@ def get_leads(
     _: None = Depends(deps.require_active_subscription),
 ):
     """Get leads for the current tenant. Growth/Pro only; Starter returns empty."""
-    cid = database._client_id()
+    # Bind tenant context in the handler: the client_id contextvar set inside the sync
+    # require_tenant dependency does not survive into this sync endpoint, so
+    # database._client_id() would resolve to "default" and always return no leads.
+    cid = deps._bind_tenant_db_context(tenant)
     if not cid or cid == "default":
         return {"leads": []}
     if tenant and get_plan_limits:
