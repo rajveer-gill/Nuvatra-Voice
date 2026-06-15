@@ -197,8 +197,9 @@ def cron_process_overage(request: Request):
         sms_count = usage.get("sms_count") or 0
         voice_over = max(0, voice_minutes - voice_cap)
         sms_over = max(0, sms_count - sms_cap)
-        voice_cents = int(voice_over * price_per_min * 100)
-        sms_cents = int(sms_over * price_per_sms * 100)
+        # round(), not int(): float truncation (e.g. 0.029*100) would silently undercharge a cent.
+        voice_cents = round(voice_over * price_per_min * 100)
+        sms_cents = round(sms_over * price_per_sms * 100)
         if voice_cents <= 0 and sms_cents <= 0:
             database.db_overage_processed_insert(cid, prev_month)
             tenants_processed += 1

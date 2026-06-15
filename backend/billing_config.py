@@ -11,8 +11,10 @@ _log = logging.getLogger("nuvatra")
 
 # USD per extra voice minute (monthly overage cron).
 OVERAGE_PRICE_PER_MINUTE_DEFAULT = 0.15
-# USD per extra SMS over the plan cap (monthly overage cron).
-OVERAGE_PRICE_PER_SMS_DEFAULT = 0.03
+# USD per extra SMS over the plan cap (monthly overage cron). Set above raw cost:
+# a metered outbound text also pays for the paired inbound + A2P carrier fees +
+# possible multi-segment billing (~$0.02–0.04 all-in), so $0.05 keeps a margin.
+OVERAGE_PRICE_PER_SMS_DEFAULT = 0.05
 
 
 def _resolve_price(env_var: str, default: float) -> float:
