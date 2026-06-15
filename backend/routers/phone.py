@@ -1073,6 +1073,19 @@ async def handle_call_status(request: Request):
             duration_sec = 0
             if call_sid in voice_service.call_log_entries:
                 duration_sec = voice_service.call_log_entries[call_sid].get("duration_sec") or 0
+            # DIAGNOSTIC: full picture of how this ended call was resolved, BEFORE the
+            # DB client_id fallback, so we can see exactly which path a quick hangup took.
+            system_info(
+                "call_end_state",
+                call_sid=call_sid or "",
+                call_status=call_status or "",
+                session_present=bool(call_sid in runtime.call_store.sessions),
+                in_call_log_entries=bool(call_sid in voice_service.call_log_entries),
+                client_id_before=client_id_before or "",
+                has_from_number=bool(from_number_before),
+                appointment_created=bool(appointment_created),
+                duration_sec=duration_sec,
+            )
             if call_sid in runtime.call_store.sessions:
                 call_data = runtime.call_store.sessions[call_sid]
                 outcome = call_data.get("outcome")
@@ -1115,6 +1128,12 @@ async def handle_call_status(request: Request):
                 client_id_before = database.db_call_log_get_client_id_by_call_sid(call_sid)
                 if not from_number_before:
                     from_number_before = (form_data.get("From") or "").strip() or None
+                system_info(
+                    "lead_capture_client_id_fallback",
+                    call_sid=call_sid or "",
+                    resolved_client_id=client_id_before or "",
+                    resolved_from_number=bool(from_number_before),
+                )
             # Lead capture: when call ended without booking and plan allows
             if (
                 runtime.USE_DB
@@ -1140,12 +1159,28 @@ async def handle_call_status(request: Request):
                         and _has_lead
                         and not appointment_created
                     ):
-                        database.db_leads_insert(
+                        lead_id = database.db_leads_insert(
                             client_id_before,
                             None,
                             from_number_before,
                             "inquiry",
                             "call",
+                        )
+                        # Confirm the write actually landed (insert returns None on failure).
+                        system_info(
+                            "lead_captured",
+                            client_id=client_id_before,
+                            lead_id=lead_id,
+                            inserted=bool(lead_id),
+                            from_number_present=bool(from_number_before),
+                        )
+                    else:
+                        system_info(
+                            "lead_capture_not_eligible",
+                            client_id=client_id_before,
+                            tenant_found=bool(tenant),
+                            has_lead_capture=_has_lead,
+                            appointment_created=bool(appointment_created),
                         )
                 except Exception as e:
                     logger.error(
