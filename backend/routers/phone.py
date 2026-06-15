@@ -1107,6 +1107,14 @@ async def handle_call_status(request: Request):
                 )
                 voice_service.call_log_end(call_sid)
                 voice_service.cleanup_call_runtime_state(call_sid or "")
+            # Quick-hangup path: the session is already gone from call_store.sessions and
+            # call_log_entries carries no client_id field, so resolve it from the call_log
+            # row we just persisted. Without this, abandoned calls (caller hangs up right
+            # away) never capture as leads even though that's exactly the lead we want.
+            if not client_id_before and runtime.USE_DB and call_sid:
+                client_id_before = database.db_call_log_get_client_id_by_call_sid(call_sid)
+                if not from_number_before:
+                    from_number_before = (form_data.get("From") or "").strip() or None
             # Lead capture: when call ended without booking and plan allows
             if (
                 runtime.USE_DB
@@ -1144,6 +1152,20 @@ async def handle_call_status(request: Request):
                         "lead_capture_failed",
                         extra={"client_id": client_id_before, "error": str(e)},
                     )
+            elif runtime.USE_DB:
+                # Log exactly why a non-booking call did NOT reach lead capture.
+                system_info(
+                    "lead_capture_skipped",
+                    call_sid=call_sid or "",
+                    client_id=client_id_before or "",
+                    has_from_number=bool(from_number_before),
+                    reason=(
+                        "no_client_id" if not client_id_before
+                        else "default_client_id" if client_id_before == "default"
+                        else "no_from_number" if not from_number_before
+                        else "no_plan_limits"
+                    ),
+                )
             # Record voice usage for billing (graceful degradation: log on failure, do not raise)
             if runtime.USE_DB and client_id_before and client_id_before != "default":
                 try:
