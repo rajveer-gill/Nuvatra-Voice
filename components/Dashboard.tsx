@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, Fragment } from 'react'
-import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loader2, RefreshCw, Lock } from 'lucide-react'
+import { Calendar, MessageSquare, Phone, TrendingUp, BarChart3, Check, Send, Loader2, RefreshCw, Lock, Search, X, ChevronRight } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -43,6 +43,20 @@ interface Stats {
   total_appointments: number
   total_messages: number
   pending_appointments: number
+}
+
+interface SmsThread {
+  phone: string
+  message_count: number
+  last_message: string
+  last_role: string
+  updated_at: string
+  appointment_id: number | null
+}
+
+interface ThreadMessage {
+  role: string
+  content: string
 }
 
 interface AnalyticsSummary {
@@ -96,6 +110,29 @@ function relativeAgo(ts: number | null): string {
   return `${mins}m ago`
 }
 
+/** Format a stored digits-only phone (e.g. "19259978995") as +1 (925) 997-8995. */
+function formatPhone(raw: string): string {
+  const d = (raw || '').replace(/\D/g, '')
+  if (d.length === 11 && d.startsWith('1')) {
+    return `+1 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`
+  }
+  if (d.length === 10) {
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`
+  }
+  return raw || '—'
+}
+
+function relativeOrDate(iso: string): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const secs = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`
+  return new Date(iso).toLocaleDateString()
+}
+
 export default function Dashboard() {
   const api = useApiClient()
   const [stats, setStats] = useState<Stats>({
@@ -105,6 +142,11 @@ export default function Dashboard() {
   })
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [messages, setMessages] = useState<Message[]>([])
+  const [smsThreads, setSmsThreads] = useState<SmsThread[]>([])
+  const [threadSearch, setThreadSearch] = useState('')
+  const [openThreadPhone, setOpenThreadPhone] = useState<string | null>(null)
+  const [threadMessages, setThreadMessages] = useState<ThreadMessage[] | null>(null)
+  const [threadLoading, setThreadLoading] = useState(false)
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [callHealth, setCallHealth] = useState<AnalyticsHealth | null>(null)
   const [recentCalls, setRecentCalls] = useState<CallLogEntry[]>([])
@@ -145,7 +187,7 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     try {
-      const [statsRes, appointmentsRes, messagesRes, summaryRes, callsRes, subRes, healthRes] = await Promise.all([
+      const [statsRes, appointmentsRes, messagesRes, summaryRes, callsRes, subRes, healthRes, threadsRes] = await Promise.all([
         api.get('/api/stats'),
         api.get('/api/appointments'),
         api.get('/api/messages'),
@@ -153,6 +195,7 @@ export default function Dashboard() {
         api.get('/api/analytics/calls?limit=20').catch(() => ({ data: { calls: [] } })),
         api.get('/api/subscription').catch(() => ({ data: null })),
         api.get('/api/analytics/health').catch(() => ({ data: null })),
+        api.get('/api/sms/threads').catch(() => ({ data: { threads: [] } })),
       ])
 
       const sub = subRes?.data as { limits?: { has_export?: boolean; minutes_cap?: number }; usage?: { voice_minutes?: number; sms_count?: number; month?: string } } | null
@@ -174,6 +217,7 @@ export default function Dashboard() {
       setAnalyticsSummary(summaryRes.data?.client_id != null ? summaryRes.data : null)
       setCallHealth(healthRes.data?.calls_total != null ? healthRes.data : null)
       setRecentCalls(callsRes.data?.calls || [])
+      setSmsThreads(threadsRes.data?.threads || [])
       setLastUpdated(Date.now())
     } catch (error: unknown) {
       const status = (error as { response?: { status?: number } })?.response?.status
@@ -199,6 +243,26 @@ export default function Dashboard() {
     } finally {
       setBusyMsgId(null)
     }
+  }
+
+  const openThread = async (phone: string) => {
+    setOpenThreadPhone(phone)
+    setThreadMessages(null)
+    setThreadLoading(true)
+    try {
+      const res = await api.get(`/api/sms/thread?phone=${encodeURIComponent(phone)}`)
+      setThreadMessages(res.data?.messages || [])
+    } catch (error) {
+      console.error('Failed to load conversation', error)
+      setThreadMessages([])
+    } finally {
+      setThreadLoading(false)
+    }
+  }
+
+  const closeThread = () => {
+    setOpenThreadPhone(null)
+    setThreadMessages(null)
   }
 
   const sendReply = async (id: number) => {
@@ -626,19 +690,86 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Messages Table */}
+      {/* SMS conversations */}
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center">
+            <MessageSquare className="w-5 h-5 mr-2" />
+            Messages
+          </h2>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text"
+              value={threadSearch}
+              onChange={(e) => setThreadSearch(e.target.value)}
+              placeholder="Search by phone number…"
+              className="w-64 max-w-full rounded-lg border border-gray-300 py-2 pl-9 pr-3 text-sm text-gray-900 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            />
+          </div>
+        </div>
+        {(() => {
+          const q = threadSearch.replace(/\D/g, '')
+          const filtered = q
+            ? smsThreads.filter((t) => t.phone.replace(/\D/g, '').includes(q))
+            : smsThreads
+          if (smsThreads.length === 0) {
+            return (
+              <EmptyState
+                icon={MessageSquare}
+                title="No conversations yet"
+                description="When a caller texts your number, the conversation appears here. Select one to read the whole thread."
+              />
+            )
+          }
+          if (filtered.length === 0) {
+            return (
+              <p className="py-8 text-center text-sm text-gray-500">
+                No conversations match “{threadSearch}”.
+              </p>
+            )
+          }
+          return (
+            <ul className="divide-y divide-gray-100">
+              {filtered.map((t) => (
+                <li key={t.phone}>
+                  <button
+                    type="button"
+                    onClick={() => openThread(t.phone)}
+                    className="-mx-2 flex w-full items-center gap-3 rounded-lg px-2 py-3 text-left hover:bg-gray-50"
+                  >
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-indigo-600 text-white">
+                      <MessageSquare className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-gray-900">{formatPhone(t.phone)}</span>
+                        <span className="shrink-0 text-xs text-gray-400">{relativeOrDate(t.updated_at)}</span>
+                      </div>
+                      <p className="truncate text-sm text-gray-600">
+                        {t.last_role === 'assistant' && <span className="text-gray-400">You: </span>}
+                        {t.last_message || '—'}
+                      </p>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                      {t.message_count}
+                    </span>
+                    <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
+        })()}
+      </div>
+
+      {/* Voicemail messages — only shown when callers have left any */}
+      {messages.length > 0 && (
       <div className="bg-white rounded-lg shadow-md p-6">
         <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
           <MessageSquare className="w-5 h-5 mr-2" />
-          Recent Messages
+          Voicemail messages
         </h2>
-        {messages.length === 0 ? (
-          <EmptyState
-            icon={MessageSquare}
-            title="No messages yet"
-            description="When a caller leaves a message, it'll appear here to read and reply to."
-          />
-        ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-gray-900">
               <thead>
@@ -754,8 +885,69 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
-        )}
       </div>
+      )}
+
+      {openThreadPhone && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+          onClick={closeThread}
+        >
+          <div
+            className="flex h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl sm:h-[80vh] sm:rounded-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-indigo-600 text-white">
+                  <MessageSquare className="h-5 w-5" />
+                </div>
+                <div>
+                  <p className="font-semibold text-gray-900">{formatPhone(openThreadPhone)}</p>
+                  <p className="text-xs text-gray-500">Conversation with your AI receptionist</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeThread}
+                aria-label="Close conversation"
+                className="rounded-full p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="flex-1 space-y-3 overflow-y-auto bg-gray-50 px-4 py-5">
+              {threadLoading ? (
+                <div className="flex h-full items-center justify-center text-gray-400">
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                </div>
+              ) : !threadMessages || threadMessages.length === 0 ? (
+                <p className="py-10 text-center text-sm text-gray-500">No messages in this conversation.</p>
+              ) : (
+                threadMessages.map((m, i) => {
+                  const fromBiz = m.role === 'assistant'
+                  return (
+                    <div key={i} className={`flex ${fromBiz ? 'justify-end' : 'justify-start'}`}>
+                      <div
+                        className={`max-w-[78%] whitespace-pre-wrap rounded-2xl px-4 py-2 text-sm shadow-sm ${
+                          fromBiz
+                            ? 'rounded-br-sm bg-gradient-to-r from-cyan-500 to-indigo-600 text-white'
+                            : 'rounded-bl-sm bg-white text-gray-900 ring-1 ring-gray-200'
+                        }`}
+                      >
+                        {m.content}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+            <div className="border-t border-gray-200 px-5 py-3 text-center text-xs text-gray-400">
+              {formatPhone(openThreadPhone)} · {threadMessages?.length ?? 0} messages
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

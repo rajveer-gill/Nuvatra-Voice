@@ -195,9 +195,47 @@ def create_message(
 
 
 @router.get("/api/messages")
-def get_messages(_: None = Depends(deps.require_active_subscription)):
+def get_messages(tenant: Optional[dict] = Depends(deps.require_active_subscription)):
+    deps._bind_tenant_db_context(tenant)  # contextvar from the dep doesn't reach this sync handler
     lst = database.db_messages_get_all() if runtime.USE_DB else runtime.messages
     return {"messages": lst}
+
+
+@router.get("/api/sms/threads")
+def get_sms_threads(
+    search: Optional[str] = None,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """List SMS conversation threads (one per phone number) for the tenant, newest first."""
+    cid = deps._bind_tenant_db_context(tenant)
+    threads = database.db_sms_threads_list(cid, search=search) if runtime.USE_DB else []
+    return {"threads": threads}
+
+
+@router.get("/api/sms/thread")
+def get_sms_thread(
+    phone: str,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Full message history for a single SMS thread (caller <-> AI receptionist)."""
+    cid = deps._bind_tenant_db_context(tenant)
+    if not runtime.USE_DB:
+        return {"phone": phone, "messages": [], "appointment_id": None, "updated_at": ""}
+    sess = database.db_sms_session_get(phone, cid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msgs = [
+        {"role": m.get("role") or "", "content": m.get("content") or ""}
+        for m in (sess.get("messages") or [])
+        if isinstance(m, dict)
+    ]
+    updated = sess.get("updated_at")
+    return {
+        "phone": database._normalize_phone(phone),
+        "messages": msgs,
+        "appointment_id": sess.get("appointment_id"),
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (updated or ""),
+    }
 
 
 def _find_inmem_message(message_id: int) -> Optional[dict]:

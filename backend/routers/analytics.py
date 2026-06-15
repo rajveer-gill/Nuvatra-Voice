@@ -45,7 +45,8 @@ def get_stats(tenant: Optional[dict] = Depends(deps.require_active_subscription)
     raw_cid_before_bind = database._client_id() if runtime.USE_DB else None
     cid = deps._bind_tenant_db_context(tenant)
     apts = database.db_appointments_get_all(client_id=cid) if runtime.USE_DB else runtime.appointments
-    msgs = database.db_messages_get_all() if runtime.USE_DB else runtime.messages
+    # Total Messages = all texts exchanged (in + out) across every SMS conversation.
+    total_messages = database.db_sms_messages_total(cid) if runtime.USE_DB else len(runtime.messages)
     pending = len([a for a in apts if a.get("status") == "pending"])
     if runtime.USE_DB:
         diag = database.db_appointments_diagnostics(cid)
@@ -55,7 +56,7 @@ def get_stats(tenant: Optional[dict] = Depends(deps.require_active_subscription)
             contextvar_before_bind=raw_cid_before_bind,
             bind_changed_cid=(raw_cid_before_bind != cid),
             appointment_count=len(apts),
-            message_count=len(msgs),
+            message_count=total_messages,
             appts_by_status=diag.get("by_status"),
             env_client_id=diag.get("env_client_id"),
             env_appointment_count=diag.get("env_client_id_appointment_count"),
@@ -63,7 +64,7 @@ def get_stats(tenant: Optional[dict] = Depends(deps.require_active_subscription)
         )
     return {
         "total_appointments": len(apts),
-        "total_messages": len(msgs),
+        "total_messages": total_messages,
         "pending_appointments": pending,
     }
 

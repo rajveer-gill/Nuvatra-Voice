@@ -2448,6 +2448,74 @@ def db_sms_session_upsert(phone: str, client_id: str, messages: list, appointmen
     cur.close()
 
 
+def db_sms_threads_list(client_id: str, search: Optional[str] = None, limit: int = 200) -> List[dict]:
+    """List SMS conversation threads for a tenant, newest first. Each entry carries the
+    last message preview, total message count, and any linked appointment. Optional
+    `search` filters by phone-number substring (digits only)."""
+    conn = _get_conn()
+    if not conn or not client_id:
+        return []
+    cur = conn.cursor()
+    params: list = [client_id]
+    where = "client_id = %s AND jsonb_array_length(messages) > 0"
+    norm_search = "".join(ch for ch in (search or "") if ch.isdigit())
+    if norm_search:
+        where += " AND phone LIKE %s"
+        params.append(f"%{norm_search}%")
+    params.append(limit)
+    cur.execute(
+        f"""
+        SELECT phone,
+               jsonb_array_length(messages) AS msg_count,
+               messages->-1 AS last_msg,
+               appointment_id,
+               updated_at
+        FROM sms_sessions
+        WHERE {where}
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """,
+        tuple(params),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    out = []
+    for r in rows:
+        last = r[2]
+        if isinstance(last, str):
+            try:
+                last = json.loads(last)
+            except Exception:
+                last = {}
+        if not isinstance(last, dict):
+            last = {}
+        out.append({
+            "phone": r[0],
+            "message_count": r[1] or 0,
+            "last_message": (last.get("content") or "")[:300],
+            "last_role": last.get("role") or "",
+            "appointment_id": r[3],
+            "updated_at": r[4].isoformat() if r[4] else "",
+        })
+    return out
+
+
+def db_sms_messages_total(client_id: str) -> int:
+    """Total text messages exchanged (inbound + outbound) across all SMS threads for a
+    tenant. Powers the dashboard 'Total Messages' card."""
+    conn = _get_conn()
+    if not conn or not client_id:
+        return 0
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(SUM(jsonb_array_length(messages)), 0)::int FROM sms_sessions WHERE client_id = %s",
+        (client_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    return (row[0] if row else 0) or 0
+
+
 def db_sms_opt_out_is_blocked(phone: str, client_id: str) -> bool:
     """True if this customer has opted out of SMS for this tenant (digits-only phone key)."""
     conn = _get_conn()
