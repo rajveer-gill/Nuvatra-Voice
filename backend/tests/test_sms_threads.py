@@ -13,9 +13,10 @@ from routers import core
 from routers import analytics
 
 
-def _bind(monkeypatch):
+def _bind(monkeypatch, has_messages=True):
     monkeypatch.setattr(deps, "_bind_tenant_db_context", lambda tenant: (tenant or {}).get("client_id") or "test")
     monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(core, "get_plan_limits", lambda tenant: {"has_messages": has_messages})
 
 
 def test_get_sms_threads_returns_list(monkeypatch):
@@ -62,6 +63,23 @@ def test_get_sms_thread_returns_messages(monkeypatch):
     assert res["messages"][0] == {"role": "user", "content": "Hi, can I book a cut?"}
     assert res["messages"][2]["content"] == ""
     assert res["appointment_id"] == 7
+
+
+def test_sms_threads_locked_on_starter(monkeypatch):
+    monkeypatch.setattr("runtime.USE_DB", True)
+    _bind(monkeypatch, has_messages=False)
+    # Should not even hit the DB helper when locked.
+    monkeypatch.setattr(database, "db_sms_threads_list", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not query")))
+    res = core.get_sms_threads(search=None, tenant={"client_id": "salon", "plan": "starter"})
+    assert res == {"threads": [], "locked": True}
+
+
+def test_sms_thread_detail_403_on_starter(monkeypatch):
+    monkeypatch.setattr("runtime.USE_DB", True)
+    _bind(monkeypatch, has_messages=False)
+    with pytest.raises(HTTPException) as exc:
+        core.get_sms_thread(phone="+15550000000", tenant={"client_id": "salon", "plan": "starter"})
+    assert exc.value.status_code == 403
 
 
 def test_get_sms_thread_404_when_missing(monkeypatch):

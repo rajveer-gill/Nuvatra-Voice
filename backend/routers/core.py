@@ -22,7 +22,19 @@ import sms_service
 from observability import email_hint_for_log, system_info
 from booking_fields import booking_context_from_business, is_valid_booking_date, looks_like_booking_time
 
+try:
+    from plans import get_plan_limits
+except ImportError:  # pragma: no cover - plans module always present in practice
+    get_plan_limits = None  # type: ignore
+
 router = APIRouter()
+
+
+def _tenant_has_messages(tenant: Optional[dict]) -> bool:
+    """SMS conversations inbox is a Growth+ perk (trial = pro-level access)."""
+    if not get_plan_limits:
+        return True
+    return bool(get_plan_limits(tenant).get("has_messages"))
 
 
 class ConversationRequest(BaseModel):
@@ -206,10 +218,13 @@ def get_sms_threads(
     search: Optional[str] = None,
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
 ):
-    """List SMS conversation threads (one per phone number) for the tenant, newest first."""
+    """List SMS conversation threads (one per phone number) for the tenant, newest first.
+    The inbox is a Growth+ perk; lower tiers get an empty list flagged `locked`."""
     cid = deps._bind_tenant_db_context(tenant)
+    if not _tenant_has_messages(tenant):
+        return {"threads": [], "locked": True}
     threads = database.db_sms_threads_list(cid, search=search) if runtime.USE_DB else []
-    return {"threads": threads}
+    return {"threads": threads, "locked": False}
 
 
 @router.get("/api/sms/thread")
@@ -219,6 +234,8 @@ def get_sms_thread(
 ):
     """Full message history for a single SMS thread (caller <-> AI receptionist)."""
     cid = deps._bind_tenant_db_context(tenant)
+    if not _tenant_has_messages(tenant):
+        raise HTTPException(status_code=403, detail="The Messages inbox is available on Growth and Pro plans")
     if not runtime.USE_DB:
         return {"phone": phone, "messages": [], "appointment_id": None, "updated_at": ""}
     sess = database.db_sms_session_get(phone, cid)

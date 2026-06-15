@@ -6,6 +6,7 @@ import { useApiClient } from '@/lib/api'
 import { RevealStagger, RevealItem, AnimatedNumber } from '@/components/motion'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { LockedFeature } from '@/components/ui/LockedFeature'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
 import { STATUS_CLASSES, STATUS_LABELS } from '@/components/appointments/appointmentStatus'
 
@@ -153,6 +154,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [noTenant, setNoTenant] = useState(false)
   const [hasExport, setHasExport] = useState(false)
+  const [hasMessages, setHasMessages] = useState(true)
   const [exporting, setExporting] = useState(false)
   const [usage, setUsage] = useState<{ voice_minutes: number; sms_count: number; month: string } | null>(null)
   const [minutesCap, setMinutesCap] = useState<number | null>(null)
@@ -198,9 +200,10 @@ export default function Dashboard() {
         api.get('/api/sms/threads').catch(() => ({ data: { threads: [] } })),
       ])
 
-      const sub = subRes?.data as { limits?: { has_export?: boolean; minutes_cap?: number }; usage?: { voice_minutes?: number; sms_count?: number; month?: string } } | null
+      const sub = subRes?.data as { limits?: { has_export?: boolean; has_messages?: boolean; minutes_cap?: number }; usage?: { voice_minutes?: number; sms_count?: number; month?: string } } | null
       const limits = sub?.limits
       setHasExport(!!limits?.has_export)
+      setHasMessages(limits?.has_messages !== false)
       setMinutesCap(limits?.minutes_cap ?? null)
       setUsage(
         sub?.usage
@@ -690,7 +693,8 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* SMS conversations */}
+      {/* SMS conversations (Growth+ perk) */}
+      {hasMessages ? (
       <div className="bg-white rounded-lg shadow-md p-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-xl font-bold text-gray-900 flex items-center">
@@ -762,6 +766,18 @@ export default function Dashboard() {
           )
         })()}
       </div>
+      ) : (
+        <LockedFeature
+          variant="light"
+          title="See every text conversation"
+          tagline="Your AI receptionist is already texting customers. Upgrade to read and search every conversation in one place—so you never miss a follow-up or lose track of what was said."
+          bullets={[
+            'Every caller’s full text thread, in one inbox',
+            'Search by phone number to find any conversation',
+            'See exactly what your receptionist replied',
+          ]}
+        />
+      )}
 
       {/* Voicemail messages — only shown when callers have left any */}
       {messages.length > 0 && (

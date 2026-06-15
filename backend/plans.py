@@ -13,6 +13,9 @@ PLAN_HAS_REMINDERS = {"starter": False, "growth": True, "pro": True}
 PLAN_HAS_LEAD_CAPTURE = {"starter": False, "growth": True, "pro": True}
 PLAN_SMS_AUTOMATIONS = {"starter": 0, "growth": 2, "pro": 999}
 PLAN_HAS_EXPORT = {"starter": False, "growth": True, "pro": True}
+# SMS conversations inbox (read/search full caller<->receptionist threads). Texting
+# itself happens on all plans; the inbox viewer is a Growth+ management perk.
+PLAN_HAS_MESSAGES = {"starter": False, "growth": True, "pro": True}
 PLAN_HAS_CALL_RECORDING = {"starter": False, "growth": False, "pro": True}
 PLAN_CONVERSATIONAL_SMS_SESSIONS = {"starter": 100, "growth": 300, "pro": 1000}
 # Plan list prices (USD/month) — the basis for referral commissions. Keep in sync
@@ -29,6 +32,7 @@ for name, d in [
     ("PLAN_HAS_LEAD_CAPTURE", PLAN_HAS_LEAD_CAPTURE),
     ("PLAN_SMS_AUTOMATIONS", PLAN_SMS_AUTOMATIONS),
     ("PLAN_HAS_EXPORT", PLAN_HAS_EXPORT),
+    ("PLAN_HAS_MESSAGES", PLAN_HAS_MESSAGES),
     ("PLAN_HAS_CALL_RECORDING", PLAN_HAS_CALL_RECORDING),
     ("PLAN_CONVERSATIONAL_SMS_SESSIONS", PLAN_CONVERSATIONAL_SMS_SESSIONS),
     ("PLAN_LIST_PRICE_USD", PLAN_LIST_PRICE_USD),
@@ -91,6 +95,7 @@ def get_plan_limits(tenant: Optional[dict]) -> dict:
         "has_lead_capture": PLAN_HAS_LEAD_CAPTURE.get(effective, False),
         "sms_automations_max": PLAN_SMS_AUTOMATIONS.get(effective, 0),
         "has_export": PLAN_HAS_EXPORT.get(effective, False),
+        "has_messages": PLAN_HAS_MESSAGES.get(effective, False),
         "has_call_recording": PLAN_HAS_CALL_RECORDING.get(effective, False),
         "conversational_sms_sessions_cap": PLAN_CONVERSATIONAL_SMS_SESSIONS.get(effective, 100),
         # SMS cap reuses the conversational-SMS-session quota (same metered unit as
