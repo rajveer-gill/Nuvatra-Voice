@@ -107,6 +107,8 @@ export default function Settings() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [receptionistName, setReceptionistName] = useState('')
   const [aiPhone, setAiPhone] = useState('')
+  const [numberMode, setNumberMode] = useState<'new' | 'existing'>('new')
+  const [existingNumber, setExistingNumber] = useState('')
   const [tenantClientId, setTenantClientId] = useState('')
   const [portalLoading, setPortalLoading] = useState(false)
   const [billingError, setBillingError] = useState<string | null>(null)
@@ -226,6 +228,8 @@ export default function Settings() {
           setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
           setReceptionistName((d.receptionist_name as string) || '')
           setAiPhone((d.phone as string) || '')
+          setNumberMode((d.number_mode as 'new' | 'existing') === 'existing' ? 'existing' : 'new')
+          setExistingNumber((d.existing_business_number as string) || '')
           setTenantClientId((d.client_id as string) || '')
           setForm({
             name: (d.name as string) || '',
@@ -568,6 +572,23 @@ export default function Settings() {
             <p className="text-xs text-gray-500 mt-1">This is your AI receptionist&apos;s phone number. Contact your administrator to change it.</p>
             <p className="text-xs text-gray-500 mt-1">Calls and texts work when your number&apos;s Voice and Messaging webhooks are set in Twilio. If calls or texts aren&apos;t working, contact your administrator.</p>
           </div>
+
+          {numberMode === 'existing' && aiPhone && (
+            <div className="rounded-lg border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-gray-700">
+              <p className="font-medium text-gray-900">Forward your existing number to your AI line</p>
+              <p className="mt-1">
+                Customers keep calling{' '}
+                <strong className="text-gray-900">{existingNumber || 'your existing number'}</strong>. Make sure
+                that number forwards calls to your AI line{' '}
+                <strong className="text-gray-900">{aiPhone}</strong>.
+              </p>
+              <p className="mt-2 text-xs text-gray-600">
+                On most US carriers: dial <span className="font-mono">*72</span>, then {aiPhone}, then call
+                (<span className="font-mono">*73</span> turns it off). On iPhone: Settings → Phone → Call
+                Forwarding. Booking confirmation texts are sent from your AI line.
+              </p>
+            </div>
+          )}
         </div>
       </SettingsSection>
 

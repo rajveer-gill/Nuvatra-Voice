@@ -1,5 +1,6 @@
 'use client'
 
+import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { CheckCircle2, Circle, ArrowRight, Clock } from 'lucide-react'
 
@@ -12,6 +13,9 @@ export type SetupWizardStatus = {
   voice_ready?: boolean
   twilio_number_set?: boolean
   webhooks_configured?: boolean
+  number_mode?: 'new' | 'existing'
+  existing_business_number?: string | null
+  ai_phone_number?: string | null
   onboarding_completed_at?: string | null
 }
 
@@ -24,6 +28,32 @@ type Step = {
   actor: 'you' | 'us'
   /** Where in Settings to act (anchor id), if owner-actionable. */
   settingsAnchor?: string
+  /** Optional rich content rendered under the description (e.g. forwarding steps). */
+  extra?: ReactNode
+}
+
+/** Forwarding instructions shown when the tenant brings their own number. */
+function ForwardingInstructions({ existing, aiLine }: { existing: string; aiLine: string }) {
+  return (
+    <div className="mt-3 rounded-xl border border-cyan-500/25 bg-cyan-500/5 p-3 text-xs text-zinc-300">
+      <p className="font-medium text-zinc-100">Forward your number to your AI line</p>
+      <p className="mt-1">
+        Customers keep calling <span className="font-semibold text-white">{existing}</span>. Set your
+        carrier to forward those calls to your AI line{' '}
+        <span className="font-semibold text-white">{aiLine}</span>.
+      </p>
+      <p className="mt-2">
+        On most US carriers: dial <span className="font-mono text-cyan-300">*72</span>, then{' '}
+        <span className="font-semibold text-white">{aiLine}</span>, then call. To turn it off later,
+        dial <span className="font-mono text-cyan-300">*73</span>. On an iPhone you can instead use
+        Settings → Phone → Call Forwarding.
+      </p>
+      <p className="mt-2 text-zinc-500">
+        Tip: place a test call to your own number afterward to confirm the AI picks up. Booking
+        confirmation texts will come from your AI line.
+      </p>
+    </div>
+  )
 }
 
 function buildSteps(status: SetupWizardStatus | null): Step[] {
@@ -31,12 +61,23 @@ function buildSteps(status: SetupWizardStatus | null): Step[] {
   const businessDone = !missing.includes('Business name') && !missing.includes('Hours of operation') && !missing.includes('Address')
   const servicesDone = !(status?.warnings ?? []).some((w) => w.startsWith('Add services'))
   const goLiveDone = Boolean(status?.twilio_number_set && status?.webhooks_configured)
+  const bringYourOwn = status?.number_mode === 'existing'
+  const existingNumber = (status?.existing_business_number || '').trim()
+  const aiLine = (status?.ai_phone_number || '').trim()
   // Concrete provisioning status + ETA instead of an open-ended "we'll let you know".
   const goLiveDescription = goLiveDone
-    ? 'Your dedicated phone line is active and answering calls.'
+    ? bringYourOwn
+      ? 'Your AI line is ready — forward your existing number to it (steps below) and you’re live.'
+      : 'Your dedicated phone line is active and answering calls.'
     : status?.twilio_number_set
       ? 'Your number is assigned — we’re finishing the connection. This page updates automatically, usually within a few minutes.'
       : 'We’re provisioning your dedicated phone number. This usually takes just a few minutes — nothing needed from you, and it’ll appear here the moment it’s ready.'
+  // Once the AI line is live and they chose to bring their own number, the forwarding
+  // setup is the owner's last step — surface it inline.
+  const goLiveExtra =
+    goLiveDone && bringYourOwn && aiLine ? (
+      <ForwardingInstructions existing={existingNumber || 'your existing number'} aiLine={aiLine} />
+    ) : undefined
   return [
     {
       id: 'business',
@@ -74,6 +115,7 @@ function buildSteps(status: SetupWizardStatus | null): Step[] {
       description: goLiveDescription,
       done: goLiveDone,
       actor: 'us',
+      extra: goLiveExtra,
     },
     {
       id: 'test',
@@ -149,6 +191,7 @@ export function SetupWizard({ status, onComplete, completing, compact }: Props) 
                 )}
               </p>
               <p className="mt-0.5 text-xs text-zinc-500">{step.description}</p>
+              {step.extra}
               {!step.done && step.actor === 'you' && (
                 <Link
                   href={stepHref(step)}

@@ -269,6 +269,12 @@ def get_setup_status(
         "roster_only_gap": roster_only_gap,
         "twilio_number_set": twilio_number_set,
         "webhooks_configured": webhooks_configured,
+        "number_mode": (info.get("number_mode") or "new"),
+        "existing_business_number": (info.get("existing_business_number") or "").strip()
+        or None,
+        # The provisioned Twilio line — surfaced so the onboarding wizard can show the
+        # "forward <existing> → <ai line>" instruction once the number is assigned.
+        "ai_phone_number": (twilio_phone or "").strip() or None,
         "onboarding_completed_at": (info.get("onboarding_completed_at") or "").strip()
         or None,
     }
@@ -379,6 +385,23 @@ class CreateBusinessRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     plan: Literal["starter", "growth", "pro"] = "starter"
     business_vertical: str = "salon_chair"
+    # "new" = give them a fresh Twilio number to publish; "existing" = they keep their
+    # current number and forward calls to the (hidden) provisioned Twilio line.
+    number_mode: Literal["new", "existing"] = "new"
+    # The number customers currently dial — required (display/forwarding only) when
+    # number_mode == "existing". A Twilio line is still provisioned in both modes.
+    existing_number: Optional[str] = None
+
+
+def _normalize_us_phone_display(raw: Optional[str]) -> str:
+    """Best-effort E.164 for a US number entered in onboarding; falls back to the
+    trimmed input so we never reject a valid foreign/edge number outright."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    return (raw or "").strip()
 
 
 def _unique_client_id(name: str) -> str:
@@ -408,6 +431,15 @@ def api_create_business(
     bv = (req.business_vertical or "salon_chair").strip()
     if bv not in config_service.ALLOWED_BUSINESS_VERTICALS:
         raise HTTPException(status_code=400, detail="Invalid business type")
+    # "Use my existing number" must come with the number to forward (display only).
+    existing_number = ""
+    if req.number_mode == "existing":
+        existing_number = _normalize_us_phone_display(req.existing_number)
+        if len(re.sub(r"\D", "", existing_number)) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Enter your existing business phone number to forward calls from.",
+            )
     # One tenant per user — don't create a duplicate.
     existing_ids = database.db_tenant_membership_tenant_ids(user_id)
     if existing_ids:
@@ -421,6 +453,9 @@ def api_create_business(
         raise HTTPException(status_code=409, detail="Could not create business; please try again")
     database.set_request_client_id(client_id)
     cfg = config_service._default_client_config_data(client_id, tenant.get("plan") or req.plan)
+    cfg["number_mode"] = req.number_mode
+    if req.number_mode == "existing":
+        cfg["existing_business_number"] = existing_number
     config_service.save_raw_client_config(client_id, cfg)
     database.db_tenant_member_set_single(user_id, tenant["id"])
     deps._clerk_patch_user_tenant_metadata(user_id, tenant["id"])

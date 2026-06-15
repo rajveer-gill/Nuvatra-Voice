@@ -149,6 +149,13 @@ def _config_data_to_business_info(data: dict) -> dict:
         ),
         "receptionist_name": data.get("receptionist_name", ""),
         "business_type": data.get("business_type", ""),
+        # How the tenant's AI line is reached: "new" = the provisioned Twilio number IS
+        # their published number; "existing" = they keep their own number and forward
+        # calls to the (hidden) Twilio line. existing_business_number is the number
+        # customers actually dial in "existing" mode — display-only, used for forwarding
+        # instructions in onboarding/Settings.
+        "number_mode": data.get("number_mode") or "new",
+        "existing_business_number": data.get("existing_business_number", ""),
     }
 
 
