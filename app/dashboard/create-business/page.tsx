@@ -69,6 +69,8 @@ export default function CreateBusinessPage() {
   const router = useRouter()
   const [name, setName] = useState('')
   const [plan, setPlan] = useState<PlanId>('starter')
+  const [numberMode, setNumberMode] = useState<'new' | 'existing'>('new')
+  const [existingNumber, setExistingNumber] = useState('')
   const [areaCode, setAreaCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -135,13 +137,26 @@ export default function CreateBusinessPage() {
       .catch(() => setChecking(false))
   }, [api, router])
 
+  // 10 US digits (ignoring a leading country 1) before we let them forward an existing line.
+  const existingDigits = existingNumber.replace(/\D/g, '').replace(/^1/, '')
+  const existingValid = numberMode === 'new' || existingDigits.length === 10
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
+    if (numberMode === 'existing' && !existingValid) {
+      setError('Enter the existing business number you want to forward calls from.')
+      return
+    }
     setSubmitting(true)
     setError(null)
     try {
-      await api.post('/api/onboarding/create-business', { name: name.trim(), plan })
+      await api.post('/api/onboarding/create-business', {
+        name: name.trim(),
+        plan,
+        number_mode: numberMode,
+        existing_number: numberMode === 'existing' ? existingNumber.trim() : undefined,
+      })
       const res = await api.post('/api/create-checkout-session', {
         plan,
         area_code: areaCode.trim() || undefined,
@@ -287,6 +302,71 @@ export default function CreateBusinessPage() {
             </div>
 
             <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-300">Phone number</label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {([
+                  {
+                    id: 'new' as const,
+                    title: 'Get a new number',
+                    blurb: "We give you a dedicated number for your AI receptionist.",
+                  },
+                  {
+                    id: 'existing' as const,
+                    title: 'Use my existing number',
+                    blurb: 'Keep your current number — forward calls to your AI line.',
+                  },
+                ]).map((opt) => {
+                  const selected = numberMode === opt.id
+                  return (
+                    <button
+                      type="button"
+                      key={opt.id}
+                      onClick={() => setNumberMode(opt.id)}
+                      className={`rounded-2xl border p-4 text-left transition ${
+                        selected
+                          ? 'border-cyan-500 bg-cyan-500/10 ring-1 ring-cyan-500/40'
+                          : 'border-white/10 bg-zinc-950/40 hover:border-white/25'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`h-4 w-4 shrink-0 rounded-full border ${
+                            selected ? 'border-cyan-400 bg-cyan-400' : 'border-zinc-600'
+                          }`}
+                        />
+                        <span className="text-sm font-semibold text-white">{opt.title}</span>
+                      </div>
+                      <p className="mt-1 pl-6 text-xs text-zinc-400">{opt.blurb}</p>
+                    </button>
+                  )
+                })}
+              </div>
+
+              {numberMode === 'existing' && (
+                <div className="mt-3 rounded-xl border border-white/10 bg-zinc-950/40 p-4">
+                  <label className="mb-1 block text-sm font-medium text-zinc-300">
+                    Your existing business number
+                  </label>
+                  <input
+                    type="tel"
+                    inputMode="tel"
+                    value={existingNumber}
+                    onChange={(e) => setExistingNumber(e.target.value.replace(/[^\d\s()+-]/g, '').slice(0, 20))}
+                    placeholder="e.g. (415) 555-0199"
+                    className="w-56 rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
+                  />
+                  {existingNumber.trim() && !existingValid && (
+                    <p className="mt-1 text-xs text-amber-400">Enter a 10-digit US phone number.</p>
+                  )}
+                  <p className="mt-2 text-xs text-zinc-500">
+                    Customers keep calling this number. After signup we&rsquo;ll show you how to forward it to
+                    your AI line (takes ~2 minutes). Booking confirmation texts come from the AI line.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div>
               <label className="mb-1 block text-sm font-medium text-zinc-300">
                 Preferred area code <span className="text-zinc-500">(optional)</span>
               </label>
@@ -299,7 +379,11 @@ export default function CreateBusinessPage() {
                 placeholder="e.g. 415"
                 className="w-32 rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
               />
-              <p className="mt-1 text-xs text-zinc-500">We&rsquo;ll try to get you a number in this area code.</p>
+              <p className="mt-1 text-xs text-zinc-500">
+                {numberMode === 'existing'
+                  ? 'Your AI line is behind the scenes, but you can still pick its area code.'
+                  : 'We’ll try to get you a number in this area code.'}
+              </p>
             </div>
 
             <div>
@@ -330,7 +414,7 @@ export default function CreateBusinessPage() {
 
             <button
               type="submit"
-              disabled={submitting || !name.trim()}
+              disabled={submitting || !name.trim() || !existingValid}
               className="w-full rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 hover:brightness-110 disabled:opacity-50"
             >
               {submitting ? 'Starting checkout…' : 'Continue to payment'}
