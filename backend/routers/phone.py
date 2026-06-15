@@ -65,6 +65,38 @@ router = APIRouter()
 # Max characters accepted by the unauthenticated TTS endpoints (cost-abuse guard).
 TTS_MAX_INPUT_CHARS = 600
 
+# Bounded in-memory LRU for /api/phone/tts-audio. The endpoint regenerated audio on
+# every call, so constantly-repeated phrases (greeting, "Still there?", error/fallback
+# lines) paid full OpenAI TTS latency each time — seen as a 14s greeting under load.
+# Caching by (text, voice, speed) serves repeats instantly and cuts TTS API pressure
+# (which also narrows the conversation-state race window under concurrent calls). Unique
+# AI replies simply churn through the LRU. In-memory only (no disk) since most text is
+# one-off; fine for the single-worker voice runtime.
+from collections import OrderedDict as _OrderedDict
+import threading as _threading
+
+_TTS_AUDIO_CACHE: "_OrderedDict[tuple, bytes]" = _OrderedDict()
+_TTS_AUDIO_CACHE_MAX = 256
+_TTS_AUDIO_CACHE_LOCK = _threading.Lock()
+
+
+def _tts_audio_cache_get(key: tuple) -> Optional[bytes]:
+    with _TTS_AUDIO_CACHE_LOCK:
+        data = _TTS_AUDIO_CACHE.get(key)
+        if data is not None:
+            _TTS_AUDIO_CACHE.move_to_end(key)
+        return data
+
+
+def _tts_audio_cache_put(key: tuple, data: bytes) -> None:
+    if not data:
+        return
+    with _TTS_AUDIO_CACHE_LOCK:
+        _TTS_AUDIO_CACHE[key] = data
+        _TTS_AUDIO_CACHE.move_to_end(key)
+        while len(_TTS_AUDIO_CACHE) > _TTS_AUDIO_CACHE_MAX:
+            _TTS_AUDIO_CACHE.popitem(last=False)
+
 
 class TTSRequest(BaseModel):
     text: str
@@ -401,6 +433,19 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
     """
     # Bound unauthenticated input (see tts-audio-hd note) before paying for TTS.
     text = (text or "")[:TTS_MAX_INPUT_CHARS]
+    speed = config_service.get_tts_speed()
+    cache_key = (text, voice, speed)
+    cached = _tts_audio_cache_get(cache_key)
+    if cached is not None:
+        return Response(
+            content=cached,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3",
+                "Cache-Control": "public, max-age=3600",
+                "Content-Length": str(len(cached)),
+            },
+        )
     try:
         # Use tts-1 for faster generation while maintaining quality
         # tts-1 is faster than tts-1-hd but still sounds natural and smooth
@@ -408,20 +453,17 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             model="tts-1",  # Faster generation, still high quality
             voice=voice,
             input=add_sentence_pauses(text),
-            speed=config_service.get_tts_speed(),
+            speed=speed,
         )
-
-        # Convert response to bytes
-        audio_bytes = io.BytesIO(response.content)
-        audio_bytes.seek(0)
-
-        # Return as streaming audio
-        return StreamingResponse(
-            audio_bytes,
+        data = response.content
+        _tts_audio_cache_put(cache_key, data)
+        return Response(
+            content=data,
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": "inline; filename=speech.mp3",
-                "Cache-Control": "no-cache",
+                "Cache-Control": "public, max-age=3600",
+                "Content-Length": str(len(data)),
             },
         )
 

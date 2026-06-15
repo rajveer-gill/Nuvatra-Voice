@@ -28,7 +28,7 @@ import deps
 from observability import mask_phone, voice_forward, voice_info, voice_trace, voice_warning
 from security.redaction import mask_phone_e164
 from voice_preview import add_sentence_pauses
-from voice.call_session_store import MemoryCallSessionStore
+from voice.call_session_store import MemoryCallSessionStore, UtteranceLockError
 
 try:
     from plans import get_plan_limits
@@ -567,6 +567,57 @@ def _merge_call_session(call_sid: str, updates: dict[str, Any]) -> None:
     if not call_sid or not updates:
         return
     runtime.call_store.merge_session(call_sid, updates)
+
+
+def _merge_history_into(latest: dict, snapshot: dict) -> None:
+    """Merge the GPT snapshot's conversation_history INTO the latest stored history so a
+    caller turn that arrived while the response was generating is never lost. Appends any
+    snapshot message not already present (e.g. the new assistant reply) onto the latest."""
+    snap_hist = snapshot.get("conversation_history")
+    if not isinstance(snap_hist, list):
+        return
+    latest_hist = latest.get("conversation_history")
+    merged = list(latest_hist) if isinstance(latest_hist, list) else []
+    for msg in snap_hist:
+        if msg not in merged:
+            merged.append(msg)
+    snapshot["conversation_history"] = merged
+
+
+async def persist_generated_session_locked(call_sid: str, call_data: dict) -> None:
+    """Persist the GPT background task's session WITHOUT clobbering a caller turn that
+    arrived while the (possibly slow) response was generating.
+
+    The utterance handler writes the session under the per-call utterance lock; the GPT
+    task runs AFTER that lock is released and was doing a full-overwrite of a stale
+    snapshot — losing any newer caller turn and making the AI re-ask for info already
+    given. This acquires the same lock, re-reads the latest session, merges the snapshot's
+    history into it, then saves. No-op for the in-memory store (call_data is live)."""
+    if isinstance(runtime.call_store, MemoryCallSessionStore):
+        return
+    sid = (call_sid or "").strip()
+    if not sid:
+        return
+    try:
+        async with runtime.call_store.utterance_lock(sid):
+            latest = runtime.call_store.get(sid)
+            if latest is None:
+                if runtime.call_store.exists(sid):
+                    runtime.call_store.save(sid, call_data)
+                return
+            _merge_history_into(latest, call_data)
+            runtime.call_store.save(sid, call_data)
+    except UtteranceLockError:
+        # Lock contended past timeout: still merge best-effort rather than drop the turn.
+        try:
+            latest = runtime.call_store.get(sid)
+            if latest is not None:
+                _merge_history_into(latest, call_data)
+        except Exception:
+            pass
+        _persist_call_session(call_sid, call_data)
+    except Exception:
+        _persist_call_session(call_sid, call_data)
 
 
 def _call_sid_from_form(form_data: Any) -> str:

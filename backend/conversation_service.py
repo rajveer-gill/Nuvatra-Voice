@@ -1239,7 +1239,10 @@ async def generate_response_async(
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
         call_data["conversation_history"].append(ai_message)
-        voice_service._persist_call_session(call_sid, call_data)
+        # Merge into the latest session under the per-call lock — a full overwrite here
+        # would clobber a caller turn that arrived while we were generating (the AI would
+        # then re-ask for info already given), which surfaces under concurrent-call load.
+        await voice_service.persist_generated_session_locked(call_sid, call_data)
 
         # Pro: Staff transfer - AI may respond with TRANSFER_TO: Name
         transfer_name = voice_service.parse_transfer_to(ai_text)
@@ -1337,4 +1340,4 @@ async def generate_response_async(
             client_id_prefix=str(call_data.get("client_id") or "")[:12],
         )
     finally:
-        voice_service._persist_call_session(call_sid, call_data)
+        await voice_service.persist_generated_session_locked(call_sid, call_data)
