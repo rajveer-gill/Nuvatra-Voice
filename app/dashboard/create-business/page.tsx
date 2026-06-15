@@ -41,6 +41,7 @@ const PLANS = [
       '1,500 call minutes / month',
       'Appointment reminders (cut no-shows)',
       'Lead capture & follow-up texts',
+      'Messages inbox — read & search every text',
       'SMS automations + CSV export',
       '90-day call history',
     ],

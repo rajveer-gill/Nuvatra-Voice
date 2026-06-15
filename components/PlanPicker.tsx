@@ -17,7 +17,7 @@ const PLANS = [
     name: 'Growth',
     price: '$249',
     description: 'More capacity & features',
-    features: ['1,500 min/mo', '5 call transfers', 'Unlimited team roster', 'Appointment reminders', 'Lead capture', 'SMS automations (2)', 'Call log export', '90 days history'],
+    features: ['1,500 min/mo', '5 call transfers', 'Unlimited team roster', 'Appointment reminders', 'Lead capture', 'Messages inbox', 'SMS automations (2)', 'Call log export', '90 days history'],
   },
   {
     id: 'pro' as const,
