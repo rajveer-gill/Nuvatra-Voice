@@ -76,10 +76,9 @@ TEST_TENANTS = [
                 {"id": "svc-dent", "name": "Dent Repair", "price": 150, "duration_minutes": 60},
                 {"id": "svc-paint", "name": "Paint Job", "price": 800, "duration_minutes": 240},
             ],
-            "staff": [
-                {"id": "stf-mike", "name": "Mike", "service_ids": ["svc-estimate", "svc-dent"]},
-                {"id": "stf-tony", "name": "Tony", "service_ids": []},
-            ],
+            # Auto body books to the shop, not a named technician — realistic
+            # config has no roster (the vertical no longer requires one).
+            "staff": [],
         },
     },
 ]
