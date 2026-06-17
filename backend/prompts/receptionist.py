@@ -11,6 +11,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
 
+import verticals
+
 _PRICING_QUESTION_RE = re.compile(
     r"\b("
     r"how much|how much does|how much is|what(?:'s| is| does)?(?: the)? price|"
@@ -40,10 +42,14 @@ def appointment_focus_guidance(
     *,
     include_booked_slots: bool = True,
     channel: Literal["voice", "sms"] = "voice",
+    provider: str = "stylist",
 ) -> str:
     """
     Shared instructions: prioritize booking; brief off-topic answers then redirect.
     Used in voice system prompt and inbound SMS receptionist prompt.
+
+    ``provider`` is the vertical's service-provider noun (e.g. "stylist",
+    "technician"); defaults to the salon term for back-compat.
     """
     biz = (business_name or "us").strip() or "us"
     if channel == "sms":
@@ -64,7 +70,7 @@ def appointment_focus_guidance(
     if include_booked_slots:
         return (
             f"PRIMARY GOAL: Your main job is helping callers book an appointment at {biz}. "
-            "Move every turn toward scheduling when possible—name, date, time, stylist when applicable, and service. "
+            f"Move every turn toward scheduling when possible—name, date, time, {provider} when applicable, and service. "
             "Answer business-related questions briefly (hours, location, services, prices, policies, staff). "
             "When they ask how much a service costs or what you charge, answer from the service menu in your context—"
             "that is a business question, NOT off-topic. Never say you are unsure if the price is listed there. "
@@ -222,6 +228,12 @@ def build_system_prompt(
     vertical_label = (business_info.get("business_vertical_label") or "").strip()
     business_type = (business_info.get("business_type") or "").strip()
     industry_desc = vertical_label or business_type
+    # Vertical vocabulary (provider noun, etc.). salon_chair reproduces the
+    # original wording, so existing salon prompts are unchanged.
+    terms = verticals.terms_for(business_info.get("business_vertical"))
+    provider = terms.provider
+    provider_plural = terms.provider_plural
+    provider_caps = terms.provider_caps
 
     help_lines: List[str] = []
     if hours:
@@ -339,11 +351,11 @@ def build_system_prompt(
         if slots_text.strip():
             if multi_staff:
                 slots_critical = (
-                    "- CRITICAL: Booked times above are PER STYLIST—each person has their own calendar. "
-                    "Another stylist being busy does NOT mean your chosen stylist is fully booked. "
-                    "Only say a stylist is 'fully booked' on a day when that specific stylist has no free times "
+                    f"- CRITICAL: Booked times above are PER {provider_caps}—each person has their own calendar. "
+                    f"Another {provider} being busy does NOT mean your chosen {provider} is fully booked. "
+                    f"Only say a {provider} is 'fully booked' on a day when that specific {provider} has no free times "
                     "in their list below. When the prompt says 'ONLY suggest these times for [Name]', use that list "
-                    "only for that person—never merge bookings across stylists."
+                    f"only for that person—never merge bookings across {provider_plural}."
                 )
             else:
                 slots_critical = (
@@ -367,42 +379,42 @@ def build_system_prompt(
         staff_booking_rules = ""
         if multi_staff:
             staff_booking_rules = (
-                f"- STYLIST: Multiple team members on the roster ({', '.join(roster_names)}). "
-                "AFTER the caller chooses a service, ask which stylist they prefer (or if anyone is fine), and "
-                "suggest ONLY the stylists who provide that service (see the 'Staff and which services they provide' list). "
+                f"- {provider_caps}: Multiple team members on the roster ({', '.join(roster_names)}). "
+                f"AFTER the caller chooses a service, ask which {provider} they prefer (or if anyone is fine), and "
+                f"suggest ONLY the {provider_plural} who provide that service (see the 'Staff and which services they provide' list). "
                 "Put the exact name in the 7th BOOKING field when they choose; leave staff empty only if they have no preference. "
-                "Availability is per stylist—never say someone is fully booked because another stylist is busy.\n"
+                f"Availability is per {provider}—never say someone is fully booked because another {provider} is busy.\n"
             )
         elif len(roster_names) == 1:
             staff_booking_rules = (
-                f"- STYLIST: One provider on the roster ({roster_names[0]}). "
+                f"- {provider_caps}: One provider on the roster ({roster_names[0]}). "
                 f"Confirm the appointment is with {roster_names[0]}; put their name in the staff field.\n"
             )
         if has_configured_services:
             service_booking_rules = (
                 "- SERVICES: This business has a configured service menu. Only offer or confirm services from that list—never invent services. "
                 "Ask which SERVICE they want FIRST (from the menu). "
-                "After they choose a service, if multiple stylists are on the roster, suggest ONLY the stylists who provide that service "
+                f"After they choose a service, if multiple {provider_plural} are on the roster, suggest ONLY the {provider_plural} who provide that service "
                 "(see the 'Staff and which services they provide' list) and ask which they'd prefer, or if anyone is fine. "
                 "Before BOOKING you MUST have the service; put the exact service name in the reason field. When speaking, follow the VOICE rules under Services menu above.\n"
                 "- PRICING: Service prices are in the menu above. When asked about cost, answer directly in natural speech, then continue booking if they were scheduling.\n"
                 f"{staff_booking_rules}"
-                "- When they have confirmed name, date, time, and service (service name in reason), and stylist preference when applicable, and the slot is available, "
+                f"- When they have confirmed name, date, time, and service (service name in reason), and {provider} preference when applicable, and the slot is available, "
             )
         else:
             service_booking_rules = (
                 "- SERVICES: This business has NOT configured a service menu in Settings. Do NOT ask callers to pick a service type—"
                 "the owner must add services online for that. Book using name, date, and time; put a short visit note in reason if they mention why they are coming.\n"
                 f"{staff_booking_rules}"
-                "- When they have confirmed name, date, time, and stylist preference when applicable, and the slot is available, "
+                f"- When they have confirmed name, date, time, and {provider} preference when applicable, and the slot is available, "
             )
         slots_block += f"""
 - TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
 - AFTER HOURS: If the prompt includes an AFTER HOURS note, the shop is already closed for today—do not book same-day appointments; tell the caller we're closed for today and ask for another day.
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
-- CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date, time, service, and stylist when applicable. Do NOT ask for email—we confirm by text/SMS only.
-{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). Field 1 name is the CALLER's name (the customer)—NEVER a stylist. Field 7 staff is ONLY for the stylist when they chose one. The reason field holds the service name when a service menu exists, or a short visit note otherwise. RULES: (1) You MUST include the caller's name in field 1—if they haven't given it, ask for their name first, then output BOOKING. Never put a stylist name in field 1. (2) For phone and email: leave empty (we have phone from the call; we do not collect email). (3) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (4) Time as HH:MM (e.g. 13:00 for 1 PM). (5) Do not output BOOKING until you have at least name, date, and time. (6) NEVER tell the caller the appointment is booked, confirmed, scheduled, or "all set"—and never say "see you then"—until you output BOOKING on that same turn; until then say you are gathering details and will text them to confirm. (7) When multiple stylists and a service menu exist, ask which SERVICE they want FIRST; then suggest only the stylists who provide that service and ask which they prefer (or anyone is fine)—do not ask for the stylist before the service. (8) Be proactive: never end a turn with vague filler like "let me get the rest of your details", "one moment", or "let me pull that up" and then stop. While any detail is still missing, ALWAYS end your reply by directly asking the caller for the single next missing item (their name, the day/time, the stylist, or the service) so they know exactly what to say—do not make them ask what you need."""
+- CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date, time, service, and {provider} when applicable. Do NOT ask for email—we confirm by text/SMS only.
+{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). Field 1 name is the CALLER's name (the customer)—NEVER a {provider}. Field 7 staff is ONLY for the {provider} when they chose one. The reason field holds the service name when a service menu exists, or a short visit note otherwise. RULES: (1) You MUST include the caller's name in field 1—if they haven't given it, ask for their name first, then output BOOKING. Never put a {provider} name in field 1. (2) For phone and email: leave empty (we have phone from the call; we do not collect email). (3) Date must be YYYY-MM-DD. Today is {today_str}, tomorrow is {tomorrow_str}; use the correct calendar date (e.g. "tomorrow" = {tomorrow_str}). (4) Time as HH:MM (e.g. 13:00 for 1 PM). (5) Do not output BOOKING until you have at least name, date, and time. (6) NEVER tell the caller the appointment is booked, confirmed, scheduled, or "all set"—and never say "see you then"—until you output BOOKING on that same turn; until then say you are gathering details and will text them to confirm. (7) When multiple {provider_plural} and a service menu exist, ask which SERVICE they want FIRST; then suggest only the {provider_plural} who provide that service and ask which they prefer (or anyone is fine)—do not ask for the {provider} before the service. (8) Be proactive: never end a turn with vague filler like "let me get the rest of your details", "one moment", or "let me pull that up" and then stop. While any detail is still missing, ALWAYS end your reply by directly asking the caller for the single next missing item (their name, the day/time, the {provider}, or the service) so they know exactly what to say—do not make them ask what you need."""
 
     help_section = (
         "\n".join(help_lines)
@@ -435,7 +447,7 @@ def build_system_prompt(
         )
 
     focus_block = appointment_focus_guidance(
-        name, include_booked_slots=include_booked_slots, channel="voice"
+        name, include_booked_slots=include_booked_slots, channel="voice", provider=provider
     )
     message_block = (
         "\n\nTAKING A MESSAGE: If the caller wants to leave a message for the business "

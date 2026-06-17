@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 import database
 import runtime
+import verticals
 
 logger = logging.getLogger("nuvatra")
 
@@ -27,10 +28,10 @@ logger = logging.getLogger("nuvatra")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-ALLOWED_BUSINESS_VERTICALS = frozenset({"salon_chair"})
-BUSINESS_VERTICAL_LABELS = {
-    "salon_chair": "Salon, barbershop, nails & similar (chair services)",
-}
+# Vertical validation/labels come from the verticals registry (single source of
+# truth). Adding an industry is one entry in verticals.py — nothing here changes.
+ALLOWED_BUSINESS_VERTICALS = verticals.allowed_verticals()
+BUSINESS_VERTICAL_LABELS = verticals.vertical_labels()
 
 
 def _normalize_service_entries(raw) -> List[dict]:

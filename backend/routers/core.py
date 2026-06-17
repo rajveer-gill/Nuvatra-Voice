@@ -19,6 +19,7 @@ import database
 import deps
 import runtime
 import sms_service
+import verticals
 from observability import email_hint_for_log, system_info
 from booking_fields import booking_context_from_business, is_valid_booking_date, looks_like_booking_time
 
@@ -146,9 +147,12 @@ def handle_conversation(
                 date_ok = is_valid_booking_date(booking.get("date"))
                 time_ok = looks_like_booking_time(booking.get("time"), ctx)
                 if not ok_booking:
+                    _prov = verticals.terms_for(
+                        config_service.get_business_info().get("business_vertical")
+                    ).provider
                     ai_response = (
                         fail_msg
-                        or "Before I can book this, please choose a stylist and service."
+                        or f"Before I can book this, please choose a {_prov} and service."
                     )
                 elif not name_ok:
                     ai_response = "I'd love to book that for you—what's your name?"

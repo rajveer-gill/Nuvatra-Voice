@@ -20,12 +20,24 @@ import config_service
 import database
 import runtime
 import json
+import verticals
 from datetime import datetime, timezone
 from observability import system_debug, system_info
 
 logger = logging.getLogger("nuvatra")
 
 DEFAULT_SLOT_DURATION_MINUTES = 30
+
+
+def _current_vertical_terms() -> verticals.VerticalTerms:
+    """Terminology for the current tenant's industry, resolved from business
+    config. Falls back to the default (salon) vocabulary when no tenant context
+    is set (e.g. unit tests), keeping legacy behavior unchanged."""
+    try:
+        bv = config_service.get_business_info().get("business_vertical")
+    except Exception:
+        bv = None
+    return verticals.terms_for(bv)
 
 def _service_duration_minutes_for_reason(
     reason: Optional[str], info: Optional[dict] = None
@@ -145,7 +157,7 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
         customer_line = (
             "Customer: Not on file yet — reply with your name if we should update it."
         )
-    stylist_line = f"Stylist: {stylist}\n" if stylist else ""
+    stylist_line = f"{_current_vertical_terms().provider_label}: {stylist}\n" if stylist else ""
     if status == "pending_customer":
         intro = "Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:"
         footer = (
@@ -641,6 +653,7 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
         total_slots=len(all_slots),
     )
     info = config_service.get_business_info()
+    terms = verticals.terms_for(info.get("business_vertical"))
     roster = [
         ((s.get("id") or "").strip(), (s.get("name") or "").strip())
         for s in (info.get("staff") or [])
@@ -680,7 +693,7 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
                 for label, lines in sorted(by_stylist_booked.items())
             ]
             parts.append(
-                "Booked slots by stylist (each calendar is separate—do not merge across people): "
+                f"Booked slots by {terms.provider} (each calendar is separate—do not merge across people): "
                 + " | ".join(booked_lines)
             )
         roster_with_ids = [(sid, name) for sid, name in roster if sid]
@@ -721,8 +734,8 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
                 else:
                     suggest_parts.append(
                         f"For {name} on {date_str} standard hours appear fully booked for {name} "
-                        f"({', '.join(taken_display)}). Offer another day or another stylist—not "
-                        f"that the whole salon is closed."
+                        f"({', '.join(taken_display)}). Offer another day or another {terms.provider}—not "
+                        f"that the whole {terms.venue} is closed."
                     )
     else:
         by_date: dict[str, List[str]] = {}
@@ -791,9 +804,10 @@ def polish_owner_customer_sms(
         )
     date = apt.get("date") or ""
     time_ampm = _hhmm_to_ampm(apt.get("time") or "") or (apt.get("time") or "")
+    business_phrase = _current_vertical_terms().business_phrase
     if event == "cancel":
         system = (
-            "You write brief SMS messages for a salon, barbershop, or nail studio. "
+            f"You write brief SMS messages for a {business_phrase}. "
             "The business is CANCELLING an already confirmed appointment. "
             "Rewrite the owner's note into ONE warm, natural cancellation message. "
             "State clearly that the appointment is cancelled. Max 480 characters. "
@@ -806,7 +820,7 @@ def polish_owner_customer_sms(
         )
     else:
         system = (
-            "You write brief SMS messages for a salon, barbershop, or nail studio. "
+            f"You write brief SMS messages for a {business_phrase}. "
             "Rewrite the owner's decline reason into ONE warm, natural message. "
             "Max 480 characters. Do not invent discounts, guarantees, or policies. "
             "If appropriate, invite alternative dates/times. Match the tone of the owner's note."

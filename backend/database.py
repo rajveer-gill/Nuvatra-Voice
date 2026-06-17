@@ -1643,6 +1643,33 @@ def db_tenant_set_account_paused(tenant_id: str, paused: bool) -> bool:
             pass
         return False
 
+def db_tenant_set_business_vertical(tenant_id: str, business_vertical: str) -> bool:
+    """Update a tenant's industry/business_vertical. Caller validates the value
+    against the verticals registry first. Returns True on success."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    bv = (business_vertical or "").strip()
+    if not bv:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tenants SET business_vertical = %s WHERE id = %s",
+            (bv, tenant_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to set business_vertical: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
 def db_tenant_set_twilio_number_sid(tenant_id: str, number_sid: Optional[str]) -> bool:
     """Store the Twilio incoming-number SID (PNxxxx) so releases don't need a lookup."""
     conn = _get_conn()

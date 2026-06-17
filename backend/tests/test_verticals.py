@@ -1,0 +1,114 @@
+"""Vertical terminology: the receptionist's wording follows business_vertical.
+
+salon_chair must keep saying "stylist"/"salon" (back-compat with existing tests);
+auto_body must say "technician" and never "stylist".
+"""
+
+import booking_service
+import config_service
+import verticals
+from prompts.receptionist import appointment_focus_guidance, build_system_prompt
+
+
+# ---- registry ----
+
+def test_registry_supports_salon_and_auto_body():
+    assert verticals.is_supported("salon_chair")
+    assert verticals.is_supported("auto_body")
+    assert not verticals.is_supported("nope")
+    assert "salon_chair" in verticals.allowed_verticals()
+    assert "auto_body" in verticals.allowed_verticals()
+
+
+def test_terms_for_falls_back_to_default():
+    assert verticals.terms_for(None).provider == "stylist"
+    assert verticals.terms_for("unknown").provider == "stylist"
+    assert verticals.terms_for("auto_body").provider == "technician"
+
+
+def test_config_service_allowed_verticals_comes_from_registry():
+    assert config_service.ALLOWED_BUSINESS_VERTICALS == verticals.allowed_verticals()
+    assert "auto_body" in config_service.BUSINESS_VERTICAL_LABELS
+
+
+def test_vertical_choices_shape():
+    choices = verticals.vertical_choices()
+    assert {"value", "label"} <= set(choices[0].keys())
+    assert any(c["value"] == "auto_body" for c in choices)
+
+
+# ---- voice prompt ----
+
+def _biz(vertical):
+    return {
+        "name": "Test Shop",
+        "business_vertical": vertical,
+        "services": [{"id": "s1", "name": "Estimate", "price": 0, "duration_minutes": 30}],
+        "staff": [{"name": "Jamie"}, {"name": "Alex"}],
+    }
+
+
+def test_salon_prompt_says_stylist():
+    p = build_system_prompt(
+        business_info=_biz("salon_chair"), include_booked_slots=True, booked_slots_prompt_text=""
+    )
+    assert "stylist" in p
+    assert "technician" not in p
+
+
+def test_auto_body_prompt_says_technician_not_stylist():
+    p = build_system_prompt(
+        business_info=_biz("auto_body"), include_booked_slots=True, booked_slots_prompt_text=""
+    )
+    assert "technician" in p
+    assert "stylist" not in p
+    # The provider section header follows the vertical too.
+    assert "TECHNICIAN: Multiple team members" in p
+
+
+def test_unknown_vertical_prompt_defaults_to_salon_wording():
+    p = build_system_prompt(
+        business_info=_biz("totally_new"), include_booked_slots=True, booked_slots_prompt_text=""
+    )
+    assert "stylist" in p
+
+
+def test_focus_guidance_provider_param():
+    g = appointment_focus_guidance("Test Shop", include_booked_slots=True, provider="technician")
+    assert "technician" in g
+    assert "stylist" not in g
+
+
+# ---- SMS confirmation label ----
+
+def _apt():
+    return {
+        "name": "Casey",
+        "phone": "+15551234567",
+        "date": "2026-07-01",
+        "time": "10:00",
+        "reason": "Estimate",
+        "status": "pending_customer",
+        "staff_id": "s1",
+    }
+
+
+def test_confirmation_sms_label_follows_vertical(monkeypatch):
+    monkeypatch.setattr(
+        config_service,
+        "get_business_info",
+        lambda: {"business_vertical": "auto_body", "staff": [{"id": "s1", "name": "Jamie"}]},
+    )
+    msg = booking_service._format_appointment_details_confirmation_sms(_apt())
+    assert "Technician: Jamie" in msg
+    assert "Stylist:" not in msg
+
+
+def test_confirmation_sms_label_defaults_to_stylist(monkeypatch):
+    monkeypatch.setattr(
+        config_service,
+        "get_business_info",
+        lambda: {"staff": [{"id": "s1", "name": "Jamie"}]},
+    )
+    msg = booking_service._format_appointment_details_confirmation_sms(_apt())
+    assert "Stylist: Jamie" in msg

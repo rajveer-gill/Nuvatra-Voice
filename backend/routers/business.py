@@ -21,6 +21,7 @@ import config_service
 import database
 import deps
 import runtime
+import verticals
 import voice_service
 from observability import _stable_sha256, system_info, voice_info
 from staff_transfers import TransferTarget
@@ -333,6 +334,13 @@ def finalize_staff_records_for_storage(
     return out
 
 
+@router.get("/api/verticals")
+def api_list_verticals():
+    """Public list of supported industries for onboarding/Settings pickers.
+    Single source of truth is verticals.py — no auth needed (no tenant data)."""
+    return {"verticals": verticals.vertical_choices()}
+
+
 @router.get("/api/business-info")
 def api_get_business_info(
     tenant: Optional[dict] = Depends(deps.require_active_subscription),
@@ -342,6 +350,37 @@ def api_get_business_info(
         out["client_id"] = (tenant.get("client_id") or "").strip()
     _settings_load_debug_log_business_info(tenant, out)
     return out
+
+
+class UpdateBusinessVerticalRequest(BaseModel):
+    business_vertical: str = Field(..., min_length=1, max_length=60)
+
+
+@router.post("/api/business/vertical")
+def api_update_business_vertical(
+    req: UpdateBusinessVerticalRequest,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Self-serve: let a tenant change its industry. Validates against the
+    registry and persists on the tenant row (drives prompt/SMS terminology)."""
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Tenant required")
+    bv = (req.business_vertical or "").strip()
+    if not verticals.is_supported(bv):
+        raise HTTPException(status_code=400, detail="Invalid industry")
+    if not database.db_tenant_set_business_vertical(tenant["id"], bv):
+        raise HTTPException(status_code=500, detail="Could not update industry")
+    deps.audit_log(
+        "user",
+        "business_vertical_updated",
+        resource_type="tenant",
+        resource_id=tenant["id"],
+        client_id=(tenant.get("client_id") or "").strip(),
+        details={"business_vertical": bv},
+        request=request,
+    )
+    return {"ok": True, "business_vertical": bv, "business_vertical_label": verticals.terms_for(bv).label}
 
 
 @router.get("/api/greeting-preview")

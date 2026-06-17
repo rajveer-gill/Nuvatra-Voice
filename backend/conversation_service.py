@@ -24,6 +24,7 @@ import config_service
 import database
 import runtime
 import sms_service
+import verticals
 import voice_service
 from observability import (
     name_initial_for_log,
@@ -59,9 +60,14 @@ from prompts.receptionist import (
 
 logger = logging.getLogger("nuvatra")
 
+# Caller phrases meaning "no provider preference". Mostly vertical-neutral;
+# provider-specific variants (stylist/technician) are included so the no-pref
+# signal works regardless of industry.
 _STYLIST_NO_PREF_PHRASES = (
     "anyone",
     "any stylist",
+    "any technician",
+    "any tech",
     "any one",
     "no preference",
     "no pref",
@@ -195,7 +201,7 @@ def _caller_indicated_stylist_choice(
         if len(name) == 1 and nl == "a":
             # Avoid "book a haircut" — only stylist-context uses of the name A.
             if re.search(
-                r"\b(with|stylist|see|prefer|choose)\s+a\b|\ba\s+(please|for|at)\b", t
+                r"\b(with|stylist|technician|see|prefer|choose)\s+a\b|\ba\s+(please|for|at)\b", t
             ):
                 return True
             continue
@@ -274,22 +280,25 @@ def _voice_booking_nudge_message(
     services = config_service._normalize_service_entries(biz.get("services") or [])
     ctx = booking_context_from_business(biz)
 
-    # Service-first: when a service menu exists, get the service before the stylist.
+    provider = verticals.terms_for(biz.get("business_vertical")).provider
+    provider_plural = verticals.terms_for(biz.get("business_vertical")).provider_plural
+
+    # Service-first: when a service menu exists, get the service before the provider.
     if services and not service_choice_resolved(conversation_history, ctx):
         if turns >= 2 and not assistant_asked_service_recently(conversation_history):
             return (
                 f"BOOKING REMINDER: This caller wants an appointment ({turns} user turns). "
-                "Ask ONE short question: which service from the menu they'd like. Do NOT ask which "
-                "stylist yet—after they choose a service, suggest only the stylists who provide it."
+                f"Ask ONE short question: which service from the menu they'd like. Do NOT ask which "
+                f"{provider} yet—after they choose a service, suggest only the {provider_plural} who provide it."
             )
         return None
 
-    # Service chosen (or no menu) → now resolve the stylist if required.
+    # Service chosen (or no menu) → now resolve the provider if required.
     if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
         if turns >= 2:
             return (
-                f"BOOKING REMINDER: Caller picked a service ({turns} turns) but no stylist yet. "
-                "Ask ONE short question: which stylist they prefer (or anyone is fine), suggesting "
+                f"BOOKING REMINDER: Caller picked a service ({turns} turns) but no {provider} yet. "
+                f"Ask ONE short question: which {provider} they prefer (or anyone is fine), suggesting "
                 "only those who provide the chosen service."
             )
         return None
@@ -399,16 +408,17 @@ def _extract_booking_line_from_conversation(
     )
     if not transcript.strip():
         return None
+    provider = verticals.terms_for(biz.get("business_vertical")).provider
     sys = (
         "Extract appointment details from this phone transcript. "
         f"Today is {today_str}, tomorrow is {tomorrow_str}. "
         "If caller name, date, and time are all clearly agreed, reply with EXACTLY one line:\n"
         "BOOKING: name|phone|email|date|time|reason|staff\n"
         "Field order is FIXED: (1) caller name, (2) phone, (3) email, (4) date YYYY-MM-DD, "
-        "(5) time HH:MM 24h e.g. 15:00 for 3 PM — NEVER put a stylist name in the time field, "
-        "(6) service/reason from menu, (7) stylist name.\n"
-        "Leave phone and email empty. reason=exact service from menu if known. "
-        "staff=stylist name if chosen.\n"
+        f"(5) time HH:MM 24h e.g. 15:00 for 3 PM — NEVER put a {provider} name in the time field, "
+        f"(6) service/reason from menu, (7) {provider} name.\n"
+        f"Leave phone and email empty. reason=exact service from menu if known. "
+        f"staff={provider} name if chosen.\n"
         f"Staff: {', '.join(staff_names) or 'none'}. "
         f"Services: {', '.join(service_names) or 'any'}.\n"
         f"Caller name on file: {mem_name or 'unknown'}.\n"
@@ -693,13 +703,14 @@ def _validate_booking_requirements(
         )
         return False, msg, staff_id, None
 
-    # THEN STYLIST — suggest only the stylists who provide the chosen service.
+    provider = verticals.terms_for(biz.get("business_vertical")).provider
+    # THEN PROVIDER — suggest only the providers who offer the chosen service.
     if staff_rows and not staff_id:
         no_pref = any(p in user_text.lower() for p in _STYLIST_NO_PREF_PHRASES)
         if not (_caller_indicated_stylist_choice(user_text, biz) and no_pref):
             choices = ", ".join(_stylists_offering_service(biz, service_name)[:5])
             msg = (
-                "Great — which stylist would you like to see?"
+                f"Great — which {provider} would you like to see?"
                 + (f" For that, we have {choices}." if choices else "")
                 + " You can also say anyone if you have no preference."
             )
@@ -711,7 +722,7 @@ def _validate_booking_requirements(
     ):
         choices = ", ".join(_stylists_offering_service(biz, service_name)[:5])
         msg = (
-            "Before I lock this in, which stylist would you like?"
+            f"Before I lock this in, which {provider} would you like?"
             + (f" For that service we have {choices}." if choices else "")
             + " Or say anyone if you have no preference."
         )
@@ -995,9 +1006,12 @@ async def generate_response_async(
                         )
                     )
                     if not ok_booking:
+                        _prov = verticals.terms_for(
+                            config_service.get_business_info().get("business_vertical")
+                        ).provider
                         ai_text = (
                             fail_msg
-                            or "I need your stylist and service before I can book that."
+                            or f"I need your {_prov} and service before I can book that."
                         )
                         apt = None
                     else:

@@ -26,6 +26,7 @@ import database
 import deps
 import runtime
 import sms_service
+import verticals
 from observability import (
     _stable_sha256,
     auth_warning,
@@ -905,7 +906,10 @@ async def handle_incoming_sms(request: Request):
             )
         elif apt:
             stylist = booking_service._staff_display_name_for_appointment(apt)
-            stylist_txt = f", stylist: {stylist}" if stylist else ""
+            _prov = verticals.terms_for(
+                config_service.get_business_info().get("business_vertical")
+            ).provider
+            stylist_txt = f", {_prov}: {stylist}" if stylist else ""
             apt_info = (
                 f"The customer has one active appointment: {apt.get('date','')} at "
                 f"{booking_service._hhmm_to_ampm(apt.get('time','') or '')}, status {apt.get('status','')}, "

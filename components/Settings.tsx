@@ -127,6 +127,9 @@ export default function Settings() {
   const [ruleItems, setRuleItems] = useState<RuleRow[]>([])
   const [industryLocked, setIndustryLocked] = useState(false)
   const [verticalLabel, setVerticalLabel] = useState('')
+  const [vertical, setVertical] = useState('')
+  const [verticalOptions, setVerticalOptions] = useState<{ value: string; label: string }[]>([])
+  const [savingVertical, setSavingVertical] = useState(false)
   const [staff, setStaff] = useState<StaffRow[]>([])
   const [transferTargets, setTransferTargets] = useState<TransferRow[]>([])
   const [transferMax, setTransferMax] = useState<number | null>(null)
@@ -246,6 +249,7 @@ export default function Settings() {
           setRuleItems(normalizeRules(d.reservation_rules))
           setIndustryLocked(!!d.business_type_admin_locked)
           setVerticalLabel(String(d.business_vertical_label || ''))
+          setVertical(String(d.business_vertical || ''))
         } catch (e) {
           console.error('[Settings] failed to apply API response', e)
           Sentry.captureException(e instanceof Error ? e : new Error(String(e)), {
@@ -277,6 +281,32 @@ export default function Settings() {
     if (!message || !saveBarRef.current) return
     saveBarRef.current.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' })
   }, [message, reduceMotion])
+
+  // Supported industries for the picker (single source of truth: backend registry).
+  useEffect(() => {
+    api
+      .get('/api/verticals')
+      .then((r) => setVerticalOptions((r?.data?.verticals as { value: string; label: string }[]) || []))
+      .catch(() => setVerticalOptions([]))
+  }, [api])
+
+  // Persist an industry change immediately (it lives on the tenant row, not the
+  // business-config blob, so it saves on its own rather than via the main Save).
+  const changeVertical = async (next: string) => {
+    const prev = vertical
+    setVertical(next)
+    setSavingVertical(true)
+    try {
+      const r = await api.post('/api/business/vertical', { business_vertical: next })
+      setVerticalLabel(String(r?.data?.business_vertical_label || ''))
+      setMessage({ type: 'success', text: 'Industry updated' })
+    } catch {
+      setVertical(prev)
+      setMessage({ type: 'error', text: 'Could not update industry' })
+    } finally {
+      setSavingVertical(false)
+    }
+  }
 
   const randomizeName = () => {
     const current = receptionistName.trim().toLowerCase()
@@ -758,7 +788,31 @@ export default function Settings() {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Industry</label>
-            {industryLocked && verticalLabel ? (
+            {verticalOptions.length > 0 ? (
+              <>
+                <select
+                  value={vertical}
+                  onChange={(e) => changeVertical(e.target.value)}
+                  disabled={savingVertical}
+                  className="cs-field w-full"
+                >
+                  {/* Surface a legacy/unknown stored value so it isn't silently dropped. */}
+                  {vertical && !verticalOptions.some((o) => o.value === vertical) && (
+                    <option value={vertical}>{verticalLabel || vertical}</option>
+                  )}
+                  {verticalOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  {savingVertical
+                    ? 'Saving…'
+                    : 'We tailor your receptionist’s wording (e.g. “stylist” vs “technician”) to your industry. Changes save automatically.'}
+                </p>
+              </>
+            ) : industryLocked && verticalLabel ? (
               <>
                 <div className="cs-field w-full bg-gray-50 text-gray-800">{verticalLabel}</div>
                 <p className="text-xs text-gray-500 mt-1">Set by your administrator when the account was created.</p>

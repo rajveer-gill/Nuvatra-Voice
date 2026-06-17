@@ -68,6 +68,8 @@ export default function CreateBusinessPage() {
   const api = useApiClient()
   const router = useRouter()
   const [name, setName] = useState('')
+  const [vertical, setVertical] = useState('')
+  const [verticalOptions, setVerticalOptions] = useState<{ value: string; label: string }[]>([])
   const [plan, setPlan] = useState<PlanId>('starter')
   const [numberMode, setNumberMode] = useState<'new' | 'existing'>('new')
   const [existingNumber, setExistingNumber] = useState('')
@@ -99,6 +101,18 @@ export default function CreateBusinessPage() {
   }
 
   useEffect(() => () => audioRef.current?.pause(), [])
+
+  // Load the supported industries (single source of truth: backend registry).
+  useEffect(() => {
+    api
+      .get('/api/verticals')
+      .then((r) => {
+        const opts = (r?.data?.verticals as { value: string; label: string }[]) || []
+        setVerticalOptions(opts)
+        if (opts.length) setVertical((v) => v || opts[0].value)
+      })
+      .catch(() => setVerticalOptions([]))
+  }, [api])
 
   // Live-validate the referral code (debounced) so the user sees the free month apply.
   useEffect(() => {
@@ -154,6 +168,7 @@ export default function CreateBusinessPage() {
       await api.post('/api/onboarding/create-business', {
         name: name.trim(),
         plan,
+        business_vertical: vertical || undefined,
         number_mode: numberMode,
         existing_number: numberMode === 'existing' ? existingNumber.trim() : undefined,
       })
@@ -218,6 +233,26 @@ export default function CreateBusinessPage() {
               />
               <p className="mt-1 text-xs text-zinc-500">Callers hear this in your greeting.</p>
             </div>
+
+            {verticalOptions.length > 0 && (
+              <div>
+                <label className="mb-1 block text-sm font-medium text-zinc-300">Industry</label>
+                <select
+                  value={vertical}
+                  onChange={(e) => setVertical(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                >
+                  {verticalOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-zinc-500">
+                  We tune your receptionist&rsquo;s wording to your industry.
+                </p>
+              </div>
+            )}
 
             <div>
               <label className="mb-2 block text-sm font-medium text-zinc-300">
