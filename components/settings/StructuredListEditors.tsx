@@ -101,9 +101,11 @@ function Modal({ open, onClose, title, children }: ModalProps) {
 export function ServicesEditor({
   items,
   onChange,
+  examplePlaceholder = 'Haircut',
 }: {
   items: ServiceRow[]
   onChange: (next: ServiceRow[]) => void
+  examplePlaceholder?: string
 }) {
   const [open, setOpen] = useState(false)
   const [edit, setEdit] = useState<ServiceRow | null>(null)
@@ -212,7 +214,7 @@ function ServiceForm({
     <div className="space-y-4">
       <div>
         <label className="mb-1 block text-xs font-medium text-gray-600">Service name</label>
-        <input className="cs-field w-full" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Haircut" />
+        <input className="cs-field w-full" value={name} onChange={(e) => setName(e.target.value)} placeholder={`e.g. ${examplePlaceholder}`} />
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>

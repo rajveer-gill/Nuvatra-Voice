@@ -79,6 +79,34 @@ def test_focus_guidance_provider_param():
     assert "stylist" not in g
 
 
+# ---- vertical-specific booking intake ----
+
+def test_auto_body_prompt_gathers_vehicle_and_insurance():
+    p = build_system_prompt(
+        business_info=_biz("auto_body"), include_booked_slots=True, booked_slots_prompt_text=""
+    )
+    # The auto body intake asks for the things a body shop actually needs.
+    assert "AUTO BODY INTAKE" in p
+    assert "VEHICLE" in p
+    assert "INSURANCE" in p
+    assert "DRIVABLE" in p
+
+
+def test_salon_prompt_has_no_auto_body_intake():
+    p = build_system_prompt(
+        business_info=_biz("salon_chair"), include_booked_slots=True, booked_slots_prompt_text=""
+    )
+    assert "AUTO BODY INTAKE" not in p
+    assert "VEHICLE" not in p
+
+
+def test_registry_exposes_intake_and_examples():
+    assert verticals.terms_for("auto_body").intake_guidance
+    assert "Collision" in verticals.terms_for("auto_body").service_examples
+    # Salon has no extra intake (keeps its prompt unchanged).
+    assert verticals.terms_for("salon_chair").intake_guidance == ""
+
+
 # ---- SMS confirmation label ----
 
 def _apt():

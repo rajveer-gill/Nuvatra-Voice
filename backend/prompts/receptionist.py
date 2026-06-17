@@ -458,12 +458,15 @@ def build_system_prompt(
         "along.\") and the MESSAGE: line last. Only use MESSAGE: when they actually want "
         "something relayed to the team—never for small talk or questions you already answered."
     )
+    # Industry-specific intake (e.g. auto body needs vehicle/insurance/damage).
+    # Empty for verticals with no extra intake, so their prompt is unchanged.
+    intake_block = f"\n\n{terms.intake_guidance}" if terms.intake_guidance else ""
     base_prompt = f"""{header}
 
 {focus_block}
 
 You can help with:
-{help_section}{staff_block}{memory_block}{slots_block}{message_block}"""
+{help_section}{staff_block}{memory_block}{slots_block}{intake_block}{message_block}"""
 
     if detected_language != "English":
         return (

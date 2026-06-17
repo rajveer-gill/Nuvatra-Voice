@@ -380,7 +380,14 @@ def api_update_business_vertical(
         details={"business_vertical": bv},
         request=request,
     )
-    return {"ok": True, "business_vertical": bv, "business_vertical_label": verticals.terms_for(bv).label}
+    t = verticals.terms_for(bv)
+    return {
+        "ok": True,
+        "business_vertical": bv,
+        "business_vertical_label": t.label,
+        "provider_plural": t.provider_plural,
+        "service_examples": t.service_examples,
+    }
 
 
 @router.get("/api/greeting-preview")

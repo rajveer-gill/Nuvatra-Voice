@@ -338,6 +338,17 @@ def _default_business_info_for_tenant() -> Optional[dict]:
         return None
 
 
+def _attach_vertical_fields(out: dict, bv: str) -> None:
+    """Add vertical key/label + terminology the dashboard uses to tailor copy
+    (e.g. 'technicians' vs 'stylists', example service names)."""
+    t = verticals.terms_for(bv)
+    out["business_vertical"] = bv
+    out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
+    out["provider_singular"] = t.provider
+    out["provider_plural"] = t.provider_plural
+    out["service_examples"] = t.service_examples
+
+
 def business_info_for_dashboard(tenant: Optional[dict]) -> dict:
     """Settings / business-info API: never use _DEMO when a real tenant is authenticated."""
     if not tenant:
@@ -352,14 +363,12 @@ def business_info_for_dashboard(tenant: Optional[dict]) -> dict:
             if not (out.get("name") or "").strip():
                 out["name"] = (tenant.get("name") or "").strip()
             bv = (tenant.get("business_vertical") or "salon_chair").strip()
-            out["business_vertical"] = bv
-            out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
+            _attach_vertical_fields(out, bv)
             out["business_type_admin_locked"] = True
             return out
     out = _minimal_business_info_from_tenant_dict(tenant)
     bv = (tenant.get("business_vertical") or "salon_chair").strip()
-    out["business_vertical"] = bv
-    out["business_vertical_label"] = BUSINESS_VERTICAL_LABELS.get(bv, bv)
+    _attach_vertical_fields(out, bv)
     out["business_type_admin_locked"] = bool(cid)
     return out
 

@@ -44,6 +44,12 @@ class VerticalTerms:
     business_phrase: str
     # Noun for the premises — e.g. "the whole salon is closed" / "the whole shop is closed".
     venue: str
+    # Extra details the receptionist should gather at booking, specific to this
+    # industry (injected into the voice prompt). Empty = no industry-specific
+    # intake beyond the generic name/date/time/service flow.
+    intake_guidance: str = ""
+    # Example service names shown as hints in the dashboard service editor.
+    service_examples: str = ""
 
 
 _VERTICALS: Dict[str, VerticalTerms] = {
@@ -56,6 +62,8 @@ _VERTICALS: Dict[str, VerticalTerms] = {
         provider_caps="STYLIST",
         business_phrase="salon, barbershop, or nail studio",
         venue="salon",
+        intake_guidance="",
+        service_examples="Short Cut, Long Cut, Color, Blowout",
     ),
     "auto_body": VerticalTerms(
         key="auto_body",
@@ -66,6 +74,24 @@ _VERTICALS: Dict[str, VerticalTerms] = {
         provider_caps="TECHNICIAN",
         business_phrase="auto body shop or collision center",
         venue="shop",
+        # Auto body intake is different from a salon's: the shop needs the vehicle,
+        # how the job is paid for, what's wrong, and whether the car can be driven
+        # in. The AI gathers these conversationally and summarizes them in the
+        # booking reason so the shop sees them on the confirmation.
+        intake_guidance=(
+            "AUTO BODY INTAKE: This is an auto body / collision shop. Most callers want an estimate, "
+            "a drop-off, or a status update on a repair. When booking an estimate or drop-off, naturally "
+            "gather (don't interrogate—ask as it flows): (1) the VEHICLE: year, make, and model; "
+            "(2) whether it's an INSURANCE claim or out-of-pocket, and the insurer if they mention it; "
+            "(3) a short description of the DAMAGE or work needed (e.g. rear bumper, hail dents, scratch, "
+            "collision); (4) whether the car is DRIVABLE (if not, mention they may need a tow). "
+            "Summarize these in the booking reason field, e.g. "
+            "\"Collision estimate — 2019 Honda Civic, Geico claim, rear bumper, drivable\". "
+            "If the caller asks whether you take their insurance, say the shop works with most major "
+            "insurers and can confirm their specific one—do not invent a list. Don't block the booking "
+            "if they don't know every detail; capture what they have."
+        ),
+        service_examples="Collision Estimate, Dent Repair, Bumper Repair, Paint, Glass Replacement",
     ),
 }
 

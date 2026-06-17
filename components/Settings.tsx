@@ -130,6 +130,8 @@ export default function Settings() {
   const [vertical, setVertical] = useState('')
   const [verticalOptions, setVerticalOptions] = useState<{ value: string; label: string }[]>([])
   const [savingVertical, setSavingVertical] = useState(false)
+  const [providerPlural, setProviderPlural] = useState('')
+  const [serviceExamples, setServiceExamples] = useState('')
   const [staff, setStaff] = useState<StaffRow[]>([])
   const [transferTargets, setTransferTargets] = useState<TransferRow[]>([])
   const [transferMax, setTransferMax] = useState<number | null>(null)
@@ -250,6 +252,8 @@ export default function Settings() {
           setIndustryLocked(!!d.business_type_admin_locked)
           setVerticalLabel(String(d.business_vertical_label || ''))
           setVertical(String(d.business_vertical || ''))
+          setProviderPlural(String(d.provider_plural || ''))
+          setServiceExamples(String(d.service_examples || ''))
         } catch (e) {
           console.error('[Settings] failed to apply API response', e)
           Sentry.captureException(e instanceof Error ? e : new Error(String(e)), {
@@ -299,6 +303,8 @@ export default function Settings() {
     try {
       const r = await api.post('/api/business/vertical', { business_vertical: next })
       setVerticalLabel(String(r?.data?.business_vertical_label || ''))
+      setProviderPlural(String(r?.data?.provider_plural || ''))
+      setServiceExamples(String(r?.data?.service_examples || ''))
       setMessage({ type: 'success', text: 'Industry updated' })
     } catch {
       setVertical(prev)
@@ -960,7 +966,11 @@ export default function Settings() {
               </motion.div>
             )}
           </div>
-          <ServicesEditor items={serviceItems} onChange={setServiceItems} />
+          <ServicesEditor
+            items={serviceItems}
+            onChange={setServiceItems}
+            examplePlaceholder={serviceExamples.split(',')[0]?.trim() || 'Haircut'}
+          />
           <SpecialsEditor items={specialItems} onChange={setSpecialItems} />
           <RulesEditor items={ruleItems} onChange={setRuleItems} />
         </div>
@@ -976,8 +986,10 @@ export default function Settings() {
           Team roster
         </h2>
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
-          Staff your callers can book with (stylists, artists, providers, chairs). Add as many as you need. This list is only for
-          scheduling and AI context, not live call transfers.
+          {providerPlural
+            ? `The ${providerPlural} your callers can book with.`
+            : 'Staff your callers can book with (stylists, artists, providers, chairs).'}{' '}
+          Add as many as you need. This list is only for scheduling and AI context, not live call transfers.
         </p>
         <StaffMembersSection
           staff={staff}
