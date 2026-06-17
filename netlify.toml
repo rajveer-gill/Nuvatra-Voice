@@ -22,7 +22,12 @@
 [context.staging.environment]
   NEXT_PUBLIC_API_URL = "https://nuvatra-voice-backend-staging.onrender.com"
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_Y2F1c2FsLXJlZGJpcmQtNjcuY2xlcmsuYWNjb3VudHMuZGV2JA"
+  # Frontend requests this Clerk JWT template so tokens carry the aud the backend
+  # validates. The same-named template must exist in the dev Clerk instance with
+  # aud = CLERK_AUDIENCE (https://nuvatra-voice.onrender.com). See docs/CLERK-JWT-SETUP.md.
+  NEXT_PUBLIC_CLERK_JWT_TEMPLATE = "nuvatra-backend"
 
 [context.deploy-preview.environment]
   NEXT_PUBLIC_API_URL = "https://nuvatra-voice-backend-staging.onrender.com"
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_Y2F1c2FsLXJlZGJpcmQtNjcuY2xlcmsuYWNjb3VudHMuZGV2JA"
+  NEXT_PUBLIC_CLERK_JWT_TEMPLATE = "nuvatra-backend"
