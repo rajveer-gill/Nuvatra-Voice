@@ -494,8 +494,17 @@ def staff_on_roster(info: Optional[dict] = None) -> List[dict]:
 
 
 def staff_roster_ready_for_booking(info: Optional[dict] = None) -> bool:
-    """True when at least one named team member is on the roster."""
-    return len(staff_on_roster(info)) >= 1
+    """True when booking is not blocked on the roster.
+
+    For verticals that book with a named provider (e.g. salons), this requires at
+    least one named team member. For verticals that book to the business itself
+    (e.g. auto body), no roster is required — the shop can take calls and book
+    estimates/drop-offs without listing technicians.
+    """
+    data = info if info is not None else get_business_info()
+    if staff_on_roster(data):
+        return True
+    return not verticals.terms_for(data.get("business_vertical")).books_with_provider
 
 
 def forwarding_phone_ready(info: Optional[dict] = None) -> bool:

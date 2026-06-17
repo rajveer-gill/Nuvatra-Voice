@@ -62,8 +62,6 @@ def test_auto_body_prompt_says_technician_not_stylist():
     )
     assert "technician" in p
     assert "stylist" not in p
-    # The provider section header follows the vertical too.
-    assert "TECHNICIAN: Multiple team members" in p
 
 
 def test_unknown_vertical_prompt_defaults_to_salon_wording():
@@ -150,6 +148,40 @@ def test_extract_intake_parses_auto_body(monkeypatch):
     assert out["vehicle"] == "2019 Honda Civic"
     assert out["insurance"] == "Geico claim"
     assert out["drivable"] == "yes"
+
+
+def test_roster_not_required_for_shop_booking_vertical():
+    import config_service as cs
+    # Auto body books to the shop — no roster needed to be call-ready.
+    assert cs.staff_roster_ready_for_booking({"business_vertical": "auto_body", "staff": []}) is True
+    # Salon still requires at least one named provider.
+    assert cs.staff_roster_ready_for_booking({"business_vertical": "salon_chair", "staff": []}) is False
+    # A configured roster is always ready.
+    assert cs.staff_roster_ready_for_booking(
+        {"business_vertical": "salon_chair", "staff": [{"name": "Jamie"}]}
+    ) is True
+
+
+def test_staff_choice_not_required_for_shop_booking_vertical():
+    import conversation_service as cs
+    assert cs._staff_choice_required(
+        {"business_vertical": "auto_body", "staff": [{"name": "Mike"}, {"name": "Tony"}]}
+    ) is False
+    assert cs._staff_choice_required(
+        {"business_vertical": "salon_chair", "staff": [{"name": "Jamie"}, {"name": "Alex"}]}
+    ) is True
+
+
+def test_auto_body_prompt_does_not_push_provider_even_with_staff():
+    biz = {
+        "name": "Joes Auto Body",
+        "business_vertical": "auto_body",
+        "services": [{"id": "s1", "name": "Collision Estimate"}],
+        "staff": [{"name": "Mike"}, {"name": "Tony"}],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=True, booked_slots_prompt_text="")
+    assert "Multiple team members" not in p
+    assert "which technician" not in p.lower()
 
 
 def test_appointment_intake_json_round_trips_to_dict():

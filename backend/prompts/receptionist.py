@@ -346,7 +346,14 @@ def build_system_prompt(
     slots_block = ""
     if include_booked_slots:
         slots_text = booked_slots_prompt_text or ""
-        roster_names = [(s.get("name") or "").strip() for s in staff if (s.get("name") or "").strip()]
+        # Verticals that book to the business itself (e.g. auto body) never route
+        # booking by provider, even if names are listed — so the AI doesn't ask the
+        # caller to pick one. Transfers still use the staff list separately above.
+        roster_names = (
+            [(s.get("name") or "").strip() for s in staff if (s.get("name") or "").strip()]
+            if terms.books_with_provider
+            else []
+        )
         multi_staff = len(roster_names) >= 2
         if slots_text.strip():
             if multi_staff:

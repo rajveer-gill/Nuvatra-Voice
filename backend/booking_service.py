@@ -659,7 +659,9 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
         for s in (info.get("staff") or [])
         if (s.get("name") or "").strip()
     ]
-    multi_staff = len(roster) >= 2
+    # Shop-booking verticals (e.g. auto body) keep a single shop-wide calendar even
+    # if technicians are listed — slots aren't split per provider.
+    multi_staff = terms.books_with_provider and len(roster) >= 2
     id_to_name = {sid: name for sid, name in roster if sid}
     today = now.date()
     parts: List[str] = []

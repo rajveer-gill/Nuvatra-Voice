@@ -233,6 +233,10 @@ def _caller_indicated_service_choice(
 
 def _staff_choice_required(info: Optional[dict] = None) -> bool:
     biz = info or config_service.get_business_info()
+    # Verticals that book to the business itself (e.g. auto body) never make the
+    # caller choose a provider, even if technicians are listed for internal use.
+    if not verticals.terms_for(biz.get("business_vertical")).books_with_provider:
+        return False
     names = [
         (s.get("name") or "").strip()
         for s in (biz.get("staff") or [])

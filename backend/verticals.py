@@ -54,6 +54,11 @@ class VerticalTerms:
     # (key, label) pairs. Empty for verticals with no structured intake. Kept as a
     # tuple of tuples so VerticalTerms stays hashable (frozen dataclass).
     intake_fields: tuple = ()
+    # Whether callers book with a specific named provider (a salon client picks
+    # "their" stylist). When False (e.g. auto body), the business books to the shop
+    # itself: no roster is required to take calls, and the AI never asks the caller
+    # to choose a provider.
+    books_with_provider: bool = True
 
 
 _VERTICALS: Dict[str, VerticalTerms] = {
@@ -103,6 +108,8 @@ _VERTICALS: Dict[str, VerticalTerms] = {
             ("damage", "Damage / work needed"),
             ("drivable", "Drivable"),
         ),
+        # Callers book with the shop, not a named technician.
+        books_with_provider=False,
     ),
 }
 
