@@ -12,3 +12,17 @@
   SECRETS_SCAN_OMIT_KEYS = "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,NEXT_PUBLIC_API_URL"
   # Don't flag example env file or docs that document these vars.
   SECRETS_SCAN_OMIT_PATHS = ".env.local.example,AUTH-SETUP.md,DEPLOYMENT.md,PHONE-SETUP.md,README.md"
+
+# --- Staging frontend (see STAGING.md) ---
+# Production builds (the production branch) keep using the dashboard's env vars.
+# Builds from the `staging` branch and PR deploy-previews are pointed at the
+# STAGING backend + a Clerk DEVELOPMENT instance, so they can never read or write
+# production data. Replace the placeholder URLs/keys with your real staging values
+# (or set them per-context in Netlify → Site settings → Environment variables).
+[context.staging.environment]
+  NEXT_PUBLIC_API_URL = "https://nuvatra-voice-backend-staging.onrender.com"
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_REPLACE_WITH_CLERK_DEV_KEY"
+
+[context.deploy-preview.environment]
+  NEXT_PUBLIC_API_URL = "https://nuvatra-voice-backend-staging.onrender.com"
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_REPLACE_WITH_CLERK_DEV_KEY"

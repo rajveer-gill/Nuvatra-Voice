@@ -2,6 +2,15 @@
 # Apply via Render Dashboard → Blueprints, or link repo with render.yaml at root.
 # Set secret values in the dashboard (sync: false); names only are declared here.
 
+# Preview/staging environments (see STAGING.md): when enabled, Render spins up an
+# ephemeral copy of this whole blueprint — backend + its own throwaway Postgres —
+# for a pull request, so you can test a branch end-to-end before merging to
+# production. `manual` = nothing spawns automatically (no surprise cost); create a
+# preview on demand from the Render dashboard, or switch to `automatic` for one per
+# PR. Preview envs MUST use Clerk DEV + Stripe TEST secrets, never production ones.
+previews:
+  generation: manual
+
 databases:
   - name: nuvatra-voice-db
     plan: starter
