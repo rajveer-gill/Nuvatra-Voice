@@ -716,6 +716,8 @@ def init_db() -> bool:
             ("staff_id", "TEXT"),
             ("owner_decline_reason", "TEXT"),
             ("confirmation_sms_failed", "BOOLEAN NOT NULL DEFAULT false"),
+            # Vertical-specific structured intake (e.g. auto body: vehicle, insurance).
+            ("intake", "JSONB"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE appointments ADD COLUMN IF NOT EXISTS {col} {typ}")
@@ -1906,6 +1908,20 @@ def _normalize_phone(phone: str) -> str:
     return "".join(c for c in (phone or "") if c.isdigit())
 
 # --- Appointments ---
+def _coerce_intake(raw) -> Optional[dict]:
+    """Normalize a JSONB intake column to a dict (psycopg2 usually decodes it
+    already, but be defensive if it comes back as a JSON string)."""
+    if isinstance(raw, dict):
+        return raw or None
+    if isinstance(raw, str) and raw.strip():
+        try:
+            v = json.loads(raw)
+            return v if isinstance(v, dict) and v else None
+        except Exception:
+            return None
+    return None
+
+
 def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
     conn = _get_conn()
     if not conn:
@@ -1913,7 +1929,7 @@ def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
     cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
-        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed, intake
            FROM appointments WHERE client_id = %s ORDER BY date, time""",
         (cid,),
     )
@@ -1934,6 +1950,7 @@ def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
             "staff_id": r[10] if len(r) > 10 else None,
             "owner_decline_reason": r[11] if len(r) > 11 else None,
             "confirmation_sms_failed": bool(r[12]) if len(r) > 12 else False,
+            "intake": _coerce_intake(r[13]) if len(r) > 13 else None,
         }
         for r in rows
     ]
@@ -2017,9 +2034,11 @@ def db_appointments_insert(data: dict) -> dict:
         data.get("date"),
         data.get("time"),
     )
+    intake_val = data.get("intake")
+    intake_json = json.dumps(intake_val) if isinstance(intake_val, dict) and intake_val else None
     cur.execute("""
-        INSERT INTO appointments (client_id, name, email, phone, date, time, reason, status, source, staff_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO appointments (client_id, name, email, phone, date, time, reason, status, source, staff_id, intake)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id, created_at
     """, (
         cid,
@@ -2032,6 +2051,7 @@ def db_appointments_insert(data: dict) -> dict:
         data.get("status", "pending"),
         data.get("source", "manual"),
         data.get("staff_id"),
+        intake_json,
     ))
     row = cur.fetchone()
     conn.commit()
@@ -2099,7 +2119,7 @@ def db_appointments_get_by_id(
     cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
-        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed, intake
            FROM appointments WHERE id = %s AND client_id = %s""",
         (appointment_id, cid),
     )
@@ -2121,6 +2141,7 @@ def db_appointments_get_by_id(
         "staff_id": row[10] if len(row) > 10 else None,
         "owner_decline_reason": row[11] if len(row) > 11 else None,
         "confirmation_sms_failed": bool(row[12]) if len(row) > 12 else False,
+        "intake": _coerce_intake(row[13]) if len(row) > 13 else None,
     }
 
 def db_appointments_max_id() -> int:

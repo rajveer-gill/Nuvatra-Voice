@@ -50,6 +50,10 @@ class VerticalTerms:
     intake_guidance: str = ""
     # Example service names shown as hints in the dashboard service editor.
     service_examples: str = ""
+    # Structured details captured on the call and shown on the appointment, as
+    # (key, label) pairs. Empty for verticals with no structured intake. Kept as a
+    # tuple of tuples so VerticalTerms stays hashable (frozen dataclass).
+    intake_fields: tuple = ()
 
 
 _VERTICALS: Dict[str, VerticalTerms] = {
@@ -64,6 +68,7 @@ _VERTICALS: Dict[str, VerticalTerms] = {
         venue="salon",
         intake_guidance="",
         service_examples="Short Cut, Long Cut, Color, Blowout",
+        intake_fields=(),
     ),
     "auto_body": VerticalTerms(
         key="auto_body",
@@ -92,8 +97,19 @@ _VERTICALS: Dict[str, VerticalTerms] = {
             "if they don't know every detail; capture what they have."
         ),
         service_examples="Collision Estimate, Dent Repair, Bumper Repair, Paint, Glass Replacement",
+        intake_fields=(
+            ("vehicle", "Vehicle"),
+            ("insurance", "Insurance"),
+            ("damage", "Damage / work needed"),
+            ("drivable", "Drivable"),
+        ),
     ),
 }
+
+
+def intake_field_dicts(key: object) -> List[Dict[str, str]]:
+    """[{key,label}] of a vertical's structured intake fields (for the API/UI)."""
+    return [{"key": k, "label": label} for k, label in terms_for(key).intake_fields]
 
 
 def is_supported(key: object) -> bool:

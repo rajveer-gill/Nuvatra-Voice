@@ -120,6 +120,21 @@ export function AppointmentCard({
               </span>
             )}
           </div>
+          {apt.intake && Object.keys(apt.intake).length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-0.5">
+              {Object.entries(apt.intake).map(([k, v]) =>
+                v ? (
+                  <span
+                    key={k}
+                    className="inline-flex items-center gap-1 rounded-md border border-cyan-500/20 bg-cyan-500/5 px-2 py-0.5 text-xs text-cyan-100/90"
+                  >
+                    <span className="font-semibold text-cyan-300/90">{humanizeIntakeKey(k)}:</span>
+                    <span className="text-zinc-200">{v}</span>
+                  </span>
+                ) : null,
+              )}
+            </div>
+          )}
           {apt.confirmation_sms_failed && (
             <div className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-medium text-amber-200">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -198,6 +213,12 @@ export function AppointmentCard({
 
 function needsResponsePulse(status: string): boolean {
   return status === 'pending_review' || status === 'pending' || status === 'pending_customer'
+}
+
+/** Turn an intake key like "drivable" or "damage_type" into a readable label. */
+function humanizeIntakeKey(key: string): string {
+  const s = key.replace(/_/g, ' ').trim()
+  return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
 export { apiDetail }

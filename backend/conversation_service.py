@@ -11,6 +11,7 @@ main and calls these via re-export. Cross-module helpers are module-qualified
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -458,6 +459,62 @@ def _extract_booking_line_from_conversation(
     return prepared
 
 
+def _extract_intake_from_conversation(conversation_history: Optional[list]) -> Optional[dict]:
+    """Pull a vertical's structured intake (e.g. auto body: vehicle, insurance,
+    damage, drivable) out of the call transcript as a small JSON dict.
+
+    Isolated and best-effort: returns None for verticals with no intake fields,
+    on empty transcripts, or on any failure—so it can never block a booking.
+    Runs a single focused GPT call separate from the BOOKING extraction, so the
+    core booking parser/flow is untouched.
+    """
+    biz = config_service.get_business_info()
+    terms = verticals.terms_for(biz.get("business_vertical"))
+    fields = terms.intake_fields
+    if not fields:
+        return None
+    transcript = "\n".join(
+        f"{(m.get('role') or '').strip().upper()}: {(m.get('content') or '').strip()}"
+        for m in (conversation_history or [])[-16:]
+        if (m.get("content") or "").strip()
+    )
+    if not transcript.strip():
+        return None
+    keys = [k for k, _ in fields]
+    descriptions = "; ".join(f"{k} = {label}" for k, label in fields)
+    sys = (
+        f"You extract structured intake details from a phone call to a {terms.business_phrase}. "
+        f"Return ONLY a JSON object whose keys are any of: {', '.join(keys)}. "
+        f"Field meanings: {descriptions}. "
+        "Use short natural values (e.g. vehicle: \"2019 Honda Civic\", insurance: \"Geico claim\" or "
+        "\"out of pocket\", drivable: \"yes\" or \"no\"). OMIT any key the caller did not state. "
+        "If the caller gave none of these, return {}."
+    )
+    try:
+        resp = runtime.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user", "content": transcript},
+            ],
+            temperature=0,
+            max_tokens=160,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads((resp.choices[0].message.content or "").strip())
+    except Exception as e:
+        logger.warning("intake_extraction_failed: %s", e)
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: dict = {}
+    for k in keys:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()[:120]
+    return out or None
+
+
 def _prepare_parsed_booking(
     booking: dict,
     *,
@@ -790,6 +847,7 @@ def _create_appointment_from_booking(
         "source": "receptionist",
         "status": "pending_customer",
         "staff_id": staff_key,
+        "intake": booking.get("intake") or None,
     }
     if client_id_override:
         appointment_data["client_id"] = client_id_override
@@ -1017,6 +1075,14 @@ async def generate_response_async(
                     else:
                         if canonical_service:
                             booking["reason"] = canonical_service
+                        # Structured vertical intake (e.g. auto body: vehicle/insurance).
+                        # Best-effort and isolated — never blocks the booking.
+                        try:
+                            booking["intake"] = _extract_intake_from_conversation(
+                                call_data.get("conversation_history")
+                            )
+                        except Exception:
+                            booking["intake"] = None
                         apt = _create_appointment_from_booking(
                             booking,
                             client_id_override=cid,

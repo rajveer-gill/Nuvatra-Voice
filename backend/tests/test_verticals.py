@@ -107,6 +107,60 @@ def test_registry_exposes_intake_and_examples():
     assert verticals.terms_for("salon_chair").intake_guidance == ""
 
 
+# ---- structured intake capture ----
+
+def test_intake_field_dicts():
+    fields = verticals.intake_field_dicts("auto_body")
+    assert {"key": "vehicle", "label": "Vehicle"} in fields
+    assert any(f["key"] == "insurance" for f in fields)
+    # Salon has no structured intake.
+    assert verticals.intake_field_dicts("salon_chair") == []
+
+
+def test_extract_intake_none_for_vertical_without_fields(monkeypatch):
+    import conversation_service as cs
+
+    monkeypatch.setattr(
+        cs.config_service, "get_business_info", lambda: {"business_vertical": "salon_chair"}
+    )
+    # No GPT call should be needed; salon has no intake fields.
+    assert cs._extract_intake_from_conversation([{"role": "user", "content": "hi"}]) is None
+
+
+def test_extract_intake_parses_auto_body(monkeypatch):
+    import conversation_service as cs
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        cs.config_service, "get_business_info", lambda: {"business_vertical": "auto_body"}
+    )
+
+    def fake_create(**kwargs):
+        content = '{"vehicle": "2019 Honda Civic", "insurance": "Geico claim", "damage": "rear bumper", "drivable": "yes"}'
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    monkeypatch.setattr(
+        cs.runtime,
+        "client",
+        SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))),
+    )
+    out = cs._extract_intake_from_conversation(
+        [{"role": "user", "content": "2019 honda civic, geico, rear bumper, drives fine"}]
+    )
+    assert out["vehicle"] == "2019 Honda Civic"
+    assert out["insurance"] == "Geico claim"
+    assert out["drivable"] == "yes"
+
+
+def test_appointment_intake_json_round_trips_to_dict():
+    # _coerce_intake handles both dict (psycopg2 default) and JSON-string forms.
+    import database
+    assert database._coerce_intake({"vehicle": "Civic"}) == {"vehicle": "Civic"}
+    assert database._coerce_intake('{"vehicle": "Civic"}') == {"vehicle": "Civic"}
+    assert database._coerce_intake(None) is None
+    assert database._coerce_intake("") is None
+
+
 # ---- SMS confirmation label ----
 
 def _apt():
