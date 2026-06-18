@@ -25,6 +25,15 @@ from pathlib import Path
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND_DIR))
 
+# Pick up Twilio creds (and anything else) from the local backend/.env if present,
+# so they don't have to be passed inline. DATABASE_URL is overridden to staging below.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(_BACKEND_DIR / ".env")
+except Exception:
+    pass
+
 
 def _require(name: str) -> str:
     val = (os.getenv(name) or "").strip()
