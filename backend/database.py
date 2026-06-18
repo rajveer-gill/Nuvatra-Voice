@@ -1545,8 +1545,13 @@ def db_tenant_update_subscription(
     stripe_subscription_id: Optional[str] = None,
     subscription_status: Optional[str] = None,
     plan: Optional[str] = None,
+    trial_ends_at: Optional[datetime] = None,
 ) -> bool:
-    """Update tenant subscription fields (from Stripe webhook). Returns True on success."""
+    """Update tenant subscription fields (from Stripe webhook). Returns True on success.
+
+    trial_ends_at is set when provided (e.g. a trialing subscription's trial_end),
+    so the tenant reflects Stripe's real trial window and unlocks trial-tier access.
+    """
     conn = _get_conn()
     if not conn:
         return False
@@ -1563,6 +1568,9 @@ def db_tenant_update_subscription(
         if subscription_status is not None:
             updates.append("subscription_status = %s")
             params.append(subscription_status)
+        if trial_ends_at is not None:
+            updates.append("trial_ends_at = %s")
+            params.append(trial_ends_at)
         if plan is not None:
             updates.append("plan = %s")
             params.append(plan)

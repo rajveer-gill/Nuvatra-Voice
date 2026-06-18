@@ -103,6 +103,54 @@ def test_checkout_completed_activates_subscription(client, monkeypatch):
         os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
 
 
+def test_checkout_trial_lands_as_trialing_with_trial_end(client, monkeypatch):
+    """A self-serve signup creates a 7-day trial. The handler must mirror Stripe's
+    real state (status 'trialing' + trial_end) so the tenant gets full Pro-tier
+    features during the trial — not be hardcoded to 'active' on the paid plan."""
+    import database
+    import deps
+    import runtime
+    from types import SimpleNamespace
+    from routers import billing
+
+    monkeypatch.setattr(runtime, "USE_DB", True)
+    os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test"
+    updates = {}
+    monkeypatch.setattr(
+        database, "db_tenant_update_subscription",
+        lambda tid, **kw: updates.update(tenant_id=tid, **kw) or True,
+    )
+    monkeypatch.setattr(
+        database, "db_tenant_get_by_id",
+        lambda tid: {"id": tid, "client_id": "c-1", "twilio_phone_number": "+15551112222"},
+    )
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    try:
+        with patch.object(billing, "stripe") as mock_stripe:
+            mock_stripe.Webhook.construct_event.return_value = MagicMock()  # signature OK
+            # Stripe reports the subscription as trialing with a real trial_end.
+            mock_stripe.Subscription.retrieve.return_value = SimpleNamespace(
+                status="trialing", trial_end=1_900_000_000
+            )
+            payload = json.dumps({
+                "type": "checkout.session.completed",
+                "data": {"object": {
+                    "id": "cs_1", "customer": "cus_1", "subscription": "sub_1",
+                    "metadata": {"tenant_id": "t-1", "plan": "starter"},
+                }},
+            }).encode()
+            resp = client.post(
+                "/api/stripe-webhook",
+                content=payload,
+                headers={"Content-Type": "application/json", "stripe-signature": "v0,fake"},
+            )
+            assert resp.status_code == 200
+            assert updates.get("subscription_status") == "trialing"
+            assert updates.get("trial_ends_at") is not None
+    finally:
+        os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
+
 def _post_event(client, billing, event_dict):
     with patch.object(billing, "stripe") as mock_stripe:
         mock_stripe.Webhook.construct_event.return_value = MagicMock()  # signature OK
