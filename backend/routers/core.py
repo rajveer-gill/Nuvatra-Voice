@@ -6,10 +6,11 @@ config_service / deps / database / runtime).
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 import booking_service
@@ -245,11 +246,21 @@ def get_sms_thread(
     sess = database.db_sms_session_get(phone, cid)
     if not sess:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    msgs = [
-        {"role": m.get("role") or "", "content": m.get("content") or ""}
-        for m in (sess.get("messages") or [])
-        if isinstance(m, dict)
-    ]
+    msgs = []
+    for m in (sess.get("messages") or []):
+        if not isinstance(m, dict):
+            continue
+        entry = {"role": m.get("role") or "", "content": m.get("content") or ""}
+        # Photos the customer texted (MMS). Expose only a stable reference + type —
+        # the raw Twilio URL stays server-side and is served via the auth proxy.
+        media = m.get("media")
+        if isinstance(media, list) and media:
+            entry["media"] = [
+                {"sid": mm.get("sid"), "content_type": mm.get("content_type") or "image/jpeg"}
+                for mm in media
+                if isinstance(mm, dict) and mm.get("sid")
+            ]
+        msgs.append(entry)
     updated = sess.get("updated_at")
     return {
         "phone": database._normalize_phone(phone),
@@ -257,6 +268,63 @@ def get_sms_thread(
         "appointment_id": sess.get("appointment_id"),
         "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (updated or ""),
     }
+
+
+@router.get("/api/sms/media")
+def get_sms_media(
+    phone: str,
+    sid: str,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Authenticated proxy for a customer-texted photo (MMS).
+
+    Security: tenant-scoped; the caller references a media item only by its Twilio
+    MediaSid, and we resolve the actual URL from THIS tenant's stored conversation
+    (a whitelist — never a URL from the request, so no SSRF). Twilio media is
+    auth-walled, so we fetch it server-side with the account creds and stream the
+    bytes back. Images only.
+    """
+    cid = deps._bind_tenant_db_context(tenant)
+    if not _tenant_has_messages(tenant):
+        raise HTTPException(status_code=403, detail="The Messages inbox is available on Growth and Pro plans")
+    if not runtime.USE_DB or not (sid or "").strip():
+        raise HTTPException(status_code=404, detail="Not found")
+    sess = database.db_sms_session_get(phone, cid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    found = None
+    for m in (sess.get("messages") or []):
+        if not isinstance(m, dict):
+            continue
+        for mm in (m.get("media") or []):
+            if isinstance(mm, dict) and mm.get("sid") == sid:
+                found = mm
+                break
+        if found:
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Media not found")
+    content_type = (found.get("content_type") or "").strip().lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Unsupported media type")
+    url = (found.get("url") or "").strip()
+    acct = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+    tok = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    if not url or not acct or not tok:
+        raise HTTPException(status_code=502, detail="Media unavailable")
+    try:
+        import httpx
+
+        r = httpx.get(url, auth=(acct, tok), timeout=10.0, follow_redirects=True)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not load media")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail="Could not load media")
+    return Response(
+        content=r.content,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 def _find_inmem_message(message_id: int) -> Optional[dict]:

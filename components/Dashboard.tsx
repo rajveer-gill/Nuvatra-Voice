@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { LockedFeature } from '@/components/ui/LockedFeature'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
+import { SmsMediaImage } from '@/components/SmsMediaImage'
 import { STATUS_CLASSES, STATUS_LABELS } from '@/components/appointments/appointmentStatus'
 
 /** Call log outcome pills — dark text on tinted fills for white cards. */
@@ -58,6 +59,8 @@ interface SmsThread {
 interface ThreadMessage {
   role: string
   content: string
+  /** Photos the customer texted (auto body: damage). sid references the auth media proxy. */
+  media?: { sid: string; content_type: string }[]
 }
 
 interface AnalyticsSummary {
@@ -148,6 +151,7 @@ export default function Dashboard() {
   const [openThreadPhone, setOpenThreadPhone] = useState<string | null>(null)
   const [threadMessages, setThreadMessages] = useState<ThreadMessage[] | null>(null)
   const [threadLoading, setThreadLoading] = useState(false)
+  const [lightbox, setLightbox] = useState<string | null>(null)
   const [analyticsSummary, setAnalyticsSummary] = useState<AnalyticsSummary | null>(null)
   const [callHealth, setCallHealth] = useState<AnalyticsHealth | null>(null)
   const [recentCalls, setRecentCalls] = useState<CallLogEntry[]>([])
@@ -973,7 +977,19 @@ export default function Dashboard() {
                             : 'rounded-bl-sm bg-white text-gray-900 ring-1 ring-gray-200'
                         }`}
                       >
-                        {m.content}
+                        {m.content && <span>{m.content}</span>}
+                        {m.media && m.media.length > 0 && (
+                          <div className={`flex flex-wrap gap-2 ${m.content ? 'mt-2' : ''}`}>
+                            {m.media.map((med) => (
+                              <SmsMediaImage
+                                key={med.sid}
+                                phone={openThreadPhone || ''}
+                                sid={med.sid}
+                                onOpen={(u) => setLightbox(u)}
+                              />
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   )
@@ -984,6 +1000,19 @@ export default function Dashboard() {
               {formatPhone(openThreadPhone)} · {threadMessages?.length ?? 0} messages
             </div>
           </div>
+        </div>
+      )}
+      {lightbox && (
+        <div
+          onClick={() => setLightbox(null)}
+          className="fixed inset-0 z-[60] flex cursor-zoom-out items-center justify-center bg-black/80 p-4"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={lightbox}
+            alt="Customer photo"
+            className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
+          />
         </div>
       )}
     </div>

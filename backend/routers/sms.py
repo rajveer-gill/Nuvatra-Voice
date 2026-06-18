@@ -315,6 +315,34 @@ def _maybe_handle_staff_sms_approval(
     return False
 
 
+_MEDIA_SID_RE = re.compile(r"/Media/(ME[0-9a-zA-Z]+)")
+
+
+def _extract_inbound_media(form_dict: dict, max_items: int = 10) -> list:
+    """Pull image attachments (MMS) from a Twilio inbound webhook into a compact
+    list of {sid, url, content_type}.
+
+    Images only (we don't surface arbitrary file types), capped. The Twilio media
+    URL is kept server-side only — it's later served through the authenticated
+    media proxy, never handed to the browser.
+    """
+    try:
+        num = int(str(form_dict.get("NumMedia") or "0").strip() or "0")
+    except (TypeError, ValueError):
+        num = 0
+    out: list = []
+    for i in range(min(max(num, 0), 50)):
+        url = str(form_dict.get(f"MediaUrl{i}") or "").strip()
+        ct = str(form_dict.get(f"MediaContentType{i}") or "").strip().lower()
+        if not url or not ct.startswith("image/"):
+            continue
+        m = _MEDIA_SID_RE.search(url)
+        out.append({"sid": m.group(1) if m else f"idx{i}", "url": url, "content_type": ct})
+        if len(out) >= max_items:
+            break
+    return out
+
+
 @router.post("/api/sms/incoming")
 async def handle_incoming_sms(request: Request):
     """Twilio webhook for incoming SMS. AI-powered mobile receptionist replies like a real person."""
@@ -663,7 +691,11 @@ async def handle_incoming_sms(request: Request):
                 booking_service._reconcile_sms_appointment_slot_after_detail_change(apt)
         else:
             detail_fields_updated = []
-        messages.append({"role": "user", "content": body})
+        _user_msg = {"role": "user", "content": body}
+        _inbound_media = _extract_inbound_media(form_dict)
+        if _inbound_media:
+            _user_msg["media"] = _inbound_media  # photos texted by the customer (e.g. damage)
+        messages.append(_user_msg)
         sms_trace(
             "inbound_session_loaded",
             request_id=rid,
