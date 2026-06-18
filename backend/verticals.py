@@ -84,27 +84,36 @@ _VERTICALS: Dict[str, VerticalTerms] = {
         provider_caps="TECHNICIAN",
         business_phrase="auto body shop or collision center",
         venue="shop",
-        # Auto body intake is different from a salon's: the shop needs the vehicle,
-        # how the job is paid for, what's wrong, and whether the car can be driven
-        # in. The AI gathers these conversationally and summarizes them in the
-        # booking reason so the shop sees them on the confirmation.
+        # Auto body calls split into three intents (estimate/drop-off, status check,
+        # insurance/rental questions) and need shop-specific intake (vehicle, how it's
+        # paid, the damage, drivability). The AI gathers these conversationally and
+        # summarizes them in the booking reason so the shop sees them on the booking.
         intake_guidance=(
-            "AUTO BODY INTAKE: This is an auto body / collision shop. Most callers want an estimate, "
-            "a drop-off, or a status update on a repair. When booking an estimate or drop-off, naturally "
-            "gather (don't interrogate—ask as it flows): (1) the VEHICLE: year, make, and model; "
-            "(2) whether it's an INSURANCE claim or out-of-pocket, and the insurer if they mention it; "
-            "(3) a short description of the DAMAGE or work needed (e.g. rear bumper, hail dents, scratch, "
-            "collision); (4) whether the car is DRIVABLE (if not, mention they may need a tow). "
-            "Summarize these in the booking reason field, e.g. "
-            "\"Collision estimate — 2019 Honda Civic, Geico claim, rear bumper, drivable\". "
-            "If the caller asks whether you take their insurance, say the shop works with most major "
-            "insurers and can confirm their specific one—do not invent a list. Don't block the booking "
-            "if they don't know every detail; capture what they have."
+            "AUTO BODY CALLS: This is an auto body / collision shop. There are three kinds of calls—"
+            "figure out which one this is before deciding what to do.\n"
+            "1) ESTIMATE or DROP-OFF (most common): the caller wants a damage estimate or to bring the "
+            "car in. Book it, and naturally gather as it flows (don't interrogate): the VEHICLE (year, "
+            "make, model); whether it's an INSURANCE claim or OUT-OF-POCKET, and if insurance, the insurer "
+            "and the CLAIM NUMBER when they have it; a short description of the DAMAGE or work needed; and "
+            "whether the car is DRIVABLE (if not, mention they may need a tow). Summarize these in the "
+            "booking reason, e.g. \"Collision estimate — 2019 Honda Civic, Geico claim #ABC123, rear "
+            "bumper, drivable\". You may add: \"You can also text photos of the damage right to this "
+            "number and the shop can take a look.\" Don't block the booking if they don't know every "
+            "detail—capture what they have.\n"
+            "2) STATUS CHECK: if they're asking about a repair already in progress (\"is my car ready?\", "
+            "\"how's my car coming along?\"), do NOT book an appointment. Briefly reassure them, get their "
+            "name and vehicle, and tell them the shop will text or call with an update. Capture it with a "
+            "MESSAGE: line for the shop that includes their name and vehicle—do not output a BOOKING.\n"
+            "3) INSURANCE / RENTAL questions: if they ask whether you take their insurance, say the shop "
+            "works with most major insurers and can confirm theirs—do not invent a list. If they ask about "
+            "a rental car, say the shop can help coordinate one (often covered when it's an insurance "
+            "claim)—do not promise specific coverage."
         ),
         service_examples="Collision Estimate, Dent Repair, Bumper Repair, Paint, Glass Replacement",
         intake_fields=(
             ("vehicle", "Vehicle"),
             ("insurance", "Insurance"),
+            ("claim_number", "Claim #"),
             ("damage", "Damage / work needed"),
             ("drivable", "Drivable"),
         ),

@@ -84,10 +84,24 @@ def test_auto_body_prompt_gathers_vehicle_and_insurance():
         business_info=_biz("auto_body"), include_booked_slots=True, booked_slots_prompt_text=""
     )
     # The auto body intake asks for the things a body shop actually needs.
-    assert "AUTO BODY INTAKE" in p
+    assert "AUTO BODY CALLS" in p
     assert "VEHICLE" in p
     assert "INSURANCE" in p
     assert "DRIVABLE" in p
+    assert "CLAIM NUMBER" in p
+
+
+def test_auto_body_prompt_handles_status_check_without_booking():
+    p = build_system_prompt(
+        business_info=_biz("auto_body"), include_booked_slots=True, booked_slots_prompt_text=""
+    )
+    # A "is my car ready?" call should NOT be booked — it takes a message.
+    assert "STATUS CHECK" in p
+    assert "is my car ready" in p.lower()
+    assert "do not output a BOOKING" in p
+    # And the AI offers the text-a-photo path + handles rental questions.
+    assert "text photos" in p.lower()
+    assert "rental" in p.lower()
 
 
 def test_salon_prompt_has_no_auto_body_intake():
@@ -111,6 +125,7 @@ def test_intake_field_dicts():
     fields = verticals.intake_field_dicts("auto_body")
     assert {"key": "vehicle", "label": "Vehicle"} in fields
     assert any(f["key"] == "insurance" for f in fields)
+    assert any(f["key"] == "claim_number" for f in fields)
     # Salon has no structured intake.
     assert verticals.intake_field_dicts("salon_chair") == []
 
