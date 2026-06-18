@@ -718,6 +718,8 @@ def init_db() -> bool:
             ("confirmation_sms_failed", "BOOLEAN NOT NULL DEFAULT false"),
             # Vertical-specific structured intake (e.g. auto body: vehicle, insurance).
             ("intake", "JSONB"),
+            # When the shop texted the customer their job is ready (idempotency + UI state).
+            ("ready_notified_at", "TIMESTAMPTZ"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE appointments ADD COLUMN IF NOT EXISTS {col} {typ}")
@@ -1937,7 +1939,7 @@ def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
     cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
-        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed, intake
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed, intake, ready_notified_at
            FROM appointments WHERE client_id = %s ORDER BY date, time""",
         (cid,),
     )
@@ -1959,6 +1961,7 @@ def db_appointments_get_all(*, client_id: Optional[str] = None) -> List[dict]:
             "owner_decline_reason": r[11] if len(r) > 11 else None,
             "confirmation_sms_failed": bool(r[12]) if len(r) > 12 else False,
             "intake": _coerce_intake(r[13]) if len(r) > 13 else None,
+            "ready_notified_at": r[14].isoformat() if len(r) > 14 and r[14] else None,
         }
         for r in rows
     ]
@@ -2077,7 +2080,7 @@ def db_appointments_update(
     conn = _get_conn()
     if not conn:
         return None
-    allowed = ("status", "date", "time", "reason", "name", "email", "phone", "staff_id", "owner_decline_reason", "confirmation_sms_failed")
+    allowed = ("status", "date", "time", "reason", "name", "email", "phone", "staff_id", "owner_decline_reason", "confirmation_sms_failed", "ready_notified_at")
     updates = []
     vals = []
     for k, v in kwargs.items():
@@ -2127,7 +2130,7 @@ def db_appointments_get_by_id(
     cid = (client_id or "").strip() or _client_id()
     cur = conn.cursor()
     cur.execute(
-        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed, intake
+        """SELECT id, name, email, phone, date, time, reason, status, source, created_at, staff_id, owner_decline_reason, confirmation_sms_failed, intake, ready_notified_at
            FROM appointments WHERE id = %s AND client_id = %s""",
         (appointment_id, cid),
     )
@@ -2150,6 +2153,7 @@ def db_appointments_get_by_id(
         "owner_decline_reason": row[11] if len(row) > 11 else None,
         "confirmation_sms_failed": bool(row[12]) if len(row) > 12 else False,
         "intake": _coerce_intake(row[13]) if len(row) > 13 else None,
+        "ready_notified_at": row[14].isoformat() if len(row) > 14 and row[14] else None,
     }
 
 def db_appointments_max_id() -> int:

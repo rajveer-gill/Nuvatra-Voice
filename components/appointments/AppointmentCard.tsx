@@ -3,6 +3,7 @@
 import { motion } from 'framer-motion'
 import {
   AlertTriangle,
+  BellRing,
   Calendar,
   Check,
   Clock,
@@ -36,6 +37,9 @@ export function AppointmentCard({
   onAccept,
   onDecline,
   onCancel,
+  canNotifyReady = false,
+  notifyingId = null,
+  onNotifyReady,
 }: {
   apt: Appointment
   staffLabel: string
@@ -46,6 +50,9 @@ export function AppointmentCard({
   onAccept: (id: number) => Promise<void>
   onDecline: (id: number) => void
   onCancel: (id: number) => void
+  canNotifyReady?: boolean
+  notifyingId?: number | null
+  onNotifyReady?: (id: number) => void
 }) {
   const isUpdating = updatingId === apt.id
   const showMsg = acceptRejectMsg?.id === apt.id
@@ -135,6 +142,31 @@ export function AppointmentCard({
               )}
             </div>
           )}
+          {canNotifyReady && onNotifyReady && ACTIVE_FOR_PICKUP.has(apt.status) && (
+            apt.ready_notified_at ? (
+              <div className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-200">
+                <Check className="h-3.5 w-3.5 shrink-0" />
+                Customer notified their car&rsquo;s ready · {formatNotifiedTime(apt.ready_notified_at)}
+              </div>
+            ) : (
+              <motion.button
+                type="button"
+                disabled={notifyingId === apt.id || !apt.phone}
+                title={!apt.phone ? 'No phone number on file for this customer' : undefined}
+                whileTap={reduceMotion ? undefined : { scale: 0.96 }}
+                whileHover={reduceMotion ? undefined : { scale: 1.02 }}
+                onClick={() => onNotifyReady(apt.id)}
+                className="inline-flex w-fit items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 px-3.5 py-2 text-xs font-semibold text-white shadow-md shadow-cyan-500/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {notifyingId === apt.id ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <BellRing className="h-3.5 w-3.5" />
+                )}
+                Text customer: car&rsquo;s ready
+              </motion.button>
+            )
+          )}
           {apt.confirmation_sms_failed && (
             <div className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-medium text-amber-200">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -219,6 +251,16 @@ function needsResponsePulse(status: string): boolean {
 function humanizeIntakeKey(key: string): string {
   const s = key.replace(/_/g, ' ').trim()
   return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+/** Statuses where a job is in the shop / done — i.e. it can become ready for pickup. */
+const ACTIVE_FOR_PICKUP = new Set(['accepted', 'confirmed', 'completed'])
+
+/** Friendly local time for the "Customer notified · 2:14 PM" state. */
+function formatNotifiedTime(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
 export { apiDetail }

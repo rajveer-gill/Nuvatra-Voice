@@ -58,6 +58,8 @@ export default function Appointments() {
     env_client_id_appointment_count?: number | null
   } | null>(null)
   const [twilioPhone, setTwilioPhone] = useState<string | null>(null)
+  const [notifyReadyEnabled, setNotifyReadyEnabled] = useState(false)
+  const [notifyingId, setNotifyingId] = useState<number | null>(null)
   const [calendarRefresh, setCalendarRefresh] = useState(0)
   const [form, setForm] = useState({
     name: '',
@@ -76,6 +78,7 @@ export default function Appointments() {
       setCalendarHolds(res.data.calendar_holds || [])
       setDiagnostics(res.data.diagnostics || null)
       setTwilioPhone(res.data.twilio_phone_number || null)
+      setNotifyReadyEnabled(!!res.data.notify_ready)
     } catch (e) {
       console.error('Failed to fetch appointments', e)
     } finally {
@@ -188,6 +191,27 @@ export default function Appointments() {
       setTimeout(() => setAcceptRejectMsg(null), 5000)
     } finally {
       setUpdatingId(null)
+    }
+  }
+
+  const handleNotifyReady = async (id: number) => {
+    setNotifyingId(id)
+    setAcceptRejectMsg(null)
+    try {
+      const res = await api.post(`/api/appointments/${id}/notify-ready`)
+      const ts = res?.data?.ready_notified_at || new Date().toISOString()
+      // Optimistically reflect the notified state without a full refetch.
+      setAppointments((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, ready_notified_at: ts } : a))
+      )
+      setAcceptRejectMsg({ id, msg: 'Customer texted that their car is ready. ✓', ok: true })
+      setTimeout(() => setAcceptRejectMsg(null), 4000)
+    } catch (e) {
+      console.error('Failed to notify customer', e)
+      setAcceptRejectMsg({ id, msg: apiDetail(e), ok: false })
+      setTimeout(() => setAcceptRejectMsg(null), 5000)
+    } finally {
+      setNotifyingId(null)
     }
   }
 
@@ -566,6 +590,9 @@ export default function Appointments() {
                       staffLabel={(apt.staff_id && staffNameById[apt.staff_id]) || ''}
                       updatingId={updatingId}
                       acceptRejectMsg={acceptRejectMsg}
+                      canNotifyReady={notifyReadyEnabled}
+                      notifyingId={notifyingId}
+                      onNotifyReady={handleNotifyReady}
                       onAccept={handleAccept}
                       onDecline={(id) => {
                         setOwnerActionModal({ id, kind: 'reject' })
@@ -598,6 +625,9 @@ export default function Appointments() {
                       staffLabel={(apt.staff_id && staffNameById[apt.staff_id]) || ''}
                       updatingId={updatingId}
                       acceptRejectMsg={acceptRejectMsg}
+                      canNotifyReady={notifyReadyEnabled}
+                      notifyingId={notifyingId}
+                      onNotifyReady={handleNotifyReady}
                       onAccept={handleAccept}
                       onDecline={(id) => {
                         setOwnerActionModal({ id, kind: 'reject' })

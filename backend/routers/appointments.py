@@ -20,6 +20,7 @@ import database
 import deps
 import runtime
 import sms_service
+import verticals
 from observability import system_info
 
 router = APIRouter()
@@ -151,6 +152,8 @@ def get_appointments(
         "orphan_slots_removed": orphans_removed,
         "diagnostics": diag,
         "twilio_phone_number": twilio_on_tenant,
+        # Vertical capability: show the "text customer their job is ready" action.
+        "notify_ready": verticals.terms_for((tenant or {}).get("business_vertical")).notify_ready,
     }
 
 
@@ -296,6 +299,60 @@ def accept_appointment(
     sent = sms_service.send_sms(apt.get("phone") or "", msg, from_override=booking_service._tenant_sms_from_number())
     apt = _flag_if_confirmation_unsent(appointment_id, apt, cid, sent)
     return {"success": True, "appointment": apt, "confirmation_sms_sent": sent}
+
+
+@router.post("/api/appointments/{appointment_id}/notify-ready")
+def notify_ready(
+    appointment_id: int,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Text the customer that their job/vehicle is ready for pickup.
+
+    Tenant-scoped (only this tenant's appointment), only ever texts the number on
+    file, and idempotent: records ready_notified_at so one click = one text. A
+    send failure does NOT record the timestamp, so the shop can safely retry.
+    """
+    cid = deps._bind_tenant_db_context(tenant)
+    apt = (
+        database.db_appointments_get_by_id(appointment_id, client_id=cid)
+        if runtime.USE_DB
+        else next((a for a in runtime.appointments if a["id"] == appointment_id), None)
+    )
+    if not apt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    phone = (apt.get("phone") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="No phone number on file for this customer.")
+    if apt.get("ready_notified_at"):
+        # Idempotent: surface the existing state instead of re-texting the customer.
+        raise HTTPException(status_code=409, detail="This customer was already notified.")
+
+    business_name = config_service.get_business_info().get("name", "us")
+    intake = apt.get("intake") if isinstance(apt.get("intake"), dict) else {}
+    vehicle = (intake.get("vehicle") or "").strip()
+    name = (apt.get("name") or "").strip()
+    greeting = f"Hi {name}, " if name else "Hi, "
+    subject = f"your {vehicle}" if vehicle else "your vehicle"
+    msg = f"{greeting}{subject} is ready for pickup at {business_name}. Thanks for choosing us!"
+
+    sent = sms_service.send_sms(phone, msg, from_override=booking_service._tenant_sms_from_number())
+    if not sent:
+        raise HTTPException(status_code=502, detail="Couldn't send the text — please try again.")
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    database.db_appointments_update(appointment_id, ready_notified_at=now, client_id=cid)
+    deps.audit_log(
+        "user",
+        "appointment_ready_notified",
+        resource_type="appointment",
+        resource_id=str(appointment_id),
+        details={"date": apt.get("date")},
+        request=request,
+    )
+    return {"success": True, "ready_notified_at": now.isoformat()}
 
 
 # ===== AI-polished decline/cancel routes (cut 2; need runtime.client) =====

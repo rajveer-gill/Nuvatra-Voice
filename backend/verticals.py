@@ -59,6 +59,10 @@ class VerticalTerms:
     # itself: no roster is required to take calls, and the AI never asks the caller
     # to choose a provider.
     books_with_provider: bool = True
+    # Whether the dashboard shows a "text the customer their job is ready" action on
+    # appointments (auto body: "your car is ready for pickup"). Off for verticals
+    # where there's no pickup step.
+    notify_ready: bool = False
 
 
 _VERTICALS: Dict[str, VerticalTerms] = {
@@ -119,6 +123,8 @@ _VERTICALS: Dict[str, VerticalTerms] = {
         ),
         # Callers book with the shop, not a named technician.
         books_with_provider=False,
+        # Show the "text the customer their car is ready" action on appointments.
+        notify_ready=True,
     ),
 }
 
