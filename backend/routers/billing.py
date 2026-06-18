@@ -86,6 +86,34 @@ def _stripe_price_id(plan: str) -> Optional[str]:
     return (os.getenv(key) or os.getenv("STRIPE_PRICE_ID") or "").strip() or None
 
 
+def _subscription_status_and_trial(sub_id: Optional[str]):
+    """Read a Stripe subscription's real status + trial end so the tenant mirrors it.
+
+    A self-serve signup starts a 7-day trial, so Stripe reports status 'trialing'
+    with a trial_end. Recording that (instead of a hardcoded 'active') is what makes
+    _is_trial_active true and unlocks full Pro-tier features during the trial.
+    Falls back to ('active', None) if the subscription can't be read.
+    """
+    if not sub_id or not (STRIPE_AVAILABLE and stripe):
+        return "active", None
+    try:
+        stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        sub = stripe.Subscription.retrieve(sub_id)
+        status = getattr(sub, "status", None)
+        if not isinstance(status, str) or not status:
+            status = "active"
+        trial_ends_at = None
+        t_end = getattr(sub, "trial_end", None)
+        if isinstance(t_end, (int, float)):
+            from datetime import datetime, timezone
+
+            trial_ends_at = datetime.fromtimestamp(int(t_end), tz=timezone.utc)
+        return status, trial_ends_at
+    except Exception as e:
+        logger.warning("stripe_subscription_retrieve_failed sub=%s err=%s", sub_id, type(e).__name__)
+        return "active", None
+
+
 def _plan_from_price_id(price_id: Optional[str]) -> Optional[str]:
     """Reverse-map a Stripe price ID to a plan name. Used for Customer-Portal plan
     switches, where the new plan is carried in the subscription's line items (not our
@@ -531,12 +559,18 @@ async def stripe_webhook(request: Request):
             sub_id = obj.get("subscription")
             customer_id = obj.get("customer")
             if tenant_id and (sub_id or customer_id):
+                # Mirror Stripe's real subscription state: a fresh signup is on a
+                # 7-day trial ('trialing' + trial_end), which unlocks full Pro-tier
+                # features. Hardcoding 'active' here previously dropped trial users
+                # to their paid plan immediately.
+                sub_status, trial_ends_at = _subscription_status_and_trial(sub_id)
                 database.db_tenant_update_subscription(
                     tenant_id,
                     stripe_customer_id=customer_id,
                     stripe_subscription_id=sub_id,
-                    subscription_status="active",
+                    subscription_status=sub_status,
                     plan=plan,
+                    trial_ends_at=trial_ends_at,
                 )
                 tenant = database.db_tenant_get_by_id(tenant_id)
                 deps.audit_log(
@@ -576,11 +610,18 @@ async def stripe_webhook(request: Request):
                 # line-item price. Falls back to None (leave plan untouched) only when the
                 # price is unrecognized — never silently downgrades to starter.
                 plan = meta.get("plan") or _subscription_plan_from_obj(obj)
+                trial_ends_at = None
+                t_end = obj.get("trial_end")
+                if t_end:
+                    from datetime import datetime, timezone
+
+                    trial_ends_at = datetime.fromtimestamp(int(t_end), tz=timezone.utc)
                 database.db_tenant_update_subscription(
                     tenant_id,
                     stripe_subscription_id=sub_id,
                     subscription_status=status,
                     plan=plan,
+                    trial_ends_at=trial_ends_at,
                 )
                 tenant = database.db_tenant_get_by_id(tenant_id)
                 deps.audit_log(
