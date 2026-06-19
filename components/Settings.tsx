@@ -50,6 +50,7 @@ import {
   type RuleRow,
 } from '@/components/settings/StructuredListEditors'
 import { BusinessHoursModal } from '@/components/settings/BusinessHoursModal'
+import { CarrierForwardingInstructions } from '@/components/CarrierForwardingInstructions'
 import { parseHoursToWeekly, summarizeSchedule } from '@/lib/businessHours'
 /** Set NEXT_PUBLIC_DEBUG_SETTINGS=1 in .env.local (or Vercel) to log per-endpoint load outcomes — no tokens. */
 const DEBUG_SETTINGS = process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1'
@@ -109,6 +110,8 @@ export default function Settings() {
   const [aiPhone, setAiPhone] = useState('')
   const [numberMode, setNumberMode] = useState<'new' | 'existing'>('new')
   const [existingNumber, setExistingNumber] = useState('')
+  const [forwardingVerifiedAt, setForwardingVerifiedAt] = useState<string | null>(null)
+  const [savingNumberMode, setSavingNumberMode] = useState(false)
   const [tenantClientId, setTenantClientId] = useState('')
   const [portalLoading, setPortalLoading] = useState(false)
   const [billingError, setBillingError] = useState<string | null>(null)
@@ -235,6 +238,7 @@ export default function Settings() {
           setAiPhone((d.phone as string) || '')
           setNumberMode((d.number_mode as 'new' | 'existing') === 'existing' ? 'existing' : 'new')
           setExistingNumber((d.existing_business_number as string) || '')
+          setForwardingVerifiedAt((d.forwarding_verified_at as string) || null)
           setTenantClientId((d.client_id as string) || '')
           setForm({
             name: (d.name as string) || '',
@@ -313,6 +317,43 @@ export default function Settings() {
       setSavingVertical(false)
     }
   }
+
+  // Switch between a dedicated AI number and forwarding your own number. Persists on
+  // its own (separate from the main Save) and resets verification when it changes.
+  const saveNumberMode = async (mode: 'new' | 'existing', existing?: string) => {
+    setSavingNumberMode(true)
+    try {
+      const r = await api.post('/api/business/number-mode', {
+        number_mode: mode,
+        existing_number: mode === 'existing' ? (existing ?? existingNumber) : undefined,
+      })
+      setNumberMode(r?.data?.number_mode === 'existing' ? 'existing' : 'new')
+      setExistingNumber(String(r?.data?.existing_business_number || ''))
+      setForwardingVerifiedAt((r?.data?.forwarding_verified_at as string) || null)
+      setMessage({ type: 'success', text: 'Phone setup updated' })
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setMessage({ type: 'error', text: typeof detail === 'string' ? detail : 'Could not update phone setup' })
+    } finally {
+      setSavingNumberMode(false)
+    }
+  }
+
+  // While forwarding isn't verified yet, poll for it — a forwarded test call stamps
+  // it server-side, so the UI flips to "verified" without a manual refresh.
+  useEffect(() => {
+    if (numberMode !== 'existing' || forwardingVerifiedAt) return
+    const id = setInterval(() => {
+      api
+        .get('/api/business-info')
+        .then((r) => {
+          const v = (r?.data?.forwarding_verified_at as string) || null
+          if (v) setForwardingVerifiedAt(v)
+        })
+        .catch(() => {})
+    }, 15000)
+    return () => clearInterval(id)
+  }, [api, numberMode, forwardingVerifiedAt])
 
   const randomizeName = () => {
     const current = receptionistName.trim().toLowerCase()
@@ -569,6 +610,87 @@ export default function Settings() {
               </>
             )}
           </p>
+        )}
+
+        {aiPhone && (
+          <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5">
+            <h3 className="flex items-center gap-2 text-base font-semibold text-gray-900">
+              <PhoneForwarded className="h-5 w-5 text-teal-600" />
+              Phone &amp; call forwarding
+            </h3>
+            <p className="mt-1 text-sm text-gray-500">
+              Your AI line is <span className="font-mono text-gray-800">{aiPhone}</span>. Choose how customers reach it.
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => saveNumberMode('new')}
+                aria-pressed={numberMode === 'new'}
+                disabled={savingNumberMode}
+                className={`rounded-xl border p-3 text-left transition disabled:opacity-60 ${
+                  numberMode === 'new'
+                    ? 'border-cyan-500 bg-cyan-500/5 ring-1 ring-cyan-500/30'
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <span className="block text-sm font-semibold text-gray-900">Use a dedicated number</span>
+                <span className="mt-0.5 block text-xs text-gray-500">Publish {aiPhone} as your business line.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setNumberMode('existing')}
+                aria-pressed={numberMode === 'existing'}
+                className={`rounded-xl border p-3 text-left transition ${
+                  numberMode === 'existing'
+                    ? 'border-cyan-500 bg-cyan-500/5 ring-1 ring-cyan-500/30'
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <span className="block text-sm font-semibold text-gray-900">Use my own number</span>
+                <span className="mt-0.5 block text-xs text-gray-500">Keep your number; forward calls to the AI line.</span>
+              </button>
+            </div>
+
+            {numberMode === 'existing' && (
+              <div className="mt-4 space-y-4">
+                <div className="flex flex-wrap items-end gap-2">
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-gray-700">Your existing business number</label>
+                    <input
+                      type="tel"
+                      value={existingNumber}
+                      onChange={(e) => setExistingNumber(e.target.value.replace(/[^\d\s()+-]/g, '').slice(0, 20))}
+                      placeholder="e.g. (415) 555-0199"
+                      className="cs-field w-56"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => saveNumberMode('existing', existingNumber)}
+                    disabled={savingNumberMode || existingNumber.replace(/\D/g, '').replace(/^1/, '').length !== 10}
+                    className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50"
+                  >
+                    {savingNumberMode ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+
+                <CarrierForwardingInstructions aiLine={aiPhone} />
+
+                {forwardingVerifiedAt ? (
+                  <div className="flex items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    Forwarding verified — your AI line is receiving forwarded calls.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    Not verified yet. After setting up forwarding, call your business number from another phone — when the
+                    AI answers, you&rsquo;re live. We&rsquo;ll auto-confirm here within ~30 seconds (some carriers don&rsquo;t
+                    report forwarding, so the test call is the real proof either way).
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         <div className="space-y-4">
