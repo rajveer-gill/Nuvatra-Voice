@@ -546,6 +546,16 @@ async def handle_incoming_call(request: Request):
         tenant_for_access = tenant
         if tenant:
             database.set_request_client_id(tenant["client_id"])
+            # "Bring your own number": a forwarded call carries ForwardedFrom. If it
+            # matches the tenant's configured business number, auto-confirm forwarding.
+            forwarded_from = (form_data.get("ForwardedFrom") or "").strip()
+            if forwarded_from:
+                try:
+                    config_service.mark_forwarding_verified_if_match(
+                        tenant["client_id"], forwarded_from
+                    )
+                except Exception:
+                    pass
             if (tenant.get("twilio_phone_number") or "").strip() == (
                 to_number or ""
             ).strip():

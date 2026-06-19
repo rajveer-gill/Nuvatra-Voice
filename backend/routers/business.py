@@ -272,6 +272,7 @@ def get_setup_status(
         "number_mode": (info.get("number_mode") or "new"),
         "existing_business_number": (info.get("existing_business_number") or "").strip()
         or None,
+        "forwarding_verified_at": (info.get("forwarding_verified_at") or "").strip() or None,
         # The provisioned Twilio line — surfaced so the onboarding wizard can show the
         # "forward <existing> → <ai line>" instruction once the number is assigned.
         "ai_phone_number": (twilio_phone or "").strip() or None,
@@ -342,6 +343,64 @@ def api_get_business_info(
         out["client_id"] = (tenant.get("client_id") or "").strip()
     _settings_load_debug_log_business_info(tenant, out)
     return out
+
+
+class UpdateNumberModeRequest(BaseModel):
+    number_mode: Literal["new", "existing"]
+    existing_number: Optional[str] = None
+
+
+@router.post("/api/business/number-mode")
+def api_update_number_mode(
+    req: UpdateNumberModeRequest,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Self-serve: switch between a dedicated AI number ('new') and forwarding the
+    business's own number to the AI line ('existing').
+
+    The provisioned Twilio line stays put in both modes — this only changes how the
+    business routes calls to it. Changing the number (or the mode) resets forwarding
+    verification so it re-confirms against the new setup.
+    """
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Tenant required")
+    cid = (tenant.get("client_id") or "").strip()
+    if not cid:
+        raise HTTPException(status_code=400, detail="No client context")
+    data = config_service._read_raw_client_config(cid)
+    if data is None:
+        data = config_service._default_client_config_data(cid, tenant.get("plan") or "free")
+    if req.number_mode == "existing":
+        existing = _normalize_us_phone_display(req.existing_number)
+        if len(re.sub(r"\D", "", existing)) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Enter the existing business number you want to forward calls from.",
+            )
+        if (data.get("number_mode") != "existing") or ((data.get("existing_business_number") or "") != existing):
+            data["forwarding_verified_at"] = ""  # re-verify on any change
+        data["number_mode"] = "existing"
+        data["existing_business_number"] = existing
+    else:
+        data["number_mode"] = "new"
+        data["forwarding_verified_at"] = ""  # N/A when publishing the AI line directly
+    config_service.save_raw_client_config(cid, data)
+    deps.audit_log(
+        "user",
+        "number_mode_updated",
+        resource_type="tenant",
+        resource_id=tenant.get("id"),
+        client_id=cid,
+        details={"number_mode": data["number_mode"]},
+        request=request,
+    )
+    return {
+        "ok": True,
+        "number_mode": data["number_mode"],
+        "existing_business_number": data.get("existing_business_number") or None,
+        "forwarding_verified_at": data.get("forwarding_verified_at") or None,
+    }
 
 
 @router.get("/api/greeting-preview")

@@ -497,3 +497,35 @@ def forwarding_phone_ready(info: Optional[dict] = None) -> bool:
 def voice_receptionist_ready(info: Optional[dict] = None) -> bool:
     """True when both team roster and store phone are configured for full AI receptionist calls."""
     return staff_roster_ready_for_booking(info) and forwarding_phone_ready(info)
+
+
+def mark_forwarding_verified_if_match(client_id: str, forwarded_from: str) -> bool:
+    """Confirm a 'bring your own number' tenant is forwarding correctly.
+
+    On a forwarded inbound call Twilio sends ``ForwardedFrom`` (the number that
+    forwarded the call). When the tenant is in 'existing' mode and that matches the
+    configured business number, stamp ``forwarding_verified_at``. Cheap + idempotent:
+    only loads/writes config when a ForwardedFrom is present (forwarded calls only)
+    and only the first time. Returns True if it newly verified.
+    """
+    cid = (client_id or "").strip()
+    ff_digits = "".join(c for c in (forwarded_from or "") if c.isdigit())
+    if not cid or len(ff_digits) < 10:
+        return False
+    cfg = load_client_config(cid)
+    if not cfg or (cfg.get("number_mode") or "new") != "existing":
+        return False
+    if (cfg.get("forwarding_verified_at") or "").strip():
+        return False  # already verified
+    existing_digits = "".join(c for c in (cfg.get("existing_business_number") or "") if c.isdigit())
+    # Match on the last 10 digits so a leading country code never blocks it.
+    if not existing_digits or existing_digits[-10:] != ff_digits[-10:]:
+        return False
+    from datetime import datetime, timezone
+
+    cfg["forwarding_verified_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        save_raw_client_config(cid, cfg)
+    except Exception:
+        return False
+    return True
