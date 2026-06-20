@@ -26,6 +26,17 @@ logger = logging.getLogger("nuvatra")
 TWILIO_SMS_FROM = os.getenv("TWILIO_SMS_FROM") or os.getenv("TWILIO_PHONE_NUMBER") or ""
 
 
+def _default_messaging_service_sid() -> str:
+    """A2P-registered Messaging Service SID (read at call time so env is picked up).
+
+    Same env as twilio_provision.a2p_messaging_service_sid — numbers enrolled in this
+    service inherit the approved US 10DLC campaign. When set, send_sms routes through it
+    so messages are A2P-registered; raw long codes outside it get carrier error 30034
+    ("unregistered number") and are silently dropped. Empty → fall back to a From number.
+    """
+    return (os.getenv("TWILIO_A2P_MESSAGING_SERVICE_SID") or "").strip()
+
+
 def normalize_phone(phone: str) -> str:
     """Normalize to a digits-only key (no +). Used for caller-memory/booking phone matching."""
     return "".join(c for c in phone if c.isdigit())
@@ -48,22 +59,32 @@ def send_sms(
     body: str,
     from_override: Optional[str] = None,
     *,
+    messaging_service_sid: Optional[str] = None,
     force: bool = False,
 ) -> bool:
-    """Send SMS via Twilio. from_override: use this number as From (for multi-tenant replies from business number).
+    """Send SMS via Twilio.
+
+    Routing: if a Messaging Service SID is configured (param, else TWILIO_A2P_MESSAGING_SERVICE_SID
+    env), the message is sent through it so it inherits the registered A2P 10DLC campaign
+    (Twilio picks the From from the service's pool). Otherwise it falls back to a raw From
+    number (from_override, else TWILIO_SMS_FROM) — fine for dev / non-A2P, but US carriers
+    drop unregistered long codes with error 30034.
+
     Records usage via db_usage_increment_sms when client_id is set.
     If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only).
     """
     if not runtime.twilio_client:
         sms_info("outbound_skipped", reason="twilio_not_configured")
         return False
+    msid = (messaging_service_sid or _default_messaging_service_sid() or "").strip()
     from_num = (from_override or TWILIO_SMS_FROM or "").strip()
-    if not from_num:
+    if not msid and not from_num:
         sms_info(
             "outbound_skipped",
             reason="from_number_missing",
             from_override_set=bool(from_override),
             twilio_sms_from_set=bool(TWILIO_SMS_FROM),
+            messaging_service_set=bool(msid),
         )
         return False
     e164 = _phone_to_e164(to_phone or "")
@@ -83,16 +104,21 @@ def send_sms(
                 )
                 return False
     to_masked = mask_phone_e164(e164)
+    # For logs/audit: never leak the raw service SID; show the From or a service marker.
+    sender_label = mask_phone_e164(from_num) if from_num else (f"msgsvc:…{msid[-4:]}" if msid else "")
+    via = "messaging_service" if msid else "from_number"
     sms_debug(
         "outbound_attempt",
-        from_num=from_num,
+        via=via,
+        sender=sender_label,
         to_masked=to_masked,
         body_len=len(body or ""),
         force=force,
     )
     sms_trace(
         "outbound_attempt",
-        from_num=from_num,
+        via=via,
+        sender=sender_label,
         to_masked=to_masked,
         body_len=len(body or ""),
         force=force,
@@ -100,9 +126,12 @@ def send_sms(
     last_err = None
     for attempt in range(3):
         try:
-            msg = runtime.twilio_client.messages.create(
-                from_=from_num, to=e164, body=body
-            )
+            create_kwargs = {"to": e164, "body": body}
+            if msid:
+                create_kwargs["messaging_service_sid"] = msid
+            else:
+                create_kwargs["from_"] = from_num
+            msg = runtime.twilio_client.messages.create(**create_kwargs)
             sid = getattr(msg, "sid", None) or getattr(msg, "id", None)
             sms_info(
                 "outbound_twilio_ok",
@@ -127,7 +156,7 @@ def send_sms(
                 client_id=database._client_id() if runtime.USE_DB else None,
                 details={
                     "to_masked": to_masked,
-                    "from_masked": mask_phone_e164(from_num),
+                    "from_masked": sender_label,
                     "body_len": len(body or ""),
                     "body_sha256": hashlib.sha256((body or "").encode("utf-8")).hexdigest(),
                     "force": bool(force),
@@ -152,7 +181,7 @@ def send_sms(
         client_id=database._client_id() if runtime.USE_DB else None,
         details={
             "to_masked": to_masked,
-            "from_masked": mask_phone_e164(from_num),
+            "from_masked": sender_label,
             "body_len": len(body or ""),
             "body_sha256": hashlib.sha256((body or "").encode("utf-8")).hexdigest(),
             "error": str(last_err)[:240] if last_err else None,
