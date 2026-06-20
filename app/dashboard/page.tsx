@@ -40,6 +40,7 @@ const Dashboard = dynamic(() => import('@/components/Dashboard'), { ssr: false, 
 const Appointments = dynamic(() => import('@/components/Appointments'), { ssr: false, loading: TabLoading })
 const Settings = dynamic(() => import('@/components/Settings'), { ssr: false, loading: TabLoading })
 const Leads = dynamic(() => import('@/components/Leads'), { ssr: false, loading: TabLoading })
+const Messages = dynamic(() => import('@/components/Messages'), { ssr: false, loading: TabLoading })
 
 export type SubscriptionState = {
   can_use_app: boolean
@@ -54,7 +55,7 @@ export default function DashboardPage() {
   const router = useRouter()
   const api = useApiClient()
   const reduceMotion = useReducedMotion()
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'appointments' | 'leads' | 'settings'>('appointments')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'appointments' | 'leads' | 'messages' | 'settings'>('appointments')
   const [access, setAccess] = useState<'loading' | 'granted' | 'denied' | 'subscription_required'>('loading')
   const [deniedKind, setDeniedKind] = useState<'no_membership' | 'verification_failed'>('no_membership')
   const [deniedDetail, setDeniedDetail] = useState<string | null>(null)
@@ -82,6 +83,7 @@ export default function DashboardPage() {
       { id: 'appointments', label: 'Appointments' },
       { id: 'dashboard', label: 'Dashboard' },
       { id: 'leads', label: 'Leads' },
+      { id: 'messages', label: 'Messages' },
       { id: 'settings', label: 'Settings' },
     ] as { id: typeof activeTab; label: string }[]
   }, [])
@@ -537,6 +539,7 @@ export default function DashboardPage() {
             >
               {activeTab === 'appointments' && <Appointments />}
               {activeTab === 'leads' && <Leads locked={!subscription?.limits?.has_lead_capture} />}
+              {activeTab === 'messages' && <Messages />}
               {activeTab === 'dashboard' && <Dashboard />}
               {activeTab === 'settings' && <Settings />}
             </motion.div>

@@ -41,6 +41,9 @@ def test_prompt_take_a_message_when_no_transfer_line(minimal_business):
     )
     assert "NO LIVE TRANSFER LINE" in on
     assert "MESSAGE:" in on
+    # We already have the caller's number from caller ID — the AI must not ask for it.
+    assert "caller ID" in on
+    assert "do not ask for their phone number" in on.lower()
     off = build_system_prompt(
         business_info={**minimal_business, "transfer_takes_message": False},
         include_booked_slots=False,

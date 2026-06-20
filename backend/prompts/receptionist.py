@@ -444,7 +444,11 @@ def build_system_prompt(
         "reply with EXACTLY one line: MESSAGE: <a short summary of what they want, written in "
         "the third person>. Put your brief spoken reply first (e.g. \"Sure, I'll pass that "
         "along.\") and the MESSAGE: line last. Only use MESSAGE: when they actually want "
-        "something relayed to the team—never for small talk or questions you already answered."
+        "something relayed to the team—never for small talk or questions you already answered. "
+        "We ALREADY have the caller's phone number from this call (caller ID)—do NOT ask for "
+        "their number or say \"what's the best number to reach you.\" Just confirm what it's "
+        "about and who it's for. Only ask for a number if they volunteer that they want the "
+        "callback at a different one."
     )
     # When the business has no separate transfer line (their only number forwards to the
     # AI), a "connect me to a person" request can't be dialed—capture a message instead.
@@ -453,7 +457,8 @@ def build_system_prompt(
             "\n\nNO LIVE TRANSFER LINE: This business does not have a separate line to transfer to. "
             "If the caller asks to speak to a person or a manager, do NOT promise to connect or "
             "transfer them. Instead, warmly offer to take a message so the team can call them back, "
-            "then capture it with the MESSAGE: line as described above."
+            "then capture it with the MESSAGE: line as described above. Ask only what it's "
+            "regarding—do not ask for their phone number; we already have it from caller ID."
         )
     base_prompt = f"""{header}
 
