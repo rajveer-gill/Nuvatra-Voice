@@ -19,6 +19,7 @@ import {
   Clock,
   Users,
   PhoneForwarded,
+  MessageSquare,
 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import {
@@ -931,43 +932,142 @@ export default function Settings() {
             />
           </div>
           <div id="store-phone-settings" className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Store phone (talk to a real person)</label>
-            <input
-              type="text"
-              value={form.forwarding_phone}
-              onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
-              disabled={form.transfer_takes_message}
-              className={`cs-field w-full ${form.transfer_takes_message ? 'opacity-50 cursor-not-allowed' : ''}`}
-              placeholder="Number to transfer to when a caller wants a real person"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Used when someone asks to speak with a person at your business (not the AI receptionist line). If they name
-              someone on your transfer list, we use that number instead (see Call transfers below).
-            </p>
-            <label className="mt-3 flex items-start gap-3 cursor-pointer">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={form.transfer_takes_message}
-                onClick={() => setForm((f) => ({ ...f, transfer_takes_message: !f.transfer_takes_message }))}
-                className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
-                  form.transfer_takes_message ? 'bg-indigo-600' : 'bg-gray-300'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    form.transfer_takes_message ? 'translate-x-6' : 'translate-x-1'
+            {(() => {
+              const phoneSet = Boolean((form.forwarding_phone || '').trim())
+              const takeMessage = form.transfer_takes_message
+              const handoffSatisfied = phoneSet || takeMessage
+              return (
+                <div
+                  className={`relative overflow-hidden rounded-2xl border p-5 transition-all duration-300 ${
+                    handoffSatisfied
+                      ? 'border-emerald-200 bg-emerald-50/40'
+                      : 'border-amber-300 bg-amber-50/50 ring-1 ring-amber-200'
                   }`}
-                />
-              </button>
-              <span className="text-sm">
-                <span className="font-medium text-gray-700">Take a message instead of transferring</span>
-                <span className="block text-xs text-gray-500">
-                  Turn this on if you don&apos;t have a separate line to send callers to (for example, your published number
-                  forwards to the AI). When someone asks for a person, the AI takes a message so you can call them back.
-                </span>
-              </span>
-            </label>
+                >
+                  <div
+                    aria-hidden
+                    className={`pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full blur-2xl transition-colors duration-500 ${
+                      handoffSatisfied ? 'bg-emerald-300/20' : 'bg-amber-300/30'
+                    }`}
+                  />
+                  <div className="relative">
+                    {/* Header: title + required marker + live status pill */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors duration-300 ${
+                            handoffSatisfied ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'
+                          }`}
+                        >
+                          <PhoneForwarded className="h-5 w-5" aria-hidden />
+                        </div>
+                        <div>
+                          <h3 className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
+                            How callers reach a real person
+                            <span className="text-rose-500" aria-label="required">
+                              *
+                            </span>
+                          </h3>
+                          <p className="text-xs text-gray-500">
+                            Required — pick one so a caller is never stuck with the AI.
+                          </p>
+                        </div>
+                      </div>
+                      <span
+                        className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition-colors duration-300 ${
+                          handoffSatisfied ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                        }`}
+                      >
+                        {handoffSatisfied ? (
+                          <>
+                            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                            Ready
+                          </>
+                        ) : (
+                          <>
+                            <span className="relative flex h-2 w-2" aria-hidden>
+                              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                              <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+                            </span>
+                            Action needed
+                          </>
+                        )}
+                      </span>
+                    </div>
+
+                    {/* Option A — transfer to a number */}
+                    <div
+                      className={`mt-4 rounded-xl border bg-white p-3 transition-all duration-200 ${
+                        takeMessage
+                          ? 'opacity-50'
+                          : phoneSet
+                            ? 'border-emerald-300 ring-1 ring-emerald-100'
+                            : 'border-gray-200'
+                      }`}
+                    >
+                      <label htmlFor="forwarding-phone-input" className="mb-1 block text-sm font-medium text-gray-700">
+                        Transfer to a number
+                      </label>
+                      <input
+                        id="forwarding-phone-input"
+                        type="text"
+                        value={form.forwarding_phone}
+                        onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
+                        disabled={takeMessage}
+                        className={`cs-field w-full ${takeMessage ? 'cursor-not-allowed' : ''}`}
+                        placeholder="e.g. (555) 123-4567"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">
+                        When a caller asks for a person, we ring this number (not the AI line). If they name someone on your
+                        transfer list, we use that number instead — see Call transfers below.
+                      </p>
+                    </div>
+
+                    {/* OR divider */}
+                    <div className="my-3 flex items-center gap-3">
+                      <span className="h-px flex-1 bg-gray-200" />
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">or</span>
+                      <span className="h-px flex-1 bg-gray-200" />
+                    </div>
+
+                    {/* Option B — take a message instead */}
+                    <button
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, transfer_takes_message: !f.transfer_takes_message }))}
+                      aria-pressed={takeMessage}
+                      className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left transition-all duration-200 ${
+                        takeMessage
+                          ? 'border-emerald-300 bg-emerald-50/60 ring-1 ring-emerald-100'
+                          : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      <span
+                        aria-hidden
+                        className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 ${
+                          takeMessage ? 'bg-emerald-500' : 'bg-gray-300'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ${
+                            takeMessage ? 'translate-x-6' : 'translate-x-1'
+                          }`}
+                        />
+                      </span>
+                      <span>
+                        <span className="flex items-center gap-1.5 text-sm font-medium text-gray-800">
+                          <MessageSquare className="h-4 w-4 text-gray-400" aria-hidden />
+                          Take a message instead
+                        </span>
+                        <span className="mt-0.5 block text-xs text-gray-500">
+                          No separate line to send callers to? (For example, your published number forwards to the AI.) The
+                          AI takes a message so you can call them back.
+                        </span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              )
+            })()}
           </div>
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
