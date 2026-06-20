@@ -156,6 +156,11 @@ def _config_data_to_business_info(data: dict) -> dict:
         # instructions in onboarding/Settings.
         "number_mode": data.get("number_mode") or "new",
         "existing_business_number": data.get("existing_business_number", ""),
+        # When True, the business has no separate transfer line (e.g. their published
+        # number IS the AI line in "existing" mode). Instead of dialing a real person,
+        # the AI takes a message so the team can call back. This is one of two ways to
+        # satisfy human_handoff_configured (the other is a real forwarding_phone).
+        "transfer_takes_message": bool(data.get("transfer_takes_message", False)),
     }
 
 
@@ -494,9 +499,29 @@ def forwarding_phone_ready(info: Optional[dict] = None) -> bool:
     return bool((data.get("forwarding_phone") or "").strip())
 
 
+def transfer_takes_message(info: Optional[dict] = None) -> bool:
+    """True when the business opted to take a message instead of transferring to a real person.
+
+    Used when the business has only one number (their published line forwards to the AI),
+    so there is no separate human to dial—the AI captures a message for callback instead.
+    """
+    data = info if info is not None else get_business_info()
+    return bool(data.get("transfer_takes_message", False))
+
+
+def human_handoff_configured(info: Optional[dict] = None) -> bool:
+    """True when the AI has a way to hand a caller off to a human.
+
+    Satisfied either by a real store/forwarding phone to dial, OR by the
+    "take a message instead" toggle (capture a message for callback).
+    """
+    data = info if info is not None else get_business_info()
+    return forwarding_phone_ready(data) or transfer_takes_message(data)
+
+
 def voice_receptionist_ready(info: Optional[dict] = None) -> bool:
-    """True when both team roster and store phone are configured for full AI receptionist calls."""
-    return staff_roster_ready_for_booking(info) and forwarding_phone_ready(info)
+    """True when the team roster and a human-handoff path are configured for full AI receptionist calls."""
+    return staff_roster_ready_for_booking(info) and human_handoff_configured(info)
 
 
 def mark_forwarding_verified_if_match(client_id: str, forwarded_from: str) -> bool:

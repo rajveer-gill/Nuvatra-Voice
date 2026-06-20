@@ -446,6 +446,15 @@ def build_system_prompt(
         "along.\") and the MESSAGE: line last. Only use MESSAGE: when they actually want "
         "something relayed to the team—never for small talk or questions you already answered."
     )
+    # When the business has no separate transfer line (their only number forwards to the
+    # AI), a "connect me to a person" request can't be dialed—capture a message instead.
+    if business_info.get("transfer_takes_message"):
+        message_block += (
+            "\n\nNO LIVE TRANSFER LINE: This business does not have a separate line to transfer to. "
+            "If the caller asks to speak to a person or a manager, do NOT promise to connect or "
+            "transfer them. Instead, warmly offer to take a message so the team can call them back, "
+            "then capture it with the MESSAGE: line as described above."
+        )
     base_prompt = f"""{header}
 
 {focus_block}
