@@ -21,6 +21,7 @@ type SetupStatusSnapshot = {
   warnings?: string[]
   roster_ready?: boolean
   forwarding_phone_ready?: boolean
+  transfer_takes_message?: boolean
   voice_ready?: boolean
   roster_only_gap?: boolean
   twilio_number_set?: boolean
@@ -285,8 +286,10 @@ export default function DashboardPage() {
     showVoiceSetupWarning &&
     setupStatus?.forwarding_phone_ready === true &&
     setupStatus?.roster_ready === false
-  const needsStorePhone =
-    showVoiceSetupWarning && setupStatus?.forwarding_phone_ready === false
+  // Handoff is satisfied by a real transfer number OR the "take a message instead" toggle.
+  const handoffReady =
+    setupStatus?.forwarding_phone_ready === true || setupStatus?.transfer_takes_message === true
+  const needsHandoff = showVoiceSetupWarning && !handoffReady
 
   const panelTransition = reduceMotion ? { duration: 0 } : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const }
 
@@ -435,11 +438,11 @@ export default function DashboardPage() {
                           least one team member with a name. The AI receptionist cannot book or answer normally until the
                           roster is updated.
                         </>
-                      ) : needsStorePhone ? (
+                      ) : needsHandoff ? (
                         <>
                           Your AI receptionist cannot take calls until setup is finished in Settings. Callers hear a message
-                          and the call ends — add your store phone and team roster so the receptionist can work or transfer
-                          callers.
+                          and the call ends — add your team roster, plus a way to reach a real person: a transfer number, or
+                          turn on <strong className="font-semibold text-white">take a message instead</strong>.
                         </>
                       ) : (
                         <>
@@ -454,9 +457,10 @@ export default function DashboardPage() {
                           roster
                         </li>
                       )}
-                      {!setupStatus?.forwarding_phone_ready && (
+                      {!handoffReady && (
                         <li>
-                          Add your <strong className="font-semibold text-white">Store phone (real person)</strong> in Settings
+                          Add a <strong className="font-semibold text-white">transfer number</strong>, or turn on{' '}
+                          <strong className="font-semibold text-white">take a message instead</strong>, in Settings
                         </li>
                       )}
                     </ul>
@@ -473,13 +477,13 @@ export default function DashboardPage() {
                       Add team members
                     </button>
                   )}
-                  {!setupStatus?.forwarding_phone_ready && (
+                  {!handoffReady && (
                     <button
                       type="button"
                       onClick={goToStorePhone}
                       className="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-300 px-5 py-3 text-sm font-bold text-rose-950 shadow-md motion-safe-transition hover:bg-rose-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-200"
                     >
-                      Add store phone
+                      Set up call handling
                     </button>
                   )}
                 </div>
