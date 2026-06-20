@@ -4,7 +4,10 @@ Customize these values for your business
 """
 
 BUSINESS_CONFIG = {
-    "name": "Your Business Name",
+    # Empty by default so a new/unconfigured account shows a blank Business name
+    # field (the UI placeholder hints "Your Business Name"); the greeting falls
+    # back to the tenant name or "us" until the owner sets it in Settings.
+    "name": "",
     "hours": "Monday-Friday: 9 AM - 5 PM, Saturday: 10 AM - 2 PM",
     "phone": "(555) 123-4567",
     "email": "info@yourbusiness.com",

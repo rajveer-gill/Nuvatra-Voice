@@ -1,7 +1,7 @@
 {
   "client_id": "template",
   "plan": "pro",
-  "business_name": "Your Business Name",
+  "business_name": "",
   "hours": "Monday–Friday: 9 AM – 5 PM, Saturday: 10 AM – 2 PM, Closed Sunday",
   "phone": "",
   "forwarding_phone": "",
