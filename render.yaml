@@ -59,6 +59,11 @@ services:
       - key: TWILIO_PHONE_NUMBER
         sync: false
         optional: true
+      # A2P-registered Messaging Service. When set, outbound SMS routes through it so
+      # messages inherit the approved US 10DLC campaign (avoids carrier error 30034).
+      - key: TWILIO_A2P_MESSAGING_SERVICE_SID
+        sync: false
+        optional: true
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
