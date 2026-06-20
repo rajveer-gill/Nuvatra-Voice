@@ -22,3 +22,19 @@ def test_tts_cache_memory_hit_before_disk(tmp_path):
     for p in path.glob("*.mp3"):
         p.unlink()
     assert get_cached(tmp_path, "got_it", key) == b"abc"
+
+
+def test_tts_cache_filler_kind_roundtrip(tmp_path):
+    # The progressive-filler endpoint caches under "filler"; it was missing from the
+    # registry and raised KeyError on every call (caller heard silence).
+    key = ("tenant-c", "Almost there.", "fable", 1.0)
+    assert get_cached(tmp_path, "filler", key) is None  # miss, not KeyError
+    put_cached(tmp_path, "filler", key, b"xyz")
+    assert get_cached(tmp_path, "filler", key) == b"xyz"
+
+
+def test_tts_cache_unknown_kind_degrades_to_miss(tmp_path):
+    # Defensive: a not-yet-registered kind must miss, never KeyError mid-call.
+    assert get_cached(tmp_path, "not_a_real_kind", ("t", "x")) is None
+    put_cached(tmp_path, "not_a_real_kind", ("t", "x"), b"q")
+    assert get_cached(tmp_path, "not_a_real_kind", ("t", "x")) == b"q"

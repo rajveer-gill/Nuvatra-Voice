@@ -10,12 +10,13 @@ from typing import Literal, Optional
 
 _log = logging.getLogger("nuvatra")
 
-ClipKind = Literal["greeting", "got_it", "one_moment"]
+ClipKind = Literal["greeting", "got_it", "one_moment", "filler"]
 
 _MEMORY: dict[ClipKind, dict[tuple, bytes]] = {
     "greeting": {},
     "got_it": {},
     "one_moment": {},
+    "filler": {},
 }
 _MAX_MEMORY_ENTRIES_PER_KIND = 200
 
@@ -37,7 +38,9 @@ def _disk_path(project_root: Path, kind: ClipKind, cache_key: tuple) -> Path:
 
 
 def get_cached(project_root: Path, kind: ClipKind, cache_key: tuple) -> Optional[bytes]:
-    mem = _MEMORY[kind].get(cache_key)
+    # setdefault so a caller passing a not-yet-registered kind degrades to a cache
+    # miss instead of crashing the voice turn with a KeyError.
+    mem = _MEMORY.setdefault(kind, {}).get(cache_key)
     if mem:
         return mem
     path = _disk_path(project_root, kind, cache_key)
@@ -56,12 +59,13 @@ def get_cached(project_root: Path, kind: ClipKind, cache_key: tuple) -> Optional
 def put_cached(project_root: Path, kind: ClipKind, cache_key: tuple, data: bytes) -> None:
     if not data:
         return
-    if len(_MEMORY[kind]) >= _MAX_MEMORY_ENTRIES_PER_KIND:
+    bucket = _MEMORY.setdefault(kind, {})
+    if len(bucket) >= _MAX_MEMORY_ENTRIES_PER_KIND:
         # FIFO-style eviction based on insertion order.
-        oldest_key = next(iter(_MEMORY[kind].keys()), None)
+        oldest_key = next(iter(bucket.keys()), None)
         if oldest_key is not None:
-            _MEMORY[kind].pop(oldest_key, None)
-    _MEMORY[kind][cache_key] = data
+            bucket.pop(oldest_key, None)
+    bucket[cache_key] = data
     path = _disk_path(project_root, kind, cache_key)
     try:
         path.write_bytes(data)
@@ -73,7 +77,7 @@ def invalidate_client(project_root: Path, client_id: str) -> None:
     cid = (client_id or "").strip()
     if not cid:
         return
-    for kind in ("greeting", "got_it", "one_moment"):
+    for kind in ("greeting", "got_it", "one_moment", "filler"):
         for key in list(_MEMORY[kind].keys()):
             if isinstance(key, tuple) and key and key[0] == cid:
                 _MEMORY[kind].pop(key, None)
@@ -90,3 +94,4 @@ def clear_all_memory() -> None:
     _MEMORY["greeting"].clear()
     _MEMORY["got_it"].clear()
     _MEMORY["one_moment"].clear()
+    _MEMORY["filler"].clear()
