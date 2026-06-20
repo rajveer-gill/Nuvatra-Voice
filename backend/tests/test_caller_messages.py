@@ -38,6 +38,15 @@ def test_strip_message_directive_removes_line():
     assert "let them know" in cleaned
 
 
+def test_no_transfer_fallback_does_not_ask_for_number():
+    # We already have the caller's number from caller ID — the canned line that
+    # elicits a message must not ask "what's the best number to reach you?".
+    txt = conversation_service._NO_TRANSFER_FALLBACK_TEXT.lower()
+    assert "take a message" in txt
+    assert "number" not in txt
+    assert "reach you" not in txt
+
+
 # --- in-memory storage -------------------------------------------------------
 
 def test_store_caller_message_inmemory(monkeypatch):

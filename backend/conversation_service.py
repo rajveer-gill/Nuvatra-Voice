@@ -849,10 +849,10 @@ def get_system_prompt(
 
 # Honest reply when a caller asks for a human but no transfer number is configured.
 # Never let the AI claim to be a person — offer a callback/message instead.
+# We already have the caller's number from caller ID, so don't ask for it here.
 _NO_TRANSFER_FALLBACK_TEXT = (
     "I'm the AI receptionist, so I can't put a person on the line right now—but I can take "
-    "a message and have the team call you back. What's it regarding, and what's the best "
-    "number to reach you?"
+    "a message and have the team call you back. What's it regarding?"
 )
 
 
