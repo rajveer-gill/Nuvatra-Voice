@@ -110,6 +110,10 @@ export default function Settings() {
   const [receptionistName, setReceptionistName] = useState('')
   const [aiPhone, setAiPhone] = useState('')
   const [numberMode, setNumberMode] = useState<'new' | 'existing'>('new')
+  // The mode actually persisted on the server. numberMode is the *selected* mode in the
+  // UI; switching to "existing" only persists once a valid number is entered and saved,
+  // so we track the saved value to flag an unsaved selection.
+  const [savedNumberMode, setSavedNumberMode] = useState<'new' | 'existing'>('new')
   const [existingNumber, setExistingNumber] = useState('')
   const [forwardingVerifiedAt, setForwardingVerifiedAt] = useState<string | null>(null)
   const [savingNumberMode, setSavingNumberMode] = useState(false)
@@ -234,6 +238,7 @@ export default function Settings() {
           setReceptionistName((d.receptionist_name as string) || '')
           setAiPhone((d.phone as string) || '')
           setNumberMode((d.number_mode as 'new' | 'existing') === 'existing' ? 'existing' : 'new')
+          setSavedNumberMode((d.number_mode as 'new' | 'existing') === 'existing' ? 'existing' : 'new')
           setExistingNumber((d.existing_business_number as string) || '')
           setForwardingVerifiedAt((d.forwarding_verified_at as string) || null)
           setTenantClientId((d.client_id as string) || '')
@@ -294,7 +299,9 @@ export default function Settings() {
         number_mode: mode,
         existing_number: mode === 'existing' ? (existing ?? existingNumber) : undefined,
       })
-      setNumberMode(r?.data?.number_mode === 'existing' ? 'existing' : 'new')
+      const persisted = r?.data?.number_mode === 'existing' ? 'existing' : 'new'
+      setNumberMode(persisted)
+      setSavedNumberMode(persisted)
       setExistingNumber(String(r?.data?.existing_business_number || ''))
       setForwardingVerifiedAt((r?.data?.forwarding_verified_at as string) || null)
       setMessage({ type: 'success', text: 'Phone setup updated' })
@@ -601,7 +608,14 @@ export default function Settings() {
                     : 'border-gray-200 hover:border-gray-300'
                 }`}
               >
-                <span className="block text-sm font-semibold text-gray-900">Use a dedicated number</span>
+                <span className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                  Use a dedicated number
+                  {savedNumberMode === 'new' && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                      <CheckCircle2 className="h-3 w-3" /> Active
+                    </span>
+                  )}
+                </span>
                 <span className="mt-0.5 block text-xs text-gray-500">Publish {aiPhone} as your business line.</span>
               </button>
               <button
@@ -614,13 +628,30 @@ export default function Settings() {
                     : 'border-gray-200 hover:border-gray-300'
                 }`}
               >
-                <span className="block text-sm font-semibold text-gray-900">Use my own number</span>
+                <span className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                  Use my own number
+                  {savedNumberMode === 'existing' && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                      <CheckCircle2 className="h-3 w-3" /> Active
+                    </span>
+                  )}
+                </span>
                 <span className="mt-0.5 block text-xs text-gray-500">Keep your number; forward calls to the AI line.</span>
               </button>
             </div>
 
             {numberMode === 'existing' && (
               <div className="mt-4 space-y-4">
+                {savedNumberMode !== 'existing' && (
+                  <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>
+                      <strong className="font-semibold">Not saved yet.</strong> Selecting this doesn&apos;t switch your
+                      account on its own — enter your existing business number below and click <strong>Save</strong> to
+                      forward calls to your AI line.
+                    </span>
+                  </div>
+                )}
                 <div className="flex flex-wrap items-end gap-2">
                   <div>
                     <label className="mb-1 block text-sm font-medium text-gray-700">Your existing business number</label>
