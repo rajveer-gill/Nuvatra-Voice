@@ -40,6 +40,23 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger("nuvatra")
 
 
+def _server_error(
+    context: str,
+    exc: Exception,
+    *,
+    status_code: int = 500,
+    public_detail: str = "Internal server error",
+) -> HTTPException:
+    """Log the real exception server-side; return a client-safe HTTPException.
+
+    Raw exception strings from the DB driver, Stripe, OpenAI, or Twilio can embed
+    connection strings, partial keys, or internal hostnames — never echo str(e)
+    to clients. Routers do `raise deps._server_error("context", e)`.
+    """
+    logger.error("%s: %s", context, exc, exc_info=True)
+    return HTTPException(status_code=status_code, detail=public_detail)
+
+
 def _public_base_url() -> str:
     """HTTPS origin Twilio can reach for webhooks (use NGROK_URL or PUBLIC_BASE_URL)."""
     return (
