@@ -1170,6 +1170,7 @@ export default function Settings() {
         >
           <Users className="w-6 h-6 text-teal-600" />
           Team roster
+          <span className="text-rose-500 text-base" aria-label="required">*</span>
         </h2>
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
           Staff your callers can book with (stylists, artists, providers, chairs). Add as many as you need. This list is only for

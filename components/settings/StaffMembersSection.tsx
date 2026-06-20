@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import type { AxiosInstance } from 'axios'
-import { Calendar, ChevronRight, Mail, Pencil, Phone, Plus, Tag, Trash2, User, X } from 'lucide-react'
+import { Calendar, CheckCircle2, ChevronRight, Mail, Pencil, Phone, Plus, Tag, Trash2, User, Users, X } from 'lucide-react'
 import type { ServiceRow } from '@/components/settings/StructuredListEditors'
 import { fadeUpChild, staggerContainer } from '@/components/motion'
 
@@ -231,16 +231,74 @@ export function StaffMembersSection({
     }
   }
 
+  const namedCount = staff.filter((s) => s.name.trim()).length
+  const phoneCount = staff.filter((s) => hasStaffPhone(s.phone)).length
+  const rosterReady = namedCount > 0
+
   return (
     <div>
-      <motion.p
-        className="text-xs text-teal-800 mb-3 font-medium inline-flex items-center gap-2 rounded-full bg-teal-50 px-3 py-1 border border-teal-100"
-        animate={reduceMotion ? {} : { opacity: [0.75, 1, 0.75] }}
-        transition={{ duration: 3, repeat: Infinity }}
+      <div
+        className={`relative overflow-hidden rounded-2xl border p-4 mb-4 transition-all duration-300 ${
+          rosterReady ? 'border-emerald-200 bg-emerald-50/40' : 'border-amber-300 bg-amber-50/50 ring-1 ring-amber-200'
+        }`}
       >
-        <Calendar className="h-3.5 w-3.5" />
-        {staff.filter((s) => hasStaffPhone(s.phone)).length}/{staff.length} with phone for SMS & transfers
-      </motion.p>
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full blur-2xl transition-colors duration-500 ${
+            rosterReady ? 'bg-emerald-300/20' : 'bg-amber-300/30'
+          }`}
+        />
+        <div className="relative flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors duration-300 ${
+                rosterReady ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'
+              }`}
+            >
+              <Users className="h-5 w-5" aria-hidden />
+            </div>
+            <div>
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
+                At least one team member
+                <span className="text-rose-500" aria-label="required">
+                  *
+                </span>
+              </h3>
+              <p className="text-xs text-gray-500">
+                Required — callers can&apos;t book or reach your team until someone&apos;s on the roster.
+              </p>
+            </div>
+          </div>
+          <span
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition-colors duration-300 ${
+              rosterReady ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+            }`}
+          >
+            {rosterReady ? (
+              <>
+                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                {namedCount} added
+              </>
+            ) : (
+              <>
+                <span className="relative flex h-2 w-2" aria-hidden>
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+                </span>
+                Action needed
+              </>
+            )}
+          </span>
+        </div>
+        {staff.length > 0 && (
+          <div className="relative mt-3">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-teal-100 bg-white/70 px-2.5 py-1 text-xs font-medium text-teal-800">
+              <Calendar className="h-3.5 w-3.5" aria-hidden />
+              {phoneCount}/{staff.length} with phone for SMS &amp; transfers
+            </span>
+          </div>
+        )}
+      </div>
 
       {staff.some((s) => s.name.trim() && !hasStaffPhone(s.phone)) && (
         <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
@@ -262,9 +320,13 @@ export function StaffMembersSection({
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="rounded-xl border border-dashed border-teal-200 bg-white/70 px-4 py-8 text-center text-sm text-gray-500"
+              className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-amber-300 bg-amber-50/40 px-4 py-8 text-center"
             >
-              No team members yet. Add stylists or staff so callers can book with a specific person.
+              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+                <User className="h-5 w-5" aria-hidden />
+              </span>
+              <span className="text-sm font-medium text-gray-700">No team members yet</span>
+              <span className="text-xs text-gray-500">Add at least one so callers can book with a specific person.</span>
             </motion.li>
           ) : (
             staff.map((s, i) => {
@@ -358,11 +420,15 @@ export function StaffMembersSection({
       <motion.button
         type="button"
         onClick={() => openModal({ mode: 'add' })}
-        className="inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium rounded-xl bg-gradient-to-r from-teal-600 to-emerald-600 text-white shadow-md hover:from-teal-700 hover:to-emerald-700"
+        className={`inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold rounded-xl text-white shadow-md ${
+          rosterReady
+            ? 'bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700'
+            : 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700'
+        }`}
         whileHover={reduceMotion ? {} : { scale: 1.02 }}
         whileTap={reduceMotion ? {} : { scale: 0.98 }}
       >
-        <Plus className="w-4 h-4" /> Add team member
+        <Plus className="w-4 h-4" /> {rosterReady ? 'Add team member' : 'Add your first team member'}
       </motion.button>
 
       <dialog
