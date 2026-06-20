@@ -34,6 +34,20 @@ def test_prompt_contains_booking_token_format(minimal_business):
     assert "Do NOT ask for email" in p
 
 
+def test_prompt_take_a_message_when_no_transfer_line(minimal_business):
+    on = build_system_prompt(
+        business_info={**minimal_business, "transfer_takes_message": True},
+        include_booked_slots=False,
+    )
+    assert "NO LIVE TRANSFER LINE" in on
+    assert "MESSAGE:" in on
+    off = build_system_prompt(
+        business_info={**minimal_business, "transfer_takes_message": False},
+        include_booked_slots=False,
+    )
+    assert "NO LIVE TRANSFER LINE" not in off
+
+
 def test_prompt_requires_12_hour_spoken_times(minimal_business):
     p = build_system_prompt(
         business_info=minimal_business,

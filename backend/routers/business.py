@@ -154,6 +154,10 @@ class BusinessInfoUpdate(BaseModel):
     business_type: Optional[str] = None
     staff: Optional[List[StaffMember]] = None
     transfer_targets: Optional[List[TransferTarget]] = None
+    # When True, the AI takes a message instead of transferring "talk to a real person"
+    # calls (for businesses whose only number forwards to the AI line). Replaces the need
+    # for a separate forwarding_phone to satisfy call-readiness.
+    transfer_takes_message: Optional[bool] = None
 
 
 def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) -> None:
@@ -190,9 +194,13 @@ def get_setup_status(
     info = info_override if info_override is not None else config_service.get_business_info()
     missing: List[str] = []
     warnings: List[str] = []
+    take_message = config_service.transfer_takes_message(info)
     for key, label in SETUP_REQUIRED_FIELDS:
         val = info.get(key)
         if not (val and str(val).strip()):
+            # The store/transfer phone is optional when "take a message instead" is on.
+            if key == "forwarding_phone" and take_message:
+                continue
             missing.append(label)
     services = info.get("services") or []
     departments = info.get("departments") or []
@@ -202,7 +210,8 @@ def get_setup_status(
         )
     roster_ready = config_service.staff_roster_ready_for_booking(info)
     store_phone_ready = config_service.forwarding_phone_ready(info)
-    voice_ready = roster_ready and store_phone_ready
+    handoff_ready = store_phone_ready or take_message
+    voice_ready = roster_ready and handoff_ready
     roster_only_gap = voice_service.setup_transfers_to_store_after_message(info)
     if not roster_ready:
         if roster_only_gap:
@@ -214,9 +223,10 @@ def get_setup_status(
             warnings.append(
                 "Add at least one team member with a name on the Team roster so callers can book appointments."
             )
-    if not store_phone_ready:
+    if not handoff_ready:
         warnings.append(
-            "Add your store phone number so callers can be redirected to a real person when needed."
+            "Add a transfer number so callers can reach a real person, "
+            "or turn on \"take a message instead\" and the AI will capture messages for callback."
         )
     if not voice_ready and not roster_only_gap:
         warnings.append(
@@ -265,6 +275,7 @@ def get_setup_status(
         "warnings": warnings,
         "roster_ready": roster_ready,
         "forwarding_phone_ready": store_phone_ready,
+        "transfer_takes_message": take_message,
         "voice_ready": voice_ready,
         "roster_only_gap": roster_only_gap,
         "twilio_number_set": twilio_number_set,
@@ -587,6 +598,8 @@ async def api_update_business_info(
         data["phone"] = update.phone
     if update.forwarding_phone is not None:
         data["forwarding_phone"] = update.forwarding_phone
+    if update.transfer_takes_message is not None:
+        data["transfer_takes_message"] = bool(update.transfer_takes_message)
     if update.email is not None:
         data["email"] = update.email
     if update.address is not None:

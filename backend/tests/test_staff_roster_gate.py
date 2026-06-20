@@ -83,7 +83,69 @@ def test_setup_status_warns_without_store_phone():
     )
     assert body.get("forwarding_phone_ready") is False
     assert body.get("roster_only_gap") is False
-    assert any("store phone number" in w for w in body.get("warnings") or [])
+    assert any("transfer number" in w for w in body.get("warnings") or [])
+
+
+def test_take_a_message_satisfies_handoff_without_store_phone():
+    """The toggle is an alternative to a transfer number, not an addition."""
+    base = {"staff": [{"id": "1", "name": "Alex", "phone": ""}]}
+    # No phone + no toggle => not ready.
+    assert main.voice_receptionist_ready({**base, "forwarding_phone": ""}) is False
+    # No phone but toggle on => ready (AI takes a message instead of dialing).
+    assert (
+        main.voice_receptionist_ready(
+            {**base, "forwarding_phone": "", "transfer_takes_message": True}
+        )
+        is True
+    )
+    # A real transfer number alone (toggle off) is still a valid handoff path.
+    assert (
+        main.voice_receptionist_ready(
+            {**base, "forwarding_phone": "+15551111111", "transfer_takes_message": False}
+        )
+        is True
+    )
+
+
+def test_human_handoff_configured_either_path():
+    assert main.human_handoff_configured({"forwarding_phone": "+15551111111"}) is True
+    assert main.human_handoff_configured({"transfer_takes_message": True}) is True
+    assert main.human_handoff_configured({"forwarding_phone": ""}) is False
+
+
+def test_setup_status_take_message_clears_missing_and_warning():
+    body = business_router.get_setup_status(
+        {
+            "name": "Spa",
+            "hours": "9-5",
+            "forwarding_phone": "",
+            "transfer_takes_message": True,
+            "address": "123 Main",
+            "staff": [{"id": "1", "name": "Alex", "phone": ""}],
+            "services": [{"id": "s1", "name": "Cut"}],
+        }
+    )
+    assert body.get("transfer_takes_message") is True
+    assert body.get("voice_ready") is True
+    # Store phone no longer counts as a missing required field.
+    assert "Store phone (real person)" not in (body.get("missing") or [])
+    # No handoff warning when the toggle is on.
+    assert not any("transfer number" in w for w in body.get("warnings") or [])
+
+
+def test_setup_status_warning_mentions_toggle_when_no_handoff():
+    body = business_router.get_setup_status(
+        {
+            "name": "Spa",
+            "hours": "9-5",
+            "forwarding_phone": "",
+            "address": "123 Main",
+            "staff": [{"id": "1", "name": "Alex", "phone": ""}],
+            "services": [{"id": "s1", "name": "Cut"}],
+        }
+    )
+    warning = next((w for w in body.get("warnings") or [] if "transfer number" in w), "")
+    assert "take a message" in warning.lower()
 
 
 def test_setup_not_ready_twiml_dials_store_when_roster_only_gap(monkeypatch):

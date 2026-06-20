@@ -943,6 +943,8 @@ from config_service import (  # noqa: E402,F401
     staff_on_roster,
     staff_roster_ready_for_booking,
     forwarding_phone_ready,
+    transfer_takes_message,
+    human_handoff_configured,
     voice_receptionist_ready,
 )
 

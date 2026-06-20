@@ -120,6 +120,7 @@ export default function Settings() {
     business_type: '',
     hours: '',
     forwarding_phone: '',
+    transfer_takes_message: false,
     email: '',
     address: '',
     menu_link: '',
@@ -240,6 +241,7 @@ export default function Settings() {
             business_type: (d.business_type as string) || '',
             hours: (d.hours as string) || '',
             forwarding_phone: (d.forwarding_phone as string) || '',
+            transfer_takes_message: Boolean(d.transfer_takes_message),
             email: (d.email as string) || '',
             address: (d.address as string) || '',
             menu_link: (d.menu_link as string) || '',
@@ -417,6 +419,7 @@ export default function Settings() {
         ...(!industryLocked ? { business_type: form.business_type || undefined } : {}),
         hours: form.hours || undefined,
         forwarding_phone: form.forwarding_phone || undefined,
+        transfer_takes_message: form.transfer_takes_message,
         email: form.email || undefined,
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
@@ -535,7 +538,7 @@ export default function Settings() {
               {done ? <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" /> : <Circle className="w-4 h-4 text-gray-300 shrink-0" />}
               <span className={done ? 'text-gray-700' : 'text-gray-500'}>{label}</span>
               {key === 'forwarding_phone' && (
-                <span className="text-gray-400 text-xs font-normal">(when callers want a real person)</span>
+                <span className="text-gray-400 text-xs font-normal">(transfer number, or turn on &ldquo;take a message instead&rdquo;)</span>
               )}
             </motion.li>
             )
@@ -933,13 +936,38 @@ export default function Settings() {
               type="text"
               value={form.forwarding_phone}
               onChange={(e) => setForm((f) => ({ ...f, forwarding_phone: e.target.value }))}
-              className="cs-field w-full"
+              disabled={form.transfer_takes_message}
+              className={`cs-field w-full ${form.transfer_takes_message ? 'opacity-50 cursor-not-allowed' : ''}`}
               placeholder="Number to transfer to when a caller wants a real person"
             />
             <p className="text-xs text-gray-500 mt-1">
               Used when someone asks to speak with a person at your business (not the AI receptionist line). If they name
               someone on your transfer list, we use that number instead (see Call transfers below).
             </p>
+            <label className="mt-3 flex items-start gap-3 cursor-pointer">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={form.transfer_takes_message}
+                onClick={() => setForm((f) => ({ ...f, transfer_takes_message: !f.transfer_takes_message }))}
+                className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                  form.transfer_takes_message ? 'bg-indigo-600' : 'bg-gray-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    form.transfer_takes_message ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+              <span className="text-sm">
+                <span className="font-medium text-gray-700">Take a message instead of transferring</span>
+                <span className="block text-xs text-gray-500">
+                  Turn this on if you don&apos;t have a separate line to send callers to (for example, your published number
+                  forwards to the AI). When someone asks for a person, the AI takes a message so you can call them back.
+                </span>
+              </span>
+            </label>
           </div>
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
