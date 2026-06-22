@@ -532,7 +532,11 @@ def admin_update_tenant_twilio_phone(
     if not database.db_tenant_set_twilio_phone(tenant_id, phone):
         raise HTTPException(status_code=500, detail="Failed to update Twilio number")
     updated = database.db_tenant_get_by_id(tenant_id)
-    from twilio_provision import configure_webhooks, public_webhook_result
+    from twilio_provision import (
+        configure_webhooks,
+        public_webhook_result,
+        enroll_in_messaging_service,
+    )
 
     base = deps._public_base_url()
     webhook_config = configure_webhooks(
@@ -546,6 +550,12 @@ def admin_update_tenant_twilio_phone(
     if webhook_config.get("number_sid"):
         database.db_tenant_set_twilio_number_sid(tenant_id, webhook_config["number_sid"])
         updated = database.db_tenant_get_by_id(tenant_id)
+        # A2P: enroll the number in the Messaging Service so outbound SMS from it is
+        # campaign-registered (else carrier 30034). The purchase flow already does this;
+        # doing it here too means admin-assigned numbers are covered without a Twilio
+        # console trip. Best-effort and idempotent; no-ops when the env is unset.
+        if runtime.twilio_client:
+            enroll_in_messaging_service(runtime.twilio_client, webhook_config["number_sid"])
     deps.audit_log(
         "admin",
         "tenant_twilio_phone_updated",
