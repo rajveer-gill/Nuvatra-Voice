@@ -64,11 +64,14 @@ def send_sms(
 ) -> bool:
     """Send SMS via Twilio.
 
-    Routing: if a Messaging Service SID is configured (param, else TWILIO_A2P_MESSAGING_SERVICE_SID
-    env), the message is sent through it so it inherits the registered A2P 10DLC campaign
-    (Twilio picks the From from the service's pool). Otherwise it falls back to a raw From
-    number (from_override, else TWILIO_SMS_FROM) — fine for dev / non-A2P, but US carriers
-    drop unregistered long codes with error 30034.
+    Routing: PREFER the tenant's own From number (from_override, else TWILIO_SMS_FROM) so
+    two-way replies come back to that number and resolve to the tenant (db_tenant_get_by_phone)
+    — required for SMS appointment confirmation. That number must be enrolled in the A2P
+    Messaging Service (see twilio_provision.enroll_in_messaging_service) so it inherits the
+    registered 10DLC campaign; a raw long code outside the campaign is dropped with carrier
+    error 30034. Only when there is NO From number do we fall back to sending via the
+    Messaging Service SID (param, else TWILIO_A2P_MESSAGING_SERVICE_SID env) — note that path
+    sends from a pooled number, so replies can't be mapped back to a tenant.
 
     Records usage via db_usage_increment_sms when client_id is set.
     If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only).
@@ -106,7 +109,7 @@ def send_sms(
     to_masked = mask_phone_e164(e164)
     # For logs/audit: never leak the raw service SID; show the From or a service marker.
     sender_label = mask_phone_e164(from_num) if from_num else (f"msgsvc:…{msid[-4:]}" if msid else "")
-    via = "messaging_service" if msid else "from_number"
+    via = "from_number" if from_num else ("messaging_service" if msid else "none")
     sms_debug(
         "outbound_attempt",
         via=via,
@@ -127,10 +130,12 @@ def send_sms(
     for attempt in range(3):
         try:
             create_kwargs = {"to": e164, "body": body}
-            if msid:
-                create_kwargs["messaging_service_sid"] = msid
-            else:
+            # Prefer the tenant's own number so replies route back to it and resolve the
+            # tenant; fall back to the Messaging Service only when no From is available.
+            if from_num:
                 create_kwargs["from_"] = from_num
+            else:
+                create_kwargs["messaging_service_sid"] = msid
             msg = runtime.twilio_client.messages.create(**create_kwargs)
             sid = getattr(msg, "sid", None) or getattr(msg, "id", None)
             sms_info(

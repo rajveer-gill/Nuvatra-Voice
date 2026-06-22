@@ -1,9 +1,9 @@
-"""send_sms routes through the A2P Messaging Service when configured.
+"""send_sms routing: prefer the tenant's own number (so two-way replies resolve to
+the tenant), fall back to the A2P Messaging Service only when no From is available.
 
-Sending booking confirmations from a raw long code that isn't in a registered
-Messaging Service gets carrier error 30034 ("unregistered number") and is dropped.
-Routing via the Messaging Service SID makes every message inherit the approved
-10DLC campaign. These tests pin that routing.
+The tenant number must be enrolled in the Messaging Service so it inherits the 10DLC
+campaign (else carrier error 30034). Sending via the Messaging Service SID would send
+from a pooled number, which breaks reply→tenant mapping — so it is fallback-only.
 """
 
 from unittest.mock import MagicMock
@@ -24,18 +24,19 @@ def mock_twilio(monkeypatch):
     return client
 
 
-def test_sends_via_messaging_service_when_env_set(mock_twilio, monkeypatch):
+def test_prefers_tenant_from_number_even_when_service_set(mock_twilio, monkeypatch):
+    # Two-way replies must come back to the tenant's own number, so a real From
+    # always wins over the Messaging Service (the number is enrolled for A2P).
     monkeypatch.setenv("TWILIO_A2P_MESSAGING_SERVICE_SID", "MGabc123")
     ok = sms_service.send_sms("+14255551234", "hi", from_override="+14782150212")
     assert ok is True
     kwargs = mock_twilio.messages.create.call_args.kwargs
-    assert kwargs.get("messaging_service_sid") == "MGabc123"
-    # The service selects the From from its pool — a raw From must NOT be passed.
-    assert "from_" not in kwargs
+    assert kwargs.get("from_") == "+14782150212"
+    assert "messaging_service_sid" not in kwargs
     assert kwargs.get("to") == "+14255551234"
 
 
-def test_falls_back_to_from_number_without_service(mock_twilio, monkeypatch):
+def test_uses_from_number_without_service(mock_twilio, monkeypatch):
     monkeypatch.delenv("TWILIO_A2P_MESSAGING_SERVICE_SID", raising=False)
     ok = sms_service.send_sms("+14255551234", "hi", from_override="+14782150212")
     assert ok is True
@@ -44,12 +45,15 @@ def test_falls_back_to_from_number_without_service(mock_twilio, monkeypatch):
     assert "messaging_service_sid" not in kwargs
 
 
-def test_param_overrides_env(mock_twilio, monkeypatch):
-    monkeypatch.setenv("TWILIO_A2P_MESSAGING_SERVICE_SID", "MGenv")
-    ok = sms_service.send_sms("+14255551234", "hi", messaging_service_sid="MGparam")
+def test_falls_back_to_messaging_service_when_no_from(mock_twilio, monkeypatch):
+    # Only when there is no From at all do we route via the Messaging Service.
+    monkeypatch.setenv("TWILIO_A2P_MESSAGING_SERVICE_SID", "MGfallback")
+    monkeypatch.setattr(sms_service, "TWILIO_SMS_FROM", "")
+    ok = sms_service.send_sms("+14255551234", "hi")
     assert ok is True
     kwargs = mock_twilio.messages.create.call_args.kwargs
-    assert kwargs.get("messaging_service_sid") == "MGparam"
+    assert kwargs.get("messaging_service_sid") == "MGfallback"
+    assert "from_" not in kwargs
 
 
 def test_skips_when_no_service_and_no_from(mock_twilio, monkeypatch):
