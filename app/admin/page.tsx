@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
 import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
@@ -210,7 +209,6 @@ function UsTwilioPhoneInput({
 }
 
 export default function AdminPage() {
-  const router = useRouter()
   const { isLoaded, isSignedIn } = useAuth()
   const api = useApiClient()
   const adminApi = useMemo(() => sameOriginApiConfig(), [])
@@ -326,17 +324,16 @@ export default function AdminPage() {
     setAdminAllowed(null)
     try {
       const res = await api.get<{ is_admin: boolean }>('/api/admin/session', adminApi)
-      if (res.data.is_admin) {
-        setAdminAllowed(true)
-      } else {
-        setAdminAllowed(false)
-        router.replace('/dashboard')
-      }
+      // Do NOT redirect non-admins away: the server layout may have sent an admin
+      // here based on the frontend ADMIN_CLERK_USER_IDS env. If the backend (the real
+      // source of truth) disagrees, redirecting to /dashboard would ping-pong with the
+      // layout forever. Render an explicit "not admin" state instead (see below).
+      setAdminAllowed(Boolean(res.data.is_admin))
     } catch {
       setSessionError('Could not verify admin access. Check your connection and try again.')
       setAdminAllowed(false)
     }
-  }, [api, router, adminApi])
+  }, [api, adminApi])
 
   useEffect(() => {
     if (!isLoaded || !isSignedIn) return
@@ -629,6 +626,34 @@ export default function AdminPage() {
           <Link href="/" className="text-sm text-cyan-400 hover:text-cyan-300">
             Back to home
           </Link>
+        </div>
+      </AppChrome>
+    )
+  }
+
+  // Explicit "not an admin" state — the backend (source of truth) said is_admin:false.
+  // We render this instead of redirecting so we never ping-pong with the server layout.
+  if (adminAllowed === false) {
+    return (
+      <AppChrome>
+        <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
+          <p className="max-w-md text-center text-zinc-300">
+            You&apos;re signed in, but this account isn&apos;t a platform admin. If this is wrong, the admin
+            allowlist (<code className="text-zinc-400">ADMIN_CLERK_USER_IDS</code>) on the backend doesn&apos;t
+            include your user ID for this environment.
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              className="rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 motion-safe-transition hover:brightness-110"
+              onClick={() => void verifyAdminSession()}
+            >
+              Retry
+            </button>
+            <Link href="/" className="text-sm text-cyan-400 hover:text-cyan-300">
+              Back to home
+            </Link>
+          </div>
         </div>
       </AppChrome>
     )
