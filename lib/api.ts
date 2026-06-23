@@ -2,7 +2,7 @@
 
 import axios, { AxiosInstance } from 'axios'
 import { useAuth } from '@clerk/nextjs'
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { clerkGetTokenOptions } from '@/lib/clerk-token'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
@@ -33,11 +33,19 @@ export function sameOriginApiConfig(): { baseURL: string } {
  */
 export function useApiClient(): AxiosInstance {
   const { getToken } = useAuth()
+  // Keep the axios instance STABLE across renders. Clerk's getToken changes identity
+  // when the auth/session state churns (e.g. right after a session is revoked), so
+  // memoizing on [getToken] would hand back a new client every render — that recreates
+  // any useCallback/useEffect depending on the client and can spin an infinite
+  // request loop. The interceptors call getToken lazily at request time, so they only
+  // need the *latest* getToken via a ref, not as a memo dependency.
+  const getTokenRef = useRef(getToken)
+  getTokenRef.current = getToken
   const client = useMemo(() => {
     const instance = axios.create({ baseURL: API_URL, timeout: API_TIMEOUT_MS })
     instance.interceptors.request.use(async (config) => {
       try {
-        const token = await getToken(clerkGetTokenOptions())
+        const token = await getTokenRef.current(clerkGetTokenOptions())
         if (token) {
           config.headers.Authorization = `Bearer ${token}`
         }
@@ -59,7 +67,7 @@ export function useApiClient(): AxiosInstance {
         }
         cfg._retry = true
         try {
-          const token = await getToken(clerkGetTokenOptions({ skipCache: true }))
+          const token = await getTokenRef.current(clerkGetTokenOptions({ skipCache: true }))
           if (token) {
             cfg.headers = cfg.headers ?? {}
             cfg.headers.Authorization = `Bearer ${token}`
@@ -72,6 +80,6 @@ export function useApiClient(): AxiosInstance {
       }
     )
     return instance
-  }, [getToken])
+  }, [])
   return client
 }
