@@ -1187,7 +1187,7 @@ export default function Settings() {
               </motion.div>
             )}
           </div>
-          <ServicesEditor items={serviceItems} onChange={setServiceItems} />
+          <ServicesEditor items={serviceItems} onChange={setServiceItems} required />
           <SpecialsEditor items={specialItems} onChange={setSpecialItems} />
           <RulesEditor items={ruleItems} onChange={setRuleItems} />
         </div>

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Clock, DollarSign, Plus, Pencil, Tag, Trash2, X } from 'lucide-react'
+import { CheckCircle2, Clock, DollarSign, Plus, Pencil, Tag, Trash2, X } from 'lucide-react'
 
 export type ServiceRow = { id: string; name: string; price: number; duration_minutes: number }
 export type SpecialRow = { id: string; title: string; description: string; valid_until: string }
@@ -101,12 +101,15 @@ function Modal({ open, onClose, title, children }: ModalProps) {
 export function ServicesEditor({
   items,
   onChange,
+  required = false,
 }: {
   items: ServiceRow[]
   onChange: (next: ServiceRow[]) => void
+  required?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [edit, setEdit] = useState<ServiceRow | null>(null)
+  const ready = items.length > 0
 
   const remove = (id: string) => {
     onChange(items.filter((x) => x.id !== id))
@@ -114,8 +117,41 @@ export function ServicesEditor({
 
   return (
     <div className="md:col-span-2 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <label className="block text-sm font-medium text-gray-700">Services</label>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <span className="flex items-center gap-1.5 text-sm font-medium text-gray-700">
+            Services
+            {required && (
+              <>
+                <span className="text-rose-500" aria-label="required">*</span>
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                    ready ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                  }`}
+                >
+                  {ready ? (
+                    <>
+                      <CheckCircle2 className="h-3 w-3" aria-hidden /> Ready
+                    </>
+                  ) : (
+                    <>
+                      <span className="relative flex h-1.5 w-1.5" aria-hidden>
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
+                      </span>
+                      Action needed
+                    </>
+                  )}
+                </span>
+              </>
+            )}
+          </span>
+          {required && !ready && (
+            <p className="mt-0.5 text-xs text-gray-500">
+              Required — your AI receptionist won&apos;t take calls until you add at least one service.
+            </p>
+          )}
+        </div>
         <button
           type="button"
           onClick={() => {
