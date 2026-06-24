@@ -34,6 +34,19 @@ def test_prompt_contains_booking_token_format(minimal_business):
     assert "Do NOT ask for email" in p
 
 
+def test_prompt_only_listed_times_are_taken_no_invented_conflicts():
+    # With one taken slot, the AI must treat every OTHER time/day as open and never
+    # invent conflicts (it was telling callers an empty day's time was "taken").
+    p = build_system_prompt(
+        business_info={"name": "Salon", "hours": "9-5", "staff": [{"name": "Jake"}]},
+        include_booked_slots=True,
+        booked_slots_prompt_text="Booked (taken): 2026-06-24 at 2:00 PM.",
+    )
+    low = p.lower()
+    assert "only the exact date-and-time entries listed above are taken" in low
+    assert "never tell a caller a requested time is taken" in low
+
+
 def test_prompt_forbids_inventing_services_when_none_configured():
     # No services configured: the AI must not invent/list services (it was making up
     # salon services like "haircuts, coloring" on a fresh tenant).
