@@ -202,17 +202,17 @@ def get_setup_status(
             if key == "forwarding_phone" and take_message:
                 continue
             missing.append(label)
-    services = info.get("services") or []
-    departments = info.get("departments") or []
-    if not (services or departments):
-        warnings.append(
-            "Add services or departments so the AI knows what your business offers (e.g. appointments, estimates, emergency service)"
-        )
+    services_ready = config_service.services_configured(info)
     roster_ready = config_service.staff_roster_ready_for_booking(info)
     store_phone_ready = config_service.forwarding_phone_ready(info)
     handoff_ready = store_phone_ready or take_message
-    voice_ready = roster_ready and handoff_ready
+    voice_ready = roster_ready and handoff_ready and services_ready
     roster_only_gap = voice_service.setup_transfers_to_store_after_message(info)
+    if not services_ready:
+        warnings.append(
+            "Add at least one service in Settings so the AI knows what you offer. Your AI receptionist will not "
+            "take calls until a service menu is set—without one it can't tell callers what you provide."
+        )
     if not roster_ready:
         if roster_only_gap:
             warnings.append(
@@ -231,7 +231,7 @@ def get_setup_status(
     if not voice_ready and not roster_only_gap:
         warnings.append(
             "Your AI receptionist cannot take calls until setup is complete in Settings "
-            "(team roster and store phone when both are needed)."
+            "(team roster, a service menu, and a way to reach a real person)."
         )
     staff_count = len(
         [s for s in (info.get("staff") or []) if (s.get("name") or "").strip()]
@@ -274,6 +274,7 @@ def get_setup_status(
         "missing": missing,
         "warnings": warnings,
         "roster_ready": roster_ready,
+        "services_ready": services_ready,
         "forwarding_phone_ready": store_phone_ready,
         "transfer_takes_message": take_message,
         "voice_ready": voice_ready,

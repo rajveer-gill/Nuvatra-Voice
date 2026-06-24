@@ -20,6 +20,7 @@ type SetupStatusSnapshot = {
   missing?: string[]
   warnings?: string[]
   roster_ready?: boolean
+  services_ready?: boolean
   forwarding_phone_ready?: boolean
   transfer_takes_message?: boolean
   voice_ready?: boolean
@@ -463,6 +464,12 @@ export default function DashboardPage() {
                         <li>
                           Add a <strong className="font-semibold text-white">transfer number</strong>, or turn on{' '}
                           <strong className="font-semibold text-white">take a message instead</strong>, in Settings
+                        </li>
+                      )}
+                      {setupStatus?.services_ready === false && (
+                        <li>
+                          Add at least one <strong className="font-semibold text-white">service</strong> in Settings so the AI
+                          knows what you offer
                         </li>
                       )}
                     </ul>

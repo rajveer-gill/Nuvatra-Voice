@@ -24,14 +24,23 @@ def test_staff_roster_not_ready_when_empty():
     assert main.staff_roster_ready_for_booking({"staff": []}) is False
 
 
-def test_voice_receptionist_requires_roster_and_store_phone():
+def test_voice_receptionist_requires_roster_store_phone_and_services():
     ready = {
         "forwarding_phone": "+15551111111",
         "staff": [{"id": "1", "name": "Alex", "phone": ""}],
+        "services": [{"id": "s1", "name": "Cut"}],
     }
     assert main.voice_receptionist_ready(ready) is True
-    assert main.voice_receptionist_ready({"forwarding_phone": "", "staff": ready["staff"]}) is False
-    assert main.voice_receptionist_ready({"forwarding_phone": "+15551111111", "staff": []}) is False
+    # Missing any one of the three → not ready.
+    assert main.voice_receptionist_ready({**ready, "forwarding_phone": ""}) is False
+    assert main.voice_receptionist_ready({**ready, "staff": []}) is False
+    assert main.voice_receptionist_ready({**ready, "services": []}) is False
+
+
+def test_services_configured_helper():
+    assert main.services_configured({"services": [{"id": "s1", "name": "Cut"}]}) is True
+    assert main.services_configured({"services": []}) is False
+    assert main.services_configured({}) is False
 
 
 def test_setup_transfers_only_when_store_phone_without_roster():
@@ -88,7 +97,7 @@ def test_setup_status_warns_without_store_phone():
 
 def test_take_a_message_satisfies_handoff_without_store_phone():
     """The toggle is an alternative to a transfer number, not an addition."""
-    base = {"staff": [{"id": "1", "name": "Alex", "phone": ""}]}
+    base = {"staff": [{"id": "1", "name": "Alex", "phone": ""}], "services": [{"id": "s1", "name": "Cut"}]}
     # No phone + no toggle => not ready.
     assert main.voice_receptionist_ready({**base, "forwarding_phone": ""}) is False
     # No phone but toggle on => ready (AI takes a message instead of dialing).
