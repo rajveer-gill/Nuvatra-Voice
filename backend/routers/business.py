@@ -46,10 +46,6 @@ SETUP_REQUIRED_FIELDS = [
 ]
 
 
-_WORKING_DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-_WORKING_DAY_SET = set(_WORKING_DAY_ORDER)
-
-
 class StaffMember(BaseModel):
     id: Optional[str] = Field(default=None, max_length=36)
     name: str = Field(default="", max_length=120)
@@ -60,20 +56,23 @@ class StaffMember(BaseModel):
     # Days of week this person works (lowercase 3-letter: mon..sun). Empty = no
     # constraint (works whenever the shop is open) — backward compatible.
     working_days: List[str] = Field(default_factory=list)
+    # Optional per-day hour windows {day: {"start": "HH:MM", "end": "HH:MM"}}.
+    # A working day with no entry = full shop hours that day.
+    working_hours: dict = Field(default_factory=dict)
 
     @field_validator("working_days", mode="before")
     @classmethod
-    def normalize_working_days(cls, v):
-        if not v:
-            return []
-        if isinstance(v, str):
-            v = [v]
-        seen = set()
-        for raw in v:
-            d = str(raw).strip().lower()[:3]
-            if d in _WORKING_DAY_SET:
-                seen.add(d)
-        return [d for d in _WORKING_DAY_ORDER if d in seen]
+    def _normalize_working_days(cls, v):
+        import staff_schedule
+
+        return staff_schedule.normalize_working_days(v)
+
+    @field_validator("working_hours", mode="before")
+    @classmethod
+    def _normalize_working_hours(cls, v):
+        import staff_schedule
+
+        return staff_schedule.normalize_working_hours(v)
 
     @field_validator("id", mode="before")
     @classmethod
@@ -365,6 +364,8 @@ def finalize_staff_records_for_storage(
             row["service_ids"] = svc_ids
         if m.working_days:
             row["working_days"] = list(m.working_days)
+        if m.working_hours:
+            row["working_hours"] = dict(m.working_hours)
         out.append(row)
     return out
 

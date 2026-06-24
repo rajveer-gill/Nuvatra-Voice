@@ -7,6 +7,7 @@ import { Calendar, CheckCircle2, ChevronRight, Clock, Mail, Pencil, Phone, Plus,
 import type { ServiceRow } from '@/components/settings/StructuredListEditors'
 import { fadeUpChild, staggerContainer } from '@/components/motion'
 
+export type DayHours = { start: string; end: string }
 export type StaffRow = {
   id: string
   name: string
@@ -15,6 +16,7 @@ export type StaffRow = {
   notes: string
   service_ids: string[]
   working_days: string[]
+  working_hours: Record<string, DayHours>
 }
 
 export const WORKING_DAYS: { code: string; label: string }[] = [
@@ -42,6 +44,18 @@ export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
       Array.isArray(rawDays) ? rawDays.map((x) => String(x).trim().toLowerCase()) : [],
     )
     const working_days = _WORKING_DAY_ORDER.filter((d) => daySet.has(d))
+    const working_hours: Record<string, DayHours> = {}
+    const rawHours = o.working_hours
+    if (rawHours && typeof rawHours === 'object') {
+      for (const d of _WORKING_DAY_ORDER) {
+        const w = (rawHours as Record<string, unknown>)[d]
+        if (w && typeof w === 'object') {
+          const start = String((w as Record<string, unknown>).start ?? '').trim()
+          const end = String((w as Record<string, unknown>).end ?? '').trim()
+          if (start && end) working_hours[d] = { start, end }
+        }
+      }
+    }
     return {
       id,
       name: String(o.name ?? '').trim(),
@@ -50,6 +64,7 @@ export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
       notes: String(o.notes ?? ''),
       service_ids,
       working_days,
+      working_hours,
     }
   })
 }
@@ -102,6 +117,7 @@ export function StaffMembersSection({
     notes: '',
     service_ids: [] as string[],
     working_days: [] as string[],
+    working_hours: {} as Record<string, DayHours>,
   })
   const [draftError, setDraftError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -121,7 +137,7 @@ export function StaffMembersSection({
     setMode(opts.mode)
     if (opts.mode === 'add') {
       setEditId(null)
-      setDraft({ name: '', phone: '', email: '', notes: '', service_ids: [], working_days: [] })
+      setDraft({ name: '', phone: '', email: '', notes: '', service_ids: [], working_days: [], working_hours: {} })
     } else if (opts.row) {
       setEditId(opts.row.id)
       setDraft({
@@ -131,6 +147,7 @@ export function StaffMembersSection({
         notes: opts.row.notes,
         service_ids: [...opts.row.service_ids],
         working_days: [...(opts.row.working_days || [])],
+        working_hours: { ...(opts.row.working_hours || {}) },
       })
     }
     setOpen(true)
@@ -194,6 +211,7 @@ export function StaffMembersSection({
                 notes: draft.notes,
                 service_ids: draft.service_ids,
                 working_days: draft.working_days,
+                working_hours: draft.working_hours,
               },
             ]
           : staff.map((s) =>
@@ -206,6 +224,7 @@ export function StaffMembersSection({
                     notes: draft.notes,
                     service_ids: draft.service_ids,
                     working_days: draft.working_days,
+                    working_hours: draft.working_hours,
                   }
                 : s,
             )
@@ -219,6 +238,7 @@ export function StaffMembersSection({
           notes: s.notes || undefined,
           service_ids: s.service_ids.length ? s.service_ids : undefined,
           working_days: s.working_days?.length ? s.working_days : undefined,
+          working_hours: s.working_hours && Object.keys(s.working_hours).length ? s.working_hours : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)
@@ -247,6 +267,7 @@ export function StaffMembersSection({
           notes: s.notes || undefined,
           service_ids: s.service_ids.length ? s.service_ids : undefined,
           working_days: s.working_days?.length ? s.working_days : undefined,
+          working_hours: s.working_hours && Object.keys(s.working_hours).length ? s.working_hours : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)
@@ -547,12 +568,14 @@ export function StaffMembersSection({
                           type="button"
                           aria-pressed={on}
                           onClick={() =>
-                            setDraft((dr) => ({
-                              ...dr,
-                              working_days: on
+                            setDraft((dr) => {
+                              const nextDays = on
                                 ? dr.working_days.filter((c) => c !== d.code)
-                                : [...dr.working_days, d.code],
-                            }))
+                                : [...dr.working_days, d.code]
+                              const nextHours = { ...dr.working_hours }
+                              if (on) delete nextHours[d.code] // clear hours when day removed
+                              return { ...dr, working_days: nextDays, working_hours: nextHours }
+                            })
                           }
                           className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
                             on
@@ -565,6 +588,45 @@ export function StaffMembersSection({
                       )
                     })}
                   </div>
+                  {draft.working_days.length > 0 && (
+                    <div className="mt-3 space-y-1.5">
+                      <p className="text-xs text-gray-500">
+                        Hours per day (optional — leave blank for full shop hours):
+                      </p>
+                      {WORKING_DAYS.filter((d) => draft.working_days.includes(d.code)).map((d) => {
+                        const win = draft.working_hours[d.code] || { start: '', end: '' }
+                        const setHour = (field: 'start' | 'end', val: string) =>
+                          setDraft((dr) => {
+                            const cur = dr.working_hours[d.code] || { start: '', end: '' }
+                            const next = { ...cur, [field]: val }
+                            const wh = { ...dr.working_hours }
+                            if (next.start || next.end) wh[d.code] = next
+                            else delete wh[d.code]
+                            return { ...dr, working_hours: wh }
+                          })
+                        return (
+                          <div key={d.code} className="flex items-center gap-2 text-sm">
+                            <span className="w-10 shrink-0 text-gray-600">{d.label}</span>
+                            <input
+                              type="time"
+                              value={win.start}
+                              onChange={(e) => setHour('start', e.target.value)}
+                              className="rounded-lg border border-gray-300 px-2 py-1 text-sm"
+                              aria-label={`${d.label} start time`}
+                            />
+                            <span className="text-gray-400">to</span>
+                            <input
+                              type="time"
+                              value={win.end}
+                              onChange={(e) => setHour('end', e.target.value)}
+                              className="rounded-lg border border-gray-300 px-2 py-1 text-sm"
+                              aria-label={`${d.label} end time`}
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </motion.div>
                 {availableServices.length > 0 ? (
                   <motion.div layout>
