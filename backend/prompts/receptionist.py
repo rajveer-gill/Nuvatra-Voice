@@ -351,7 +351,13 @@ def build_system_prompt(
                     "'ONLY suggest these times' for a date, suggest ONLY those times—never suggest a time "
                     "that is 'already taken' for that date. If the list is empty, all times are available."
                 )
-            slots_block = f"\n- {slots_text}\n{slots_critical}"
+            slots_block = (
+                f"\n- {slots_text}\n{slots_critical}"
+                "\n- ONLY the exact date-and-time entries listed above are taken. EVERY other time, "
+                "and EVERY day with no entries listed (e.g. a day not shown above at all), is fully OPEN. "
+                "NEVER tell a caller a requested time is taken, booked, or unavailable unless that EXACT date "
+                "and time appears in the taken list above—do not invent or guess conflicts. If unsure, treat it as available."
+            )
         else:
             slots_block = (
                 "\n- Booked slots: none. CRITICAL: There are no booked slots, so ALL times are available. "
