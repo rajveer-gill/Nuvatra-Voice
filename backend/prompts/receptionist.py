@@ -391,8 +391,12 @@ def build_system_prompt(
             )
         else:
             service_booking_rules = (
-                "- SERVICES: This business has NOT configured a service menu in Settings. Do NOT ask callers to pick a service type—"
-                "the owner must add services online for that. Book using name, date, and time; put a short visit note in reason if they mention why they are coming.\n"
+                "- SERVICES: This business has NOT configured a service menu in Settings. You do NOT know what "
+                "services, prices, or packages this business offers, so NEVER invent, list, describe, or imply "
+                "specific services (do not guess based on the industry). If a caller asks what services we offer, "
+                "what we do, or for a list/prices, say you don't have the service list in front of you and offer "
+                "to take their booking or a message so the team can confirm the details. Do NOT ask callers to "
+                "pick a service type. Book using name, date, and time; put a short visit note in reason if they mention why they are coming.\n"
                 f"{staff_booking_rules}"
                 "- When they have confirmed name, date, time, and stylist preference when applicable, and the slot is available, "
             )

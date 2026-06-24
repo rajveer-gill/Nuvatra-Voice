@@ -34,6 +34,25 @@ def test_prompt_contains_booking_token_format(minimal_business):
     assert "Do NOT ask for email" in p
 
 
+def test_prompt_forbids_inventing_services_when_none_configured():
+    # No services configured: the AI must not invent/list services (it was making up
+    # salon services like "haircuts, coloring" on a fresh tenant).
+    biz = {"name": "Gills Salons", "hours": "9-5", "services": [], "staff": [{"name": "Jake"}], "business_type": "salon"}
+    p = build_system_prompt(business_info=biz, include_booked_slots=True)
+    low = p.lower()
+    assert "not configured a service menu" in low
+    assert "never invent" in low
+    assert "don't have the service list" in low or "do not have the service list" in low
+
+
+def test_prompt_uses_configured_service_menu_when_present(minimal_business):
+    # With services present, the prompt should reference the configured menu, not the
+    # "no service menu" guidance.
+    p = build_system_prompt(business_info=minimal_business, include_booked_slots=True)
+    assert "configured service menu" in p.lower()
+    assert "not configured a service menu" not in p.lower()
+
+
 def test_prompt_take_a_message_when_no_transfer_line(minimal_business):
     on = build_system_prompt(
         business_info={**minimal_business, "transfer_takes_message": True},
