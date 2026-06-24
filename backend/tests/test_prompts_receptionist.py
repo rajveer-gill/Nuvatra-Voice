@@ -44,7 +44,7 @@ def test_prompt_includes_stylist_working_days():
     }
     p = build_system_prompt(business_info=biz, include_booked_slots=True)
     assert "Jake: works Monday, Tuesday, Wednesday" in p
-    assert "not available on days not listed" in p.lower()
+    assert "do not book them then" in p.lower()
 
 
 def test_prompt_no_working_days_section_when_unset():

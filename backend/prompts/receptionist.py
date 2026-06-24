@@ -310,29 +310,27 @@ def build_system_prompt(
                     + "\n".join(roster_lines)
                 )
 
-        # Per-stylist working days: if a caller asks for a stylist on a day that
-        # stylist doesn't work, the AI must NOT book them then.
-        _DAY_LABELS = {
-            "mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday",
-            "fri": "Friday", "sat": "Saturday", "sun": "Sunday",
-        }
+        # Per-stylist working days/hours: if a caller asks for a stylist on a day or
+        # time that stylist doesn't work, the AI must NOT book them then.
+        from staff_schedule import working_days_prompt_text
+
         schedule_lines: List[str] = []
         for s in staff:
             n = (s.get("name") or "").strip()
             if not n:
                 continue
-            days = [d for d in (s.get("working_days") or []) if d in _DAY_LABELS]
-            if days:
-                label = ", ".join(_DAY_LABELS[d] for d in days)
-                schedule_lines.append(f"  • {n}: works {label}")
+            sched = working_days_prompt_text(s)
+            if sched:
+                schedule_lines.append(f"  • {n}: works {sched}")
         if schedule_lines:
             staff_block += (
-                "\n- Stylist working days (a stylist is NOT available on days not listed for them):\n"
+                "\n- Stylist working days (a stylist is NOT available on days, or outside the hours, listed for them):\n"
                 + "\n".join(schedule_lines)
-                + "\n  When a caller asks to book with a specific stylist on a day that stylist does NOT work, "
-                "do NOT book them for that day. Tell the caller that stylist isn't in that day, and offer either "
-                "a day the stylist works or another available stylist. Only applies to stylists listed above; "
-                "stylists with no working days listed can be booked any day the shop is open."
+                + "\n  When a caller asks to book with a specific stylist on a day that stylist does NOT work "
+                "(or at a time outside their listed hours for that day), do NOT book them then. Tell the caller "
+                "that stylist isn't available then, and offer either a day/time the stylist works or another "
+                "available stylist. Only applies to stylists listed above; stylists with no working days listed "
+                "can be booked any day the shop is open."
             )
 
     memory_block = ""

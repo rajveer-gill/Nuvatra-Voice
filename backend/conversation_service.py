@@ -717,6 +717,18 @@ def _validate_booking_requirements(
         )
         return False, msg, None, None
 
+    # Backstop: never book a stylist on a day/time they don't work, even if the AI tried to.
+    if staff_id and booking_date:
+        srow = next((s for s in staff_rows if str(s.get("id")) == str(staff_id)), None)
+        if srow:
+            import staff_schedule
+
+            unavailable = staff_schedule.staff_unavailable_message(
+                srow, booking_date, (booking.get("time") or "").strip()
+            )
+            if unavailable:
+                return False, unavailable, staff_id, service_name
+
     return True, None, staff_id, service_name
 
 
