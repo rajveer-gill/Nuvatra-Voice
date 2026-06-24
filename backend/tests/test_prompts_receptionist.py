@@ -34,6 +34,30 @@ def test_prompt_contains_booking_token_format(minimal_business):
     assert "Do NOT ask for email" in p
 
 
+def test_prompt_includes_stylist_working_days():
+    # The AI must know which days a stylist works and not book them on off days.
+    biz = {
+        "name": "Salon",
+        "hours": "9-5",
+        "services": [{"id": "s1", "name": "Cut"}],
+        "staff": [{"id": "1", "name": "Jake", "working_days": ["mon", "tue", "wed"]}],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=True)
+    assert "Jake: works Monday, Tuesday, Wednesday" in p
+    assert "not available on days not listed" in p.lower()
+
+
+def test_prompt_no_working_days_section_when_unset():
+    biz = {
+        "name": "Salon",
+        "hours": "9-5",
+        "services": [{"id": "s1", "name": "Cut"}],
+        "staff": [{"id": "1", "name": "Jake"}],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=True)
+    assert "working days" not in p.lower()
+
+
 def test_prompt_only_listed_times_are_taken_no_invented_conflicts():
     # With one taken slot, the AI must treat every OTHER time/day as open and never
     # invent conflicts (it was telling callers an empty day's time was "taken").

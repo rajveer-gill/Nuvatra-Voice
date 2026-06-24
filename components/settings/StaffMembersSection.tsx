@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import type { AxiosInstance } from 'axios'
-import { Calendar, CheckCircle2, ChevronRight, Mail, Pencil, Phone, Plus, Tag, Trash2, User, Users, X } from 'lucide-react'
+import { Calendar, CheckCircle2, ChevronRight, Clock, Mail, Pencil, Phone, Plus, Tag, Trash2, User, Users, X } from 'lucide-react'
 import type { ServiceRow } from '@/components/settings/StructuredListEditors'
 import { fadeUpChild, staggerContainer } from '@/components/motion'
 
@@ -14,7 +14,19 @@ export type StaffRow = {
   email: string
   notes: string
   service_ids: string[]
+  working_days: string[]
 }
+
+export const WORKING_DAYS: { code: string; label: string }[] = [
+  { code: 'mon', label: 'Mon' },
+  { code: 'tue', label: 'Tue' },
+  { code: 'wed', label: 'Wed' },
+  { code: 'thu', label: 'Thu' },
+  { code: 'fri', label: 'Fri' },
+  { code: 'sat', label: 'Sat' },
+  { code: 'sun', label: 'Sun' },
+]
+const _WORKING_DAY_ORDER = WORKING_DAYS.map((d) => d.code)
 
 export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
   if (!Array.isArray(raw)) return []
@@ -25,6 +37,11 @@ export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
     const service_ids = Array.isArray(rawSvc)
       ? rawSvc.map((x) => String(x).trim()).filter(Boolean)
       : []
+    const rawDays = o.working_days
+    const daySet = new Set(
+      Array.isArray(rawDays) ? rawDays.map((x) => String(x).trim().toLowerCase()) : [],
+    )
+    const working_days = _WORKING_DAY_ORDER.filter((d) => daySet.has(d))
     return {
       id,
       name: String(o.name ?? '').trim(),
@@ -32,6 +49,7 @@ export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
       email: String(o.email ?? '').trim(),
       notes: String(o.notes ?? ''),
       service_ids,
+      working_days,
     }
   })
 }
@@ -77,7 +95,14 @@ export function StaffMembersSection({
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<'add' | 'edit'>('add')
   const [editId, setEditId] = useState<string | null>(null)
-  const [draft, setDraft] = useState({ name: '', phone: '', email: '', notes: '', service_ids: [] as string[] })
+  const [draft, setDraft] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    notes: '',
+    service_ids: [] as string[],
+    working_days: [] as string[],
+  })
   const [draftError, setDraftError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -96,7 +121,7 @@ export function StaffMembersSection({
     setMode(opts.mode)
     if (opts.mode === 'add') {
       setEditId(null)
-      setDraft({ name: '', phone: '', email: '', notes: '', service_ids: [] })
+      setDraft({ name: '', phone: '', email: '', notes: '', service_ids: [], working_days: [] })
     } else if (opts.row) {
       setEditId(opts.row.id)
       setDraft({
@@ -105,6 +130,7 @@ export function StaffMembersSection({
         email: opts.row.email,
         notes: opts.row.notes,
         service_ids: [...opts.row.service_ids],
+        working_days: [...(opts.row.working_days || [])],
       })
     }
     setOpen(true)
@@ -167,6 +193,7 @@ export function StaffMembersSection({
                 email: draft.email.trim(),
                 notes: draft.notes,
                 service_ids: draft.service_ids,
+                working_days: draft.working_days,
               },
             ]
           : staff.map((s) =>
@@ -178,6 +205,7 @@ export function StaffMembersSection({
                     email: draft.email.trim(),
                     notes: draft.notes,
                     service_ids: draft.service_ids,
+                    working_days: draft.working_days,
                   }
                 : s,
             )
@@ -190,6 +218,7 @@ export function StaffMembersSection({
           email: s.email || undefined,
           notes: s.notes || undefined,
           service_ids: s.service_ids.length ? s.service_ids : undefined,
+          working_days: s.working_days?.length ? s.working_days : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)
@@ -217,6 +246,7 @@ export function StaffMembersSection({
           email: s.email || undefined,
           notes: s.notes || undefined,
           service_ids: s.service_ids.length ? s.service_ids : undefined,
+          working_days: s.working_days?.length ? s.working_days : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)
@@ -387,6 +417,12 @@ export function StaffMembersSection({
                       ) : availableServices.length > 0 ? (
                         <span className="text-[10px] text-gray-400 mt-1 block">All services (none selected)</span>
                       ) : null}
+                      {s.working_days?.length ? (
+                        <span className="mt-1 flex items-center gap-1 text-[10px] text-gray-500">
+                          <Clock className="w-2.5 h-2.5 shrink-0" />
+                          {WORKING_DAYS.filter((d) => s.working_days.includes(d.code)).map((d) => d.label).join(', ')}
+                        </span>
+                      ) : null}
                     </span>
                     <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-teal-600 shrink-0" />
                   </button>
@@ -496,6 +532,40 @@ export function StaffMembersSection({
                     maxLength={254}
                   />
                 </div>
+                <motion.div layout>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Working days (optional)</label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Pick the days this person works. Callers won&apos;t be booked with them on other days. Leave all
+                    unselected if they work whenever the shop is open.
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {WORKING_DAYS.map((d) => {
+                      const on = draft.working_days.includes(d.code)
+                      return (
+                        <button
+                          key={d.code}
+                          type="button"
+                          aria-pressed={on}
+                          onClick={() =>
+                            setDraft((dr) => ({
+                              ...dr,
+                              working_days: on
+                                ? dr.working_days.filter((c) => c !== d.code)
+                                : [...dr.working_days, d.code],
+                            }))
+                          }
+                          className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+                            on
+                              ? 'border-teal-500 bg-teal-50 text-teal-700'
+                              : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                          }`}
+                        >
+                          {d.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </motion.div>
                 {availableServices.length > 0 ? (
                   <motion.div layout>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Services they provide</label>
