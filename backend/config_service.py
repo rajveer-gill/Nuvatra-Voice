@@ -519,9 +519,23 @@ def human_handoff_configured(info: Optional[dict] = None) -> bool:
     return forwarding_phone_ready(data) or transfer_takes_message(data)
 
 
+def services_configured(info: Optional[dict] = None) -> bool:
+    """True when at least one service is configured in the menu.
+
+    Required for calls: with no services the AI has nothing real to offer and tends to
+    invent them, so it should not take calls until the owner adds a service menu.
+    """
+    data = info if info is not None else get_business_info()
+    return len(_normalize_service_entries(data.get("services") or [])) >= 1
+
+
 def voice_receptionist_ready(info: Optional[dict] = None) -> bool:
-    """True when the team roster and a human-handoff path are configured for full AI receptionist calls."""
-    return staff_roster_ready_for_booking(info) and human_handoff_configured(info)
+    """True when the team roster, a human-handoff path, and a service menu are configured for full AI receptionist calls."""
+    return (
+        staff_roster_ready_for_booking(info)
+        and human_handoff_configured(info)
+        and services_configured(info)
+    )
 
 
 def mark_forwarding_verified_if_match(client_id: str, forwarded_from: str) -> bool:

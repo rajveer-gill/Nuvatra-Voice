@@ -945,6 +945,7 @@ from config_service import (  # noqa: E402,F401
     forwarding_phone_ready,
     transfer_takes_message,
     human_handoff_configured,
+    services_configured,
     voice_receptionist_ready,
 )
 
