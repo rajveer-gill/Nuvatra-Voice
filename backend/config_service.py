@@ -156,6 +156,8 @@ def _config_data_to_business_info(data: dict) -> dict:
         # instructions in onboarding/Settings.
         "number_mode": data.get("number_mode") or "new",
         "existing_business_number": data.get("existing_business_number", ""),
+        # Dates (YYYY-MM-DD) the whole shop is closed (holidays, etc.).
+        "closures": data.get("closures") or [],
         # When True, the business has no separate transfer line (e.g. their published
         # number IS the AI line in "existing" mode). Instead of dialing a real person,
         # the AI takes a message so the team can call back. This is one of two ways to

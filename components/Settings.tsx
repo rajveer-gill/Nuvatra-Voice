@@ -34,6 +34,7 @@ import {
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
 import { LockedFeature } from '@/components/ui/LockedFeature'
 import { StaffMembersSection, normalizeStaffFromApi, type StaffRow } from '@/components/settings/StaffMembersSection'
+import { TimeOffModal } from '@/components/settings/TimeOffModal'
 import {
   TransferTargetsSection,
   normalizeTransferFromApi,
@@ -132,6 +133,8 @@ export default function Settings() {
     greeting: '',
   })
   const [serviceItems, setServiceItems] = useState<ServiceRow[]>([])
+  const [closures, setClosures] = useState<string[]>([])
+  const [timeOffOpen, setTimeOffOpen] = useState(false)
   const [specialItems, setSpecialItems] = useState<SpecialRow[]>([])
   const [ruleItems, setRuleItems] = useState<RuleRow[]>([])
   const [industryLocked, setIndustryLocked] = useState(false)
@@ -256,6 +259,13 @@ export default function Settings() {
           setServiceItems(normalizeServices(d.services))
           setSpecialItems(normalizeSpecials(d.specials))
           setRuleItems(normalizeRules(d.reservation_rules))
+          setClosures(
+            Array.isArray(d.closures)
+              ? Array.from(
+                  new Set((d.closures as unknown[]).map((x) => String(x).trim()).filter((s) => /^\d{4}-\d{2}-\d{2}$/.test(s))),
+                ).sort()
+              : [],
+          )
           setIndustryLocked(!!d.business_type_admin_locked)
           setVerticalLabel(String(d.business_vertical_label || ''))
         } catch (e) {
@@ -444,6 +454,11 @@ export default function Settings() {
             email: s.email.trim() || undefined,
             notes: s.notes || undefined,
             service_ids: s.service_ids.length ? s.service_ids : undefined,
+            // Preserve scheduling fields — omitting them here would wipe stylist
+            // schedules / time off on a normal Settings save.
+            working_days: s.working_days?.length ? s.working_days : undefined,
+            working_hours: s.working_hours && Object.keys(s.working_hours).length ? s.working_hours : undefined,
+            time_off: s.time_off?.length ? s.time_off : undefined,
           })),
         services: serviceItems.length ? serviceItems : undefined,
         specials: specialItems.length ? specialItems : undefined,
@@ -1203,10 +1218,20 @@ export default function Settings() {
           Team roster
           <span className="text-rose-500 text-base" aria-label="required">*</span>
         </h2>
-        <p className="text-gray-600 text-sm mb-6 max-w-3xl">
+        <p className="text-gray-600 text-sm mb-4 max-w-3xl">
           Staff your callers can book with (stylists, artists, providers, chairs). Add as many as you need. This list is only for
           scheduling and AI context, not live call transfers.
         </p>
+        {staff.some((s) => s.name.trim()) && (
+          <button
+            type="button"
+            onClick={() => setTimeOffOpen(true)}
+            className="mb-4 inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Clock className="h-4 w-4 text-teal-600" />
+            Time off
+          </button>
+        )}
         <StaffMembersSection
           staff={staff}
           availableServices={serviceItems}
@@ -1214,6 +1239,19 @@ export default function Settings() {
           api={api}
           onNotify={setMessage}
           onAfterSave={refreshSetupStatus}
+        />
+        <TimeOffModal
+          open={timeOffOpen}
+          onClose={() => setTimeOffOpen(false)}
+          staff={staff}
+          closures={closures}
+          api={api}
+          onSaved={(nextStaff, nextClosures) => {
+            setStaff(nextStaff)
+            setClosures(nextClosures)
+            refreshSetupStatus()
+          }}
+          onNotify={setMessage}
         />
       </SettingsSection>
 

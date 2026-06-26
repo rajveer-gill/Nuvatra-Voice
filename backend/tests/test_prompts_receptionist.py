@@ -34,6 +34,25 @@ def test_prompt_contains_booking_token_format(minimal_business):
     assert "Do NOT ask for email" in p
 
 
+def test_prompt_includes_time_off_and_closures(monkeypatch):
+    # Pin "today" so upcoming-date filtering is deterministic.
+    from datetime import datetime
+    import business_hours
+
+    monkeypatch.setattr(business_hours, "business_local_now", lambda info=None: datetime(2026, 7, 1, 12, 0))
+    biz = {
+        "name": "Salon",
+        "hours": "9-5",
+        "services": [{"id": "s1", "name": "Cut"}],
+        "staff": [{"id": "1", "name": "Jake", "time_off": ["2026-07-03", "2026-07-04"]}],
+        "closures": ["2026-07-06"],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=True)
+    assert "Jake: OFF (not available) on Jul 3–4" in p
+    assert "SHOP CLOSED" in p
+    assert "Jul 6" in p
+
+
 def test_prompt_includes_stylist_working_days():
     # The AI must know which days a stylist works and not book them on off days.
     biz = {

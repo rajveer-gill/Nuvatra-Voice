@@ -310,27 +310,34 @@ def build_system_prompt(
                     + "\n".join(roster_lines)
                 )
 
-        # Per-stylist working days/hours: if a caller asks for a stylist on a day or
-        # time that stylist doesn't work, the AI must NOT book them then.
-        from staff_schedule import working_days_prompt_text
+        # Per-stylist working days/hours + specific time off: if a caller asks for a
+        # stylist on a day/time they don't work or are off, the AI must NOT book them then.
+        from staff_schedule import working_days_prompt_text, time_off_prompt_text
+        from business_hours import business_local_now
 
+        sched_today = business_local_now(business_info).date()
         schedule_lines: List[str] = []
         for s in staff:
             n = (s.get("name") or "").strip()
             if not n:
                 continue
+            parts: List[str] = []
             sched = working_days_prompt_text(s)
             if sched:
-                schedule_lines.append(f"  • {n}: works {sched}")
+                parts.append(f"works {sched}")
+            off = time_off_prompt_text(s, today=sched_today)
+            if off:
+                parts.append(f"OFF (not available) on {off}")
+            if parts:
+                schedule_lines.append(f"  • {n}: {'; '.join(parts)}")
         if schedule_lines:
             staff_block += (
-                "\n- Stylist working days (a stylist is NOT available on days, or outside the hours, listed for them):\n"
+                "\n- Stylist availability (a stylist is NOT available on days/times not listed for them, or on their OFF dates):\n"
                 + "\n".join(schedule_lines)
-                + "\n  When a caller asks to book with a specific stylist on a day that stylist does NOT work "
-                "(or at a time outside their listed hours for that day), do NOT book them then. Tell the caller "
-                "that stylist isn't available then, and offer either a day/time the stylist works or another "
-                "available stylist. Only applies to stylists listed above; stylists with no working days listed "
-                "can be booked any day the shop is open."
+                + "\n  When a caller asks to book with a specific stylist on a day that stylist does NOT work, "
+                "at a time outside their hours for that day, or on a date they are OFF, do NOT book them then. "
+                "Tell the caller that stylist isn't available then, and offer either a day/time the stylist works "
+                "or another available stylist. Stylists with no availability listed can be booked any day the shop is open."
             )
 
     memory_block = ""
@@ -493,12 +500,30 @@ def build_system_prompt(
             "then capture it with the MESSAGE: line as described above. Ask only what it's "
             "regarding—do not ask for their phone number; we already have it from caller ID."
         )
+    # Shop-wide closures (holidays etc.): never book ANY appointment on these dates.
+    closures_block = ""
+    try:
+        from staff_schedule import closures_prompt_text
+        from business_hours import business_local_now
+
+        _closures = closures_prompt_text(
+            business_info.get("closures") or [], today=business_local_now(business_info).date()
+        )
+        if _closures:
+            closures_block = (
+                f"\n- SHOP CLOSED: The whole business is closed on these dates: {_closures}. "
+                "NEVER book any appointment (with any stylist) on a closed date. If a caller asks for a "
+                "closed date, tell them we're closed that day and offer another day."
+            )
+    except Exception:
+        closures_block = ""
+
     base_prompt = f"""{header}
 
 {focus_block}
 
 You can help with:
-{help_section}{staff_block}{memory_block}{slots_block}{message_block}"""
+{help_section}{staff_block}{memory_block}{slots_block}{closures_block}{message_block}"""
 
     if detected_language != "English":
         return (
