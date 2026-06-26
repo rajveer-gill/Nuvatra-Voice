@@ -22,6 +22,18 @@ import { staggerContainer } from '@/components/motion/variants'
 
 export type { Appointment } from '@/components/appointments/types'
 
+// JS getDay() is 0=Sun..6=Sat; staff working_days use these keys (see staff_schedule.DAY_ORDER).
+const DOW_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const
+const DOW_LABEL: Record<string, string> = {
+  sun: 'Sundays',
+  mon: 'Mondays',
+  tue: 'Tuesdays',
+  wed: 'Wednesdays',
+  thu: 'Thursdays',
+  fri: 'Fridays',
+  sat: 'Saturdays',
+}
+
 export default function Appointments() {
   const api = useApiClient()
   const reduceMotion = useReducedMotion()
@@ -48,6 +60,14 @@ export default function Appointments() {
   const [declinePreview, setDeclinePreview] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [staffOptions, setStaffOptions] = useState<{ id: string; name: string }[]>([])
+  // Full schedule (time off + working days) keyed by staff id, plus shop closures and
+  // configured service names — used to warn before saving a conflicting manual booking
+  // and to power the service picker.
+  const [staffSchedule, setStaffSchedule] = useState<
+    Record<string, { name: string; time_off: string[]; working_days: string[] }>
+  >({})
+  const [closures, setClosures] = useState<string[]>([])
+  const [serviceNames, setServiceNames] = useState<string[]>([])
   const [calendarHolds, setCalendarHolds] = useState<
     { date: string; time: string; appointment_id?: number; status: string; name: string }[]
   >([])
@@ -94,15 +114,62 @@ export default function Appointments() {
     api
       .get('/api/business-info')
       .then((r) => {
-        const st = (r.data?.staff || []) as { id?: string; name?: string }[]
-        setStaffOptions(
-          st.filter((s) => s.id && s.name).map((s) => ({ id: s.id as string, name: s.name as string }))
+        const st = (r.data?.staff || []) as {
+          id?: string
+          name?: string
+          time_off?: string[]
+          working_days?: string[]
+        }[]
+        const named = st.filter((s) => s.id && s.name)
+        setStaffOptions(named.map((s) => ({ id: s.id as string, name: s.name as string })))
+        setStaffSchedule(
+          Object.fromEntries(
+            named.map((s) => [
+              s.id as string,
+              {
+                name: s.name as string,
+                time_off: Array.isArray(s.time_off) ? s.time_off : [],
+                working_days: Array.isArray(s.working_days) ? s.working_days : [],
+              },
+            ])
+          )
         )
+        setClosures(Array.isArray(r.data?.closures) ? r.data.closures : [])
+        const svcs = (r.data?.services || []) as { name?: string }[]
+        setServiceNames(svcs.map((s) => (s?.name || '').trim()).filter(Boolean))
       })
-      .catch(() => setStaffOptions([]))
+      .catch(() => {
+        setStaffOptions([])
+        setStaffSchedule({})
+        setClosures([])
+        setServiceNames([])
+      })
   }, [api])
 
   const staffNameById = Object.fromEntries(staffOptions.map((s) => [s.id, s.name]))
+
+  // Non-blocking heads-up for the New appointment form: flags when the chosen date is a
+  // shop closure or the selected stylist is off / doesn't work that weekday. The owner can
+  // still save (manual override) — this mirrors staff_schedule.appointment_conflict so the
+  // form agrees with how booked appointments are highlighted.
+  const createConflict = useMemo(() => {
+    const d = form.date.trim()
+    if (!d) return null
+    if (closures.includes(d)) return 'The shop is closed that day.'
+    const sid = form.staff_id.trim()
+    const sched = sid ? staffSchedule[sid] : undefined
+    if (sched) {
+      if (sched.time_off.includes(d)) return `${sched.name} is off that day.`
+      const [y, m, day] = d.split('-').map(Number)
+      if (y && m && day) {
+        const dow = DOW_KEYS[new Date(y, m - 1, day).getDay()]
+        if (sched.working_days.length && !sched.working_days.includes(dow)) {
+          return `${sched.name} doesn't usually work ${DOW_LABEL[dow]}.`
+        }
+      }
+    }
+    return null
+  }, [form.date, form.staff_id, closures, staffSchedule])
 
   const visibleAppointments = useMemo(
     () => appointments.filter((a) => !isHiddenAppointmentStatus(a.status)),
@@ -496,7 +563,6 @@ export default function Appointments() {
                       { key: 'email', label: 'Email', type: 'email' },
                       { key: 'date', label: 'Date *', type: 'date', required: true },
                       { key: 'time', label: 'Time *', type: 'time', required: true },
-                      { key: 'reason', label: 'Service', type: 'text' },
                     ].map((field) => (
                       <div key={field.key}>
                         <label className="mb-1 block text-xs font-medium text-zinc-400">
@@ -513,7 +579,55 @@ export default function Appointments() {
                         />
                       </div>
                     ))}
+
+                    {/* Stylist — assigning lets us flag this booking if the stylist is off
+                        that day, and ties it to the right person on the calendar. */}
+                    {staffOptions.length > 0 && (
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-zinc-400">Stylist</label>
+                        <select
+                          value={form.staff_id}
+                          onChange={(e) => setForm((f) => ({ ...f, staff_id: e.target.value }))}
+                          className="w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                        >
+                          <option value="">Any stylist</option>
+                          {staffOptions.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {/* Service — type freely or pick from the configured menu. */}
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-zinc-400">Service</label>
+                      <input
+                        type="text"
+                        list="apt-service-options"
+                        value={form.reason}
+                        onChange={(e) => setForm((f) => ({ ...f, reason: e.target.value }))}
+                        placeholder={serviceNames.length ? 'Type or pick a service' : undefined}
+                        className="w-full rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                      />
+                      {serviceNames.length > 0 && (
+                        <datalist id="apt-service-options">
+                          {serviceNames.map((n) => (
+                            <option key={n} value={n} />
+                          ))}
+                        </datalist>
+                      )}
+                    </div>
                   </div>
+
+                  {createConflict && (
+                    <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-200">
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{createConflict} You can still save this if it&rsquo;s intentional.</span>
+                    </div>
+                  )}
+
                   <div className="mt-4 flex gap-2">
                     <button
                       type="submit"
