@@ -675,6 +675,12 @@ def _validate_booking_requirements(
                 return False, same_day_after_hours_message(biz), staff_id, None
         except ValueError:
             pass
+        # Shop-wide closure: never book on a closed date, regardless of stylist.
+        import staff_schedule
+
+        closed_msg = staff_schedule.shop_closure_message(biz.get("closures"), booking_date)
+        if closed_msg:
+            return False, closed_msg, staff_id, None
 
     ctx = booking_context_from_business(biz)
     service_choices = ", ".join(

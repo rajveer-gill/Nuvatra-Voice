@@ -59,6 +59,8 @@ class StaffMember(BaseModel):
     # Optional per-day hour windows {day: {"start": "HH:MM", "end": "HH:MM"}}.
     # A working day with no entry = full shop hours that day.
     working_hours: dict = Field(default_factory=dict)
+    # Specific dates (YYYY-MM-DD) this person is off (sick / vacation). Validated + capped.
+    time_off: List[str] = Field(default_factory=list)
 
     @field_validator("working_days", mode="before")
     @classmethod
@@ -73,6 +75,13 @@ class StaffMember(BaseModel):
         import staff_schedule
 
         return staff_schedule.normalize_working_hours(v)
+
+    @field_validator("time_off", mode="before")
+    @classmethod
+    def _normalize_time_off(cls, v):
+        import staff_schedule
+
+        return staff_schedule.normalize_date_list(v)
 
     @field_validator("id", mode="before")
     @classmethod
@@ -174,6 +183,8 @@ class BusinessInfoUpdate(BaseModel):
     business_type: Optional[str] = None
     staff: Optional[List[StaffMember]] = None
     transfer_targets: Optional[List[TransferTarget]] = None
+    # Dates (YYYY-MM-DD) the whole shop is closed (holidays, etc.). Validated + capped.
+    closures: Optional[List[str]] = None
     # When True, the AI takes a message instead of transferring "talk to a real person"
     # calls (for businesses whose only number forwards to the AI line). Replaces the need
     # for a separate forwarding_phone to satisfy call-readiness.
@@ -366,6 +377,8 @@ def finalize_staff_records_for_storage(
             row["working_days"] = list(m.working_days)
         if m.working_hours:
             row["working_hours"] = dict(m.working_hours)
+        if m.time_off:
+            row["time_off"] = list(m.time_off)
         out.append(row)
     return out
 
@@ -625,6 +638,10 @@ async def api_update_business_info(
         data["forwarding_phone"] = update.forwarding_phone
     if update.transfer_takes_message is not None:
         data["transfer_takes_message"] = bool(update.transfer_takes_message)
+    if update.closures is not None:
+        import staff_schedule
+
+        data["closures"] = staff_schedule.normalize_date_list(update.closures)
     if update.email is not None:
         data["email"] = update.email
     if update.address is not None:

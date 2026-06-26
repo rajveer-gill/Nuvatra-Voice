@@ -17,6 +17,7 @@ export type StaffRow = {
   service_ids: string[]
   working_days: string[]
   working_hours: Record<string, DayHours>
+  time_off: string[]
 }
 
 export const WORKING_DAYS: { code: string; label: string }[] = [
@@ -56,6 +57,10 @@ export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
         }
       }
     }
+    const rawOff = o.time_off
+    const time_off = Array.isArray(rawOff)
+      ? Array.from(new Set(rawOff.map((x) => String(x).trim()).filter((s) => /^\d{4}-\d{2}-\d{2}$/.test(s)))).sort()
+      : []
     return {
       id,
       name: String(o.name ?? '').trim(),
@@ -65,6 +70,7 @@ export function normalizeStaffFromApi(raw: unknown): StaffRow[] {
       service_ids,
       working_days,
       working_hours,
+      time_off,
     }
   })
 }
@@ -212,6 +218,7 @@ export function StaffMembersSection({
                 service_ids: draft.service_ids,
                 working_days: draft.working_days,
                 working_hours: draft.working_hours,
+                time_off: [],
               },
             ]
           : staff.map((s) =>
@@ -239,6 +246,7 @@ export function StaffMembersSection({
           service_ids: s.service_ids.length ? s.service_ids : undefined,
           working_days: s.working_days?.length ? s.working_days : undefined,
           working_hours: s.working_hours && Object.keys(s.working_hours).length ? s.working_hours : undefined,
+          time_off: s.time_off?.length ? s.time_off : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)
@@ -268,6 +276,7 @@ export function StaffMembersSection({
           service_ids: s.service_ids.length ? s.service_ids : undefined,
           working_days: s.working_days?.length ? s.working_days : undefined,
           working_hours: s.working_hours && Object.keys(s.working_hours).length ? s.working_hours : undefined,
+          time_off: s.time_off?.length ? s.time_off : undefined,
         })),
       })
       const next = normalizeStaffFromApi(data.staff)

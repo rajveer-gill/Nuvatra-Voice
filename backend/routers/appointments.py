@@ -119,9 +119,26 @@ def get_appointments(
     cid = deps._bind_tenant_db_context(tenant)
     orphans_removed = booking_service._reconcile_booked_slots_orphans() if runtime.USE_DB else 0
     lst = database.db_appointments_get_all(client_id=cid) if runtime.USE_DB else runtime.appointments
+    # Tag appointments that fall on a shop closure or the stylist's time-off / off day so the
+    # dashboard can highlight them. Build the lookup once (O(staff)), then O(1) per appointment.
+    import staff_schedule
+
+    _biz = config_service.get_business_info()
+    _closures = _biz.get("closures") or []
+    _staff_by_id = {
+        str(s.get("id")): s for s in (_biz.get("staff") or []) if s.get("id")
+    }
     for a in lst:
         a.setdefault("source", "manual")
         a.setdefault("status", "pending")
+        conflict = staff_schedule.appointment_conflict(
+            _staff_by_id.get(str(a.get("staff_id"))),
+            _closures,
+            a.get("date") or "",
+            (a.get("time") or "").strip(),
+        )
+        if conflict:
+            a["schedule_conflict"] = conflict
     holds = booking_service._voice_calendar_holds() if runtime.USE_DB else []
     diag = database.db_appointments_diagnostics(cid) if runtime.USE_DB else {}
     twilio_on_tenant = ((tenant or {}).get("twilio_phone_number") or "").strip() or None

@@ -63,7 +63,9 @@ export function AppointmentCard({
         delay: reduceMotion ? 0 : index * 0.06,
       }}
       whileHover={reduceMotion ? undefined : { y: -4, transition: { duration: 0.2 } }}
-      className="group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-zinc-800/90 via-zinc-900/95 to-zinc-950 p-5 shadow-lg shadow-black/20"
+      className={`group relative overflow-hidden rounded-2xl border bg-gradient-to-br from-zinc-800/90 via-zinc-900/95 to-zinc-950 p-5 shadow-lg shadow-black/20 ${
+        apt.schedule_conflict ? 'border-amber-400/60 ring-1 ring-amber-400/30' : 'border-white/10'
+      }`}
     >
       <div
         className="pointer-events-none absolute -right-8 -top-8 h-32 w-32 rounded-full bg-cyan-500/10 blur-2xl transition-opacity group-hover:opacity-100 opacity-60"
@@ -86,6 +88,15 @@ export function AppointmentCard({
               )}
               {STATUS_LABELS[apt.status] || apt.status}
             </span>
+            {apt.schedule_conflict && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-amber-400/20 px-2.5 py-0.5 text-xs font-semibold text-amber-300"
+                title="This appointment is on a day the stylist or shop is off. Reach out to the customer to reschedule."
+              >
+                <AlertTriangle className="h-3 w-3" />
+                {apt.schedule_conflict.label}
+              </span>
+            )}
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-400">
             <span className="inline-flex items-center gap-1.5">
