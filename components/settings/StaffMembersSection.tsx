@@ -92,11 +92,59 @@ function isValidOptionalStaffPhone(phone: string): boolean {
   return hasStaffPhone(t)
 }
 
+/** "HH:MM" -> minutes since midnight, or null if unparseable. */
+function hhmmToMinutes(hhmm: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim())
+  if (!m) return null
+  const h = parseInt(m[1], 10)
+  const min = parseInt(m[2], 10)
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null
+  return h * 60 + min
+}
+
+const _DAY_LABEL: Record<string, string> = Object.fromEntries(WORKING_DAYS.map((d) => [d.code, d.label]))
+
+/**
+ * Hard validation for staff working days/hours against the shop's open window.
+ * Returns an error message string, or null when valid. No-op when shopHours is undefined
+ * (hours not configured), so tenants aren't blocked before setting business hours.
+ */
+export function validateWorkingHours(
+  workingDays: string[],
+  workingHours: Record<string, DayHours>,
+  shopHours?: Record<string, DayHours>,
+): string | null {
+  if (!shopHours || !Object.keys(shopHours).length) return null
+  for (const code of workingDays) {
+    const label = _DAY_LABEL[code] ?? code
+    const shopWin = shopHours[code]
+    if (!shopWin) {
+      return `${label} is selected, but the shop is closed that day. Remove it or open the shop on ${label}.`
+    }
+    const win = workingHours[code]
+    if (!win || (!win.start && !win.end)) continue // blank = full shop hours, always fine
+    if (!win.start || !win.end) {
+      return `${label} needs both a start and end time, or leave both blank for full shop hours.`
+    }
+    const ws = hhmmToMinutes(win.start)
+    const we = hhmmToMinutes(win.end)
+    const ss = hhmmToMinutes(shopWin.start)
+    const se = hhmmToMinutes(shopWin.end)
+    if (ws === null || we === null) return `${label} has an invalid time.`
+    if (ws >= we) return `${label}: end time must be after the start time.`
+    if (ss !== null && se !== null && (ws < ss || we > se)) {
+      return `${label} hours (${win.start}–${win.end}) must fall within shop hours (${shopWin.start}–${shopWin.end}).`
+    }
+  }
+  return null
+}
+
 type Notify = (msg: { type: 'success' | 'error'; text: string } | null) => void
 
 export function StaffMembersSection({
   staff,
   availableServices,
+  shopHours,
   onStaffChange,
   api,
   onNotify,
@@ -104,11 +152,18 @@ export function StaffMembersSection({
 }: {
   staff: StaffRow[]
   availableServices: ServiceRow[]
+  /**
+   * Shop open hours keyed by day code (mon..sun). A present key = shop is open that day.
+   * When provided, closed days can't be picked and per-day time inputs are bounded to shop hours.
+   * Undefined = no restriction (hours not configured yet).
+   */
+  shopHours?: Record<string, DayHours>
   onStaffChange: (next: StaffRow[]) => void
   api: AxiosInstance
   onNotify: Notify
   onAfterSave?: () => void
 }) {
+  const openDaySet = shopHours && Object.keys(shopHours).length ? new Set(Object.keys(shopHours)) : null
   const reduceMotion = useReducedMotion()
   const dialogRef = useRef<HTMLDialogElement>(null)
   const firstFieldRef = useRef<HTMLInputElement>(null)
@@ -200,6 +255,11 @@ export function StaffMembersSection({
     }
     if (!isValidOptionalStaffPhone(phone)) {
       setDraftError('If you add a phone, use at least 10 digits (for SMS alerts and call transfers).')
+      return
+    }
+    const hoursError = validateWorkingHours(draft.working_days, draft.working_hours, shopHours)
+    if (hoursError) {
+      setDraftError(hoursError)
       return
     }
     setDraftError(null)
@@ -567,15 +627,21 @@ export function StaffMembersSection({
                   <p className="text-xs text-gray-500 mb-2">
                     Pick the days this person works. Callers won&apos;t be booked with them on other days. Leave all
                     unselected if they work whenever the shop is open.
+                    {openDaySet && ' Days the shop is closed are greyed out.'}
                   </p>
                   <div className="flex flex-wrap gap-1.5">
                     {WORKING_DAYS.map((d) => {
                       const on = draft.working_days.includes(d.code)
+                      // Closed shop day: block picking it, but still allow turning off a stale selection.
+                      const closedDay = !!openDaySet && !openDaySet.has(d.code)
+                      const disabled = closedDay && !on
                       return (
                         <button
                           key={d.code}
                           type="button"
                           aria-pressed={on}
+                          disabled={disabled}
+                          title={closedDay ? 'Shop is closed this day' : undefined}
                           onClick={() =>
                             setDraft((dr) => {
                               const nextDays = on
@@ -589,7 +655,9 @@ export function StaffMembersSection({
                           className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
                             on
                               ? 'border-teal-500 bg-teal-50 text-teal-700'
-                              : 'border-gray-200 text-gray-600 hover:border-gray-300'
+                              : disabled
+                                ? 'cursor-not-allowed border-gray-100 bg-gray-50 text-gray-300'
+                                : 'border-gray-200 text-gray-600 hover:border-gray-300'
                           }`}
                         >
                           {d.label}
@@ -604,6 +672,7 @@ export function StaffMembersSection({
                       </p>
                       {WORKING_DAYS.filter((d) => draft.working_days.includes(d.code)).map((d) => {
                         const win = draft.working_hours[d.code] || { start: '', end: '' }
+                        const shopWin = shopHours?.[d.code]
                         const setHour = (field: 'start' | 'end', val: string) =>
                           setDraft((dr) => {
                             const cur = dr.working_hours[d.code] || { start: '', end: '' }
@@ -619,6 +688,8 @@ export function StaffMembersSection({
                             <input
                               type="time"
                               value={win.start}
+                              min={shopWin?.start}
+                              max={shopWin?.end}
                               onChange={(e) => setHour('start', e.target.value)}
                               className="rounded-lg border border-gray-300 px-2 py-1 text-sm"
                               aria-label={`${d.label} start time`}
@@ -627,10 +698,17 @@ export function StaffMembersSection({
                             <input
                               type="time"
                               value={win.end}
+                              min={shopWin?.start}
+                              max={shopWin?.end}
                               onChange={(e) => setHour('end', e.target.value)}
                               className="rounded-lg border border-gray-300 px-2 py-1 text-sm"
                               aria-label={`${d.label} end time`}
                             />
+                            {shopWin && (
+                              <span className="text-[11px] text-gray-400">
+                                shop {shopWin.start}–{shopWin.end}
+                              </span>
+                            )}
                           </div>
                         )
                       })}

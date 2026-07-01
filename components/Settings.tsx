@@ -33,7 +33,7 @@ import {
 } from '@/components/settings/constants'
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
 import { LockedFeature } from '@/components/ui/LockedFeature'
-import { StaffMembersSection, normalizeStaffFromApi, type StaffRow } from '@/components/settings/StaffMembersSection'
+import { StaffMembersSection, normalizeStaffFromApi, WORKING_DAYS, type StaffRow } from '@/components/settings/StaffMembersSection'
 import { TimeOffModal } from '@/components/settings/TimeOffModal'
 import {
   TransferTargetsSection,
@@ -162,6 +162,20 @@ export default function Settings() {
     const { schedule } = parseHoursToWeekly(form.hours || '')
     const line = summarizeSchedule(schedule, 96)
     return (form.hours || '').trim() ? line : ''
+  }, [form.hours])
+
+  // Shop open hours keyed by day code (mon..sun), derived from business hours. Undefined when hours
+  // aren't set yet, so the staff working-day picker stays unrestricted. Schedule index 0=Mon..6=Sun
+  // matches WORKING_DAYS order. Only open days get a key.
+  const shopHours = useMemo(() => {
+    if (!(form.hours || '').trim()) return undefined
+    const { schedule } = parseHoursToWeekly(form.hours || '')
+    const map: Record<string, { start: string; end: string }> = {}
+    WORKING_DAYS.forEach((d, i) => {
+      const slot = schedule[i]
+      if (slot && !slot.closed) map[d.code] = { start: slot.open, end: slot.close }
+    })
+    return Object.keys(map).length ? map : undefined
   }, [form.hours])
 
   // Preload static voice samples so first play is instant
@@ -1235,6 +1249,7 @@ export default function Settings() {
         <StaffMembersSection
           staff={staff}
           availableServices={serviceItems}
+          shopHours={shopHours}
           onStaffChange={setStaff}
           api={api}
           onNotify={setMessage}
