@@ -357,6 +357,14 @@ def _assert_secure_production_config() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _assert_secure_production_config()
+    # Surface email wiring at boot (booleans only, no secrets) so a misconfigured host is
+    # obvious in the logs. GET /api/health/email reports the same at runtime.
+    try:
+        import email_notify
+
+        logger.info("email_config %s", email_notify.config_status())
+    except Exception:
+        pass
     # Init DB first (in thread so it doesn't block the event loop), then pre-warm OpenAI
     db_task = create_tracked_task(
         asyncio.to_thread(_init_db_background), name="init_db_background"
@@ -595,6 +603,7 @@ from routers import sms as sms_router
 from routers import phone as phone_router
 from routers import business as business_router
 from routers import core as core_router
+from routers import feedback as feedback_router
 
 app.include_router(health_router.router)
 app.include_router(leads_router.router)
@@ -610,6 +619,7 @@ app.include_router(sms_router.router)
 app.include_router(phone_router.router)
 app.include_router(business_router.router)
 app.include_router(core_router.router)
+app.include_router(feedback_router.router)
 
 # The inbound-SMS handler + its SMS-only helpers now live in routers/sms; re-export so
 # tests that inspect main.handle_incoming_sms or import _is_sms_confirmation keep working.

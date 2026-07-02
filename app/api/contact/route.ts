@@ -2,6 +2,15 @@ import { NextResponse } from 'next/server'
 
 type Body = { name?: string; email?: string; message?: string }
 
+/** Escape user-supplied text before embedding in the email HTML. */
+function esc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 export async function POST(request: Request) {
   let json: Body
   try {
@@ -25,41 +34,50 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: 'message_too_long' }, { status: 400 })
   }
 
-  const serviceId = process.env.EMAILJS_SERVICE_ID
-  const templateId = process.env.EMAILJS_TEMPLATE_ID
-  const userId = process.env.EMAILJS_PUBLIC_KEY
-  if (!serviceId || !templateId || !userId) {
+  // Resend transactional email. One provider powers the marketing contact form, the
+  // in-app feedback widget, and appointment/operator emails (backend email_notify.py).
+  const apiKey = process.env.RESEND_API_KEY
+  // Verified sender on your domain (e.g. contact@nuvatrahq.com). Falls back to the
+  // shared appointment sender so a single verified address can cover everything.
+  const from = process.env.CONTACT_FROM_EMAIL || process.env.APPOINTMENT_EMAIL_FROM
+  // Where contact submissions land. Defaults to the address shown on the form.
+  const to = process.env.CONTACT_TO_EMAIL || 'info@nuvatrahq.com'
+  if (!apiKey || !from) {
     return NextResponse.json({ ok: false, error: 'email_not_configured' }, { status: 503 })
   }
 
   const time = new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'long' })
-  const privateKey = process.env.EMAILJS_PRIVATE_KEY
+  const html = `
+    <p><strong>New contact form submission</strong></p>
+    <p><strong>Name:</strong> ${esc(name)}<br>
+    <strong>Email:</strong> ${esc(email)}<br>
+    <strong>Time:</strong> ${esc(time)}</p>
+    <p style="white-space:pre-wrap">${esc(message)}</p>
+  `.trim()
+  const text = `New contact form submission\n\nName: ${name}\nEmail: ${email}\nTime: ${time}\n\n${message}`
 
-  const payload: Record<string, unknown> = {
-    service_id: serviceId,
-    template_id: templateId,
-    user_id: userId,
-    template_params: {
-      name,
-      email,
-      message,
-      time,
-      reply_to: email,
-    },
+  let res: Response
+  try {
+    res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from,
+        to: [to],
+        subject: `Contact form: ${name}`,
+        html,
+        text,
+        reply_to: email,
+      }),
+    })
+  } catch (err) {
+    console.error('Resend contact send error', err)
+    return NextResponse.json({ ok: false, error: 'send_failed' }, { status: 502 })
   }
-  if (privateKey) {
-    payload.accessToken = privateKey
-  }
-
-  const res = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
 
   if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    console.error('EmailJS send failed', res.status, text)
+    const detail = await res.text().catch(() => '')
+    console.error('Resend contact send failed', res.status, detail)
     return NextResponse.json({ ok: false, error: 'send_failed' }, { status: 502 })
   }
 

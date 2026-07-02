@@ -24,6 +24,28 @@ def _from_address() -> str:
     return (os.getenv("APPOINTMENT_EMAIL_FROM") or os.getenv("RESEND_FROM") or "").strip()
 
 
+def config_status() -> dict:
+    """Booleans describing whether transactional email is configured on this (backend) host.
+
+    Reflects the exact env this module uses to send — a Resend key OR an SMTP host counts as a
+    transport. Values are booleans only; secret values are never returned. The marketing contact
+    form runs on the frontend (Netlify) and is not observable from here."""
+    resend = bool((os.getenv("RESEND_API_KEY") or "").strip())
+    smtp = bool((os.getenv("SMTP_HOST") or "").strip())
+    from_addr = bool(_from_address())
+    operator_alert_to = bool((os.getenv("OPERATOR_ALERT_EMAIL") or "").strip())
+    can_send = (resend or smtp) and from_addr
+    return {
+        "resend_key": resend,
+        "smtp_host": smtp,
+        "from_addr": from_addr,
+        "operator_alert_to": operator_alert_to,
+        "can_send": can_send,
+        # Feedback / operator alerts need a transport, a sender, AND a recipient.
+        "feedback_alerts_ready": can_send and operator_alert_to,
+    }
+
+
 def send_appointment_email(
     to: str,
     *,

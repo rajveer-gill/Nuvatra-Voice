@@ -524,6 +524,20 @@ def init_db() -> bool:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_client_created ON leads(client_id, created_at DESC)")
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id SERIAL PRIMARY KEY,
+                client_id TEXT,
+                user_email TEXT,
+                category TEXT NOT NULL DEFAULT 'other' CHECK (category IN ('bug', 'idea', 'other')),
+                message TEXT NOT NULL,
+                page_url TEXT,
+                user_agent TEXT,
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at DESC)")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS sms_automations (
                 id SERIAL PRIMARY KEY,
                 client_id TEXT NOT NULL,
@@ -2880,6 +2894,79 @@ def db_leads_get_by_id(lead_id: int, client_id: str) -> Optional[dict]:
         "source": row[4],
         "created_at": row[5].isoformat() if row[5] else "",
     }
+
+
+# --- Feedback (bug reports / suggestions) ---
+def db_feedback_insert(
+    category: str,
+    message: str,
+    client_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    page_url: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Optional[int]:
+    """Insert a feedback submission. Returns id or None on failure."""
+    if category not in ("bug", "idea", "other") or not (message or "").strip():
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO feedback (client_id, user_email, category, message, page_url, user_agent)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                client_id or None,
+                (user_email or "").strip() or None,
+                category,
+                message.strip(),
+                (page_url or "").strip()[:500] or None,
+                (user_agent or "").strip()[:500] or None,
+            ),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] Failed to insert feedback: {e}")
+        return None
+
+
+def db_feedback_get_all(limit: int = 200) -> List[dict]:
+    """Get feedback submissions across all tenants, newest first. Admin-only use."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, client_id, user_email, category, message, page_url, user_agent, status, created_at
+        FROM feedback ORDER BY created_at DESC LIMIT %s
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {
+            "id": r[0],
+            "client_id": r[1] or "",
+            "user_email": r[2] or "",
+            "category": r[3],
+            "message": r[4] or "",
+            "page_url": r[5] or "",
+            "user_agent": r[6] or "",
+            "status": r[7],
+            "created_at": r[8].isoformat() if r[8] else "",
+        }
+        for r in rows
+    ]
+
 
 # --- SMS Automations ---
 def db_sms_automations_get_all(client_id: str) -> List[dict]:

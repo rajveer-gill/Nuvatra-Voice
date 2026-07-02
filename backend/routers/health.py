@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 import database
+import email_notify
 import runtime
 
 router = APIRouter()
@@ -33,6 +34,14 @@ def health():
             content={"status": "degraded", "database": db_ok},
         )
     return {"status": "ok", "database": db_ok}
+
+
+@router.get("/api/health/email")
+def health_email():
+    """Read-only: is transactional email configured on the backend? Booleans only, no secret
+    values. Confirms feedback/appointment/operator emails can send. The marketing contact form
+    runs on the frontend (Netlify) and is not observable from here."""
+    return email_notify.config_status()
 
 
 def _sentry_debug_allowed(request: Request) -> bool:
