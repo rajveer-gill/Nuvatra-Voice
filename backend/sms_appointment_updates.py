@@ -19,16 +19,16 @@ _NAME_PATTERNS = (
 _TIME_PATTERNS = (
     re.compile(
         r"(?:can we|could we|let'?s)\s+(?:do|make it|switch to|change to|move to)\s+"
-        r"(\d{1,2})(?::(\d{2}))?\s*(?:am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?\b",
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?\b",
         re.I,
     ),
     re.compile(
         r"(?:change|move|switch|make it|update)\s+(?:the\s+)?(?:time\s+)?(?:to\s+)?"
-        r"(\d{1,2})(?::(\d{2}))?\s*(?:am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?\b",
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?\b",
         re.I,
     ),
     re.compile(
-        r"(?:at|to)\s+(\d{1,2})(?::(\d{2}))?\s*(?:am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?"
+        r"(?:at|to)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?\s*m\.?|p\.?\s*m\.?)?"
         r"\s*(?:instead|actually|please|works|ok)?",
         re.I,
     ),

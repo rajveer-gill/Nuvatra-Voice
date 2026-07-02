@@ -405,7 +405,9 @@ def _extract_booking_line_from_conversation(
         "If caller name, date, and time are all clearly agreed, reply with EXACTLY one line:\n"
         "BOOKING: name|phone|email|date|time|reason|staff\n"
         "Field order is FIXED: (1) caller name, (2) phone, (3) email, (4) date YYYY-MM-DD, "
-        "(5) time HH:MM 24h e.g. 15:00 for 3 PM — NEVER put a stylist name in the time field, "
+        "(5) time — copy the agreed clock time WITH its am/pm period exactly as spoken, "
+        "e.g. '3 PM', '9:30 AM', '12 PM' for noon; do NOT convert to 24-hour yourself. "
+        "NEVER put a stylist name in the time field, "
         "(6) service/reason from menu, (7) stylist name.\n"
         "Leave phone and email empty. reason=exact service from menu if known. "
         "staff=stylist name if chosen.\n"
@@ -831,6 +833,13 @@ def _create_appointment_from_booking(
         name=name,
         date=date,
         time=time,
+        # DIAGNOSTIC: the exact time string the model emitted, before normalization.
+        # If a caller asks for "2 PM" but this shows time_raw="12:00", the model
+        # mis-converted to 24h; if time_raw="2 PM" and time="14:00", normalization is fine.
+        # This is the line to grep (event=booking_created_pending_customer) if a stored
+        # time is ever wrong. Logs are ephemeral on the host, so check within retention.
+        time_raw=time_raw or None,
+        time_changed_by_normalize=(time_raw or "").strip() != time,
         staff_id=staff_key,
         slot_reserved_immediately=reserve_slot_immediately,
     )
