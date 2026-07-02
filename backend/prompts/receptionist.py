@@ -334,10 +334,17 @@ def build_system_prompt(
             staff_block += (
                 "\n- Stylist availability (a stylist is NOT available on days/times not listed for them, or on their OFF dates):\n"
                 + "\n".join(schedule_lines)
-                + "\n  When a caller asks to book with a specific stylist on a day that stylist does NOT work, "
-                "at a time outside their hours for that day, or on a date they are OFF, do NOT book them then. "
-                "Tell the caller that stylist isn't available then, and offer either a day/time the stylist works "
-                "or another available stylist. Stylists with no availability listed can be booked any day the shop is open."
+                + "\n  CRITICAL — enforce this BEFORE agreeing to any day/time: work out which weekday the caller's "
+                "requested date falls on, then check it against that stylist's listed working days/hours. "
+                "If the caller asks for a specific stylist on a day that stylist does NOT work, at a time outside "
+                "their hours for that day, or on a date they are OFF, you must NOT book them and must NOT say they "
+                "are booked, all set, scheduled, or confirmed. Instead, immediately tell the caller that stylist "
+                "isn't available then, name the days/times that stylist DOES work, and offer either one of those or "
+                "another available stylist. Only after the caller agrees to a day/time the stylist actually works may "
+                "you confirm the booking. Example: if a stylist works Monday, Wednesday, Friday and the caller asks for "
+                "Thursday, respond that they don't work Thursdays and offer Monday, Wednesday, or Friday (or another "
+                "stylist) — never confirm the Thursday slot. Stylists with no availability listed can be booked any day "
+                "the shop is open."
             )
 
     memory_block = ""

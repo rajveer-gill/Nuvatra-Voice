@@ -846,6 +846,205 @@ def _create_appointment_from_booking(
     return appointment_data
 
 
+def _send_booking_confirmation_sms(
+    apt: dict, call_data: dict, cid: Optional[str], call_sid: Optional[str]
+) -> str:
+    """Send the post-booking confirmation SMS for a freshly-created appointment and update
+    caller memory. Returns the caller-facing AI text describing what happened. Shared by the
+    live voice booking path and the end-of-call reconciliation backstop."""
+    thanks_msg = booking_service._format_appointment_details_confirmation_sms(apt)
+    to_number_sms = (
+        (call_data.get("from_number") or "").strip()
+        or (apt.get("phone") or "").strip()
+        or ""
+    )
+    from_number_sms = (call_data.get("to_number") or "").strip() or None
+    if not from_number_sms and cid and runtime.USE_DB:
+        tenant_row = database.db_tenant_get_by_client_id(cid)
+        if tenant_row:
+            from_number_sms = (tenant_row.get("twilio_phone_number") or "").strip()
+            sms_info("confirmation_sms_from_tenant_lookup", client_id=cid)
+        else:
+            sms_info("confirmation_sms_tenant_missing_for_from_override", client_id=cid)
+    if not from_number_sms:
+        from_number_sms = booking_service._tenant_sms_from_number()
+    sms_info(
+        "post_booking_confirmation_dispatch",
+        client_id=cid,
+        to_set=bool(to_number_sms),
+        from_set=bool(from_number_sms),
+    )
+    if to_number_sms:
+        if runtime.USE_DB and cid and cid != "default":
+            database.db_sms_consent_record(
+                to_number_sms,
+                cid,
+                "voice_booking",
+                detail={"appointment_id": apt.get("id")},
+            )
+        ok = sms_service.send_sms(
+            to_number_sms, thanks_msg, from_override=from_number_sms or None
+        )
+        sms_info(
+            "post_booking_confirmation_sms",
+            client_id=cid,
+            to_number=to_number_sms,
+            from_number=from_number_sms,
+            success=ok,
+        )
+        if ok:
+            if runtime.USE_DB and cid and apt.get("id"):
+                try:
+                    database.db_sms_session_upsert(
+                        to_number_sms,
+                        cid,
+                        [
+                            {
+                                "role": "assistant",
+                                "content": (
+                                    "Appointment details sent by text. "
+                                    "Reply YES or CONFIRM when everything looks right."
+                                ),
+                            }
+                        ],
+                        int(apt["id"]),
+                    )
+                    sms_info(
+                        "post_booking_sms_session_linked",
+                        client_id=cid,
+                        apt_id=apt.get("id"),
+                    )
+                except Exception as sess_err:
+                    logger.warning(
+                        "post_booking_sms_session_link_failed apt_id=%s: %s",
+                        apt.get("id"),
+                        sess_err,
+                        exc_info=True,
+                    )
+            ai_text = (
+                "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
+                "The time is not finalized until you confirm by text."
+            )
+        else:
+            ai_text = "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
+    else:
+        sms_info(
+            "post_booking_confirmation_skipped",
+            reason="no_caller_phone",
+            client_id=cid,
+        )
+        ai_text = "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
+    fn_mem = (call_data.get("from_number") or "").strip()
+    if fn_mem:
+        dp = {
+            "last_voice_booking_date": apt.get("date"),
+            "last_voice_booking_time": apt.get("time"),
+            "last_service": ((apt.get("reason") or "").strip()[:120] or None),
+        }
+        em_patch = (apt.get("email") or "").strip()
+        if em_patch:
+            dp["email_on_file"] = em_patch
+        dp = {k: v for k, v in dp.items() if v}
+        try:
+            caller_memory.update_caller_memory(
+                fn_mem,
+                name=(apt.get("name") or "").strip() or None,
+                last_reason="appointment details texted (pending SMS confirmation)",
+                increment_count=False,
+                data_patch=dp if dp else None,
+            )
+            if call_sid:
+                voice_service._merge_call_session(
+                    call_sid,
+                    {"caller_memory": caller_memory.get_caller_memory(fn_mem)},
+                )
+        except Exception:
+            pass
+    return ai_text
+
+
+def reconcile_booking_at_call_end(
+    call_data: dict, call_sid: Optional[str] = None
+) -> bool:
+    """End-of-call safety net: if the transcript shows the caller agreed to a booking but no
+    appointment was created during the call (e.g. the model never emitted the BOOKING: marker,
+    or the caller hung up mid-turn), try once to extract + validate + create it here.
+
+    Returns True only when an appointment is actually created (and the confirmation SMS sent).
+    Returns False when there is nothing to book, the details are incomplete, or the schedule
+    backstop rejects it (e.g. a stylist on a day they don't work) — in which case the call
+    correctly falls through to lead capture. Never books past the stylist/shop schedule."""
+    if call_data.get("appointment_created"):
+        return False
+    history = call_data.get("conversation_history")
+    if not _conversation_suggests_booking(history):
+        return False
+    if not config_service.staff_roster_ready_for_booking(config_service.get_business_info()):
+        return False
+    cid = (call_data.get("client_id") or "").strip() or None
+    call_sid = call_sid or call_data.get("call_sid")
+    if cid:
+        database.set_request_client_id(cid)
+    try:
+        booking = _extract_booking_line_from_conversation(
+            history or [], caller_memory=call_data.get("caller_memory")
+        )
+    except Exception as e:
+        logger.warning("reconcile_extract_failed: %s", e, exc_info=True)
+        return False
+    if not booking:
+        return False
+    from_num = (call_data.get("from_number") or "").strip()
+    if from_num:
+        booking["phone"] = (booking.get("phone") or "").strip() or from_num
+    ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(
+        booking, conversation_history=history
+    )
+    if not ok_booking:
+        # The schedule backstop or a missing-required-field check rejected it. Do NOT book;
+        # log so the shop can see a caller tried an unavailable slot (e.g. stylist off that day).
+        system_info(
+            "reconcile_booking_rejected",
+            call_sid=call_sid or "",
+            client_id=cid or "",
+            reason=(fail_msg or "requirements_not_met")[:120],
+        )
+        return False
+    if canonical_service:
+        booking["reason"] = canonical_service
+    apt = _create_appointment_from_booking(
+        booking,
+        client_id_override=cid,
+        reserve_slot_immediately=False,
+        caller_memory=call_data.get("caller_memory"),
+    )
+    if not apt:
+        system_info(
+            "reconcile_booking_not_created",
+            call_sid=call_sid or "",
+            client_id=cid or "",
+        )
+        return False
+    call_data["appointment_created"] = True
+    if not (apt.get("phone") or "").strip() and from_num:
+        apt["phone"] = from_num
+        if runtime.USE_DB and apt.get("id"):
+            try:
+                database.db_appointments_update(apt["id"], phone=apt["phone"])
+            except Exception:
+                pass
+    _send_booking_confirmation_sms(apt, call_data, cid, call_sid)
+    system_info(
+        "reconcile_booking_created",
+        call_sid=call_sid or "",
+        client_id=cid or "",
+        apt_id=apt.get("id"),
+        date=apt.get("date"),
+        time=apt.get("time"),
+    )
+    return True
+
+
 def get_system_prompt(
     detected_language: str = "English",
     caller_memory: Optional[dict] = None,
@@ -1049,131 +1248,9 @@ async def generate_response_async(
                                     )
                                 except Exception:
                                     pass
-                        thanks_msg = booking_service._format_appointment_details_confirmation_sms(apt)
-                        to_number_sms = (
-                            (call_data.get("from_number") or "").strip()
-                            or (apt.get("phone") or "").strip()
-                            or ""
+                        ai_text = _send_booking_confirmation_sms(
+                            apt, call_data, cid, call_sid
                         )
-                        from_number_sms = (
-                            call_data.get("to_number") or ""
-                        ).strip() or None
-                        if not from_number_sms and cid and runtime.USE_DB:
-                            tenant_row = database.db_tenant_get_by_client_id(cid)
-                            if tenant_row:
-                                from_number_sms = (
-                                    tenant_row.get("twilio_phone_number") or ""
-                                ).strip()
-                                sms_info(
-                                    "confirmation_sms_from_tenant_lookup", client_id=cid
-                                )
-                            else:
-                                sms_info(
-                                    "confirmation_sms_tenant_missing_for_from_override",
-                                    client_id=cid,
-                                )
-                        if not from_number_sms:
-                            from_number_sms = booking_service._tenant_sms_from_number()
-                        sms_info(
-                            "post_booking_confirmation_dispatch",
-                            client_id=cid,
-                            to_set=bool(to_number_sms),
-                            from_set=bool(from_number_sms),
-                        )
-                        if to_number_sms:
-                            if runtime.USE_DB and cid and cid != "default":
-                                database.db_sms_consent_record(
-                                    to_number_sms,
-                                    cid,
-                                    "voice_booking",
-                                    detail={"appointment_id": apt.get("id")},
-                                )
-                            ok = sms_service.send_sms(
-                                to_number_sms,
-                                thanks_msg,
-                                from_override=from_number_sms or None,
-                            )
-                            sms_info(
-                                "post_booking_confirmation_sms",
-                                client_id=cid,
-                                to_number=to_number_sms,
-                                from_number=from_number_sms,
-                                success=ok,
-                            )
-                            if ok:
-                                if runtime.USE_DB and cid and apt.get("id"):
-                                    try:
-                                        database.db_sms_session_upsert(
-                                            to_number_sms,
-                                            cid,
-                                            [
-                                                {
-                                                    "role": "assistant",
-                                                    "content": (
-                                                        "Appointment details sent by text. "
-                                                        "Reply YES or CONFIRM when everything looks right."
-                                                    ),
-                                                }
-                                            ],
-                                            int(apt["id"]),
-                                        )
-                                        sms_info(
-                                            "post_booking_sms_session_linked",
-                                            client_id=cid,
-                                            apt_id=apt.get("id"),
-                                        )
-                                    except Exception as sess_err:
-                                        logger.warning(
-                                            "post_booking_sms_session_link_failed apt_id=%s: %s",
-                                            apt.get("id"),
-                                            sess_err,
-                                            exc_info=True,
-                                        )
-                                ai_text = (
-                                    "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
-                                    "The time is not finalized until you confirm by text."
-                                )
-                            else:
-                                ai_text = "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
-                        else:
-                            sms_info(
-                                "post_booking_confirmation_skipped",
-                                reason="no_caller_phone",
-                                client_id=cid,
-                            )
-                            ai_text = "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
-                        fn_mem = (call_data.get("from_number") or "").strip()
-                        if fn_mem:
-                            dp = {
-                                "last_voice_booking_date": apt.get("date"),
-                                "last_voice_booking_time": apt.get("time"),
-                                "last_service": (
-                                    (apt.get("reason") or "").strip()[:120] or None
-                                ),
-                            }
-                            em_patch = (apt.get("email") or "").strip()
-                            if em_patch:
-                                dp["email_on_file"] = em_patch
-                            dp = {k: v for k, v in dp.items() if v}
-                            try:
-                                caller_memory.update_caller_memory(
-                                    fn_mem,
-                                    name=(apt.get("name") or "").strip() or None,
-                                    last_reason="appointment details texted (pending SMS confirmation)",
-                                    increment_count=False,
-                                    data_patch=dp if dp else None,
-                                )
-                                if call_sid:
-                                    voice_service._merge_call_session(
-                                        call_sid,
-                                        {
-                                            "caller_memory": caller_memory.get_caller_memory(
-                                                fn_mem
-                                            )
-                                        },
-                                    )
-                            except Exception:
-                                pass
                     else:
                         ctx = booking_context_from_business(config_service.get_business_info())
                         name_ok = bool((booking.get("name") or "").strip())

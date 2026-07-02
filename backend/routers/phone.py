@@ -1129,6 +1129,24 @@ async def handle_call_status(request: Request):
                 client_id_before = call_data_cp.get("client_id")
                 from_number_before = call_data_cp.get("from_number")
                 appointment_created = call_data_cp.get("appointment_created") or False
+                # End-of-call safety net: the caller agreed to a booking but no appointment was
+                # created during the call (model never emitted the marker, or caller hung up
+                # mid-turn). Try once to book + text it here — the schedule backstop still applies,
+                # so a stylist is never booked on a day/time they don't work. Only on the final
+                # status so we never book mid-call.
+                if not appointment_created and call_status == "completed":
+                    try:
+                        if conversation_service.reconcile_booking_at_call_end(
+                            call_data_cp, call_sid
+                        ):
+                            appointment_created = True
+                    except Exception as recon_err:
+                        logger.warning(
+                            "reconcile_booking_at_call_end failed call_sid=%s: %s",
+                            call_sid,
+                            recon_err,
+                            exc_info=True,
+                        )
             if not client_id_before and runtime.USE_DB and call_sid in voice_service.call_log_entries:
                 client_id_before = voice_service.call_log_entries[call_sid].get("client_id")
             if not from_number_before and call_sid in voice_service.call_log_entries:
