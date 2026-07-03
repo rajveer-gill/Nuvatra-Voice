@@ -438,6 +438,79 @@ def cancel_appointment(
     return {"success": True, "appointment": apt, "confirmation_sms_sent": sent}
 
 
+class AppointmentBulkDeleteBody(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+@router.delete("/api/appointments/{appointment_id}")
+def delete_appointment(
+    appointment_id: int,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Permanently remove one appointment (dashboard cleanup). Frees its slot; does NOT text
+    the customer (use cancel for that). Tenant-scoped."""
+    cid = deps._bind_tenant_db_context(tenant)
+    if runtime.USE_DB:
+        apt = database.db_appointments_get_by_id(appointment_id, client_id=cid)
+        if not apt:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+        booking_service.release_slot(appointment_id)
+        database.db_appointments_delete(appointment_id, client_id=cid)
+    else:
+        before = len(runtime.appointments)
+        runtime.appointments[:] = [
+            a for a in runtime.appointments if a.get("id") != appointment_id
+        ]
+        if len(runtime.appointments) == before:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+    deps.audit_log(
+        "user",
+        "appointment_deleted",
+        resource_type="appointment",
+        resource_id=str(appointment_id),
+        request=request,
+    )
+    booking_service._invalidate_booked_slots_cache()
+    system_info("appointment_deleted", appointment_id=appointment_id, client_id=cid)
+    return {"success": True, "deleted": True}
+
+
+@router.post("/api/appointments/bulk-delete")
+def bulk_delete_appointments(
+    body: AppointmentBulkDeleteBody,
+    request: Request,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Permanently remove several appointments at once (e.g. clear cancelled or past). Frees
+    each slot; does NOT text customers. Tenant-scoped."""
+    cid = deps._bind_tenant_db_context(tenant)
+    ids = [int(i) for i in (body.ids or [])][:1000]
+    if not ids:
+        return {"success": True, "deleted": 0}
+    if runtime.USE_DB:
+        for i in ids:
+            booking_service.release_slot(i)
+        count = database.db_appointments_delete_many(ids, client_id=cid)
+    else:
+        idset = set(ids)
+        before = len(runtime.appointments)
+        runtime.appointments[:] = [
+            a for a in runtime.appointments if a.get("id") not in idset
+        ]
+        count = before - len(runtime.appointments)
+    deps.audit_log(
+        "user",
+        "appointments_bulk_deleted",
+        resource_type="appointment",
+        details={"count": count, "requested": len(ids)},
+        request=request,
+    )
+    booking_service._invalidate_booked_slots_cache()
+    system_info("appointments_bulk_deleted", count=count, requested=len(ids), client_id=cid)
+    return {"success": True, "deleted": count}
+
+
 @router.post("/api/appointments/preview-decline-sms")
 def preview_decline_sms(
     body: PreviewDeclineSmsBody,

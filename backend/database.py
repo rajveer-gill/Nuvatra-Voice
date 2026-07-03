@@ -2118,6 +2118,44 @@ def db_appointments_get_by_id(
         "confirmation_sms_failed": bool(row[12]) if len(row) > 12 else False,
     }
 
+
+def db_appointments_delete(appointment_id: int, *, client_id: Optional[str] = None) -> bool:
+    """Permanently delete one appointment, tenant-scoped. Returns True if a row was removed."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    cid = (client_id or "").strip() or _client_id()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM appointments WHERE id = %s AND client_id = %s",
+        (appointment_id, cid),
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    return bool(deleted)
+
+
+def db_appointments_delete_many(ids: List[int], *, client_id: Optional[str] = None) -> int:
+    """Permanently delete several appointments, tenant-scoped. Returns the count removed."""
+    clean = [int(i) for i in (ids or []) if str(i).strip()]
+    if not clean:
+        return 0
+    conn = _get_conn()
+    if not conn:
+        return 0
+    cid = (client_id or "").strip() or _client_id()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM appointments WHERE client_id = %s AND id = ANY(%s)",
+        (cid, clean),
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    return int(deleted or 0)
+
+
 def db_appointments_max_id() -> int:
     conn = _get_conn()
     if not conn:

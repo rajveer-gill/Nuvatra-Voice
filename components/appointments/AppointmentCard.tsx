@@ -9,6 +9,7 @@ import {
   Loader2,
   Mail,
   Phone,
+  Trash2,
   X,
 } from 'lucide-react'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
@@ -36,6 +37,7 @@ export function AppointmentCard({
   onAccept,
   onDecline,
   onCancel,
+  onDelete,
 }: {
   apt: Appointment
   staffLabel: string
@@ -46,6 +48,7 @@ export function AppointmentCard({
   onAccept: (id: number) => Promise<void>
   onDecline: (id: number) => void
   onCancel: (id: number) => void
+  onDelete?: (id: number) => void
 }) {
   const isUpdating = updatingId === apt.id
   const showMsg = acceptRejectMsg?.id === apt.id
@@ -191,6 +194,19 @@ export function AppointmentCard({
             </motion.button>
           ) : (
             <span className="text-xs text-zinc-500">No actions</span>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              disabled={isUpdating}
+              onClick={() => onDelete(apt.id)}
+              className="inline-flex items-center justify-center gap-1.5 self-end rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50"
+              title="Remove this appointment from your dashboard"
+              aria-label="Delete appointment"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete
+            </button>
           )}
           {showMsg && (
             <motion.p

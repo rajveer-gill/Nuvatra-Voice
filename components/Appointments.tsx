@@ -46,6 +46,7 @@ export default function Appointments() {
   const [showForm, setShowForm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [updatingId, setUpdatingId] = useState<number | null>(null)
+  const [clearing, setClearing] = useState(false)
   const [acceptRejectMsg, setAcceptRejectMsg] = useState<{
     id: number
     msg: string
@@ -204,6 +205,15 @@ export default function Appointments() {
       )
     )
 
+  // Local "today" (YYYY-MM-DD) to split the active list into upcoming vs already-passed, so old
+  // appointments collapse into a "Past" section instead of cluttering what still needs attention.
+  const todayStr = useMemo(() => {
+    const d = new Date()
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  }, [])
+  const upcomingAppointments = filtered.filter((a) => (a.date || '') >= todayStr)
+  const pastAppointments = filtered.filter((a) => (a.date || '') < todayStr)
+
   const stats = useMemo(() => {
     const needs = visibleAppointments.filter((a) => needsResponse(a.status)).length
     const accepted = visibleAppointments.filter((a) =>
@@ -286,6 +296,39 @@ export default function Appointments() {
       setTimeout(() => setAcceptRejectMsg(null), 5000)
     } finally {
       setUpdatingId(null)
+    }
+  }
+
+  const handleDelete = async (id: number) => {
+    if (typeof window !== 'undefined' && !window.confirm('Remove this appointment? This only clears it from your dashboard and cannot be undone.')) {
+      return
+    }
+    setUpdatingId(id)
+    try {
+      await api.delete(`/api/appointments/${id}`)
+      await fetchAppointments()
+    } catch (e) {
+      console.error('Failed to delete appointment', e)
+      setAcceptRejectMsg({ id, msg: apiDetail(e), ok: false })
+      setTimeout(() => setAcceptRejectMsg(null), 5000)
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  const handleClearMany = async (ids: number[], label: string) => {
+    if (!ids.length) return
+    if (typeof window !== 'undefined' && !window.confirm(`Remove ${ids.length} ${label} appointment${ids.length === 1 ? '' : 's'}? This can't be undone.`)) {
+      return
+    }
+    setClearing(true)
+    try {
+      await api.post('/api/appointments/bulk-delete', { ids })
+      await fetchAppointments()
+    } catch (e) {
+      console.error('Failed to clear appointments', e)
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -648,7 +691,7 @@ export default function Appointments() {
               )}
             </AnimatePresence>
 
-            {filtered.length === 0 ? (
+            {upcomingAppointments.length === 0 && pastAppointments.length === 0 ? (
               <motion.div
                 initial={{ opacity: 0, scale: 0.98 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -671,7 +714,7 @@ export default function Appointments() {
                 animate="visible"
               >
                 <AnimatePresence mode="popLayout">
-                  {filtered.map((apt, i) => (
+                  {upcomingAppointments.map((apt, i) => (
                     <AppointmentCard
                       key={apt.id}
                       apt={apt}
@@ -691,16 +734,72 @@ export default function Appointments() {
                         setOwnerActionReason('')
                         setDeclinePreview(null)
                       }}
+                      onDelete={handleDelete}
                     />
                   ))}
                 </AnimatePresence>
               </motion.div>
             )}
 
+            {pastAppointments.length > 0 && (
+              <details className="mt-8 rounded-2xl border border-white/10 bg-zinc-950/40 p-4">
+                <summary className="flex cursor-pointer select-none items-center justify-between gap-3 text-sm font-medium text-zinc-400 hover:text-zinc-200">
+                  <span>Past ({pastAppointments.length})</span>
+                  <button
+                    type="button"
+                    disabled={clearing}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      void handleClearMany(pastAppointments.map((a) => a.id), 'past')
+                    }}
+                    className="rounded-lg border border-white/10 px-2.5 py-1 text-xs font-medium text-zinc-400 hover:border-red-500/40 hover:text-red-300 disabled:opacity-50"
+                  >
+                    Clear all
+                  </button>
+                </summary>
+                <motion.div layout className="mt-4 space-y-4">
+                  {pastAppointments.map((apt, i) => (
+                    <AppointmentCard
+                      key={apt.id}
+                      apt={apt}
+                      index={i}
+                      reduceMotion={!!reduceMotion}
+                      staffLabel={(apt.staff_id && staffNameById[apt.staff_id]) || ''}
+                      updatingId={updatingId}
+                      acceptRejectMsg={acceptRejectMsg}
+                      onAccept={handleAccept}
+                      onDecline={(id) => {
+                        setOwnerActionModal({ id, kind: 'reject' })
+                        setOwnerActionReason('')
+                        setDeclinePreview(null)
+                      }}
+                      onCancel={(id) => {
+                        setOwnerActionModal({ id, kind: 'cancel' })
+                        setOwnerActionReason('')
+                        setDeclinePreview(null)
+                      }}
+                      onDelete={handleDelete}
+                    />
+                  ))}
+                </motion.div>
+              </details>
+            )}
+
             {archivedAppointments.length > 0 && (
               <details className="mt-8 rounded-2xl border border-white/10 bg-zinc-950/40 p-4">
-                <summary className="cursor-pointer select-none text-sm font-medium text-zinc-400 hover:text-zinc-200">
-                  Cancelled & declined ({archivedAppointments.length})
+                <summary className="flex cursor-pointer select-none items-center justify-between gap-3 text-sm font-medium text-zinc-400 hover:text-zinc-200">
+                  <span>Cancelled &amp; declined ({archivedAppointments.length})</span>
+                  <button
+                    type="button"
+                    disabled={clearing}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      void handleClearMany(archivedAppointments.map((a) => a.id), 'cancelled')
+                    }}
+                    className="rounded-lg border border-white/10 px-2.5 py-1 text-xs font-medium text-zinc-400 hover:border-red-500/40 hover:text-red-300 disabled:opacity-50"
+                  >
+                    Clear all
+                  </button>
                 </summary>
                 <motion.div layout className="mt-4 space-y-4">
                   {archivedAppointments.map((apt, i) => (
@@ -723,6 +822,7 @@ export default function Appointments() {
                         setOwnerActionReason('')
                         setDeclinePreview(null)
                       }}
+                      onDelete={handleDelete}
                     />
                   ))}
                 </motion.div>
