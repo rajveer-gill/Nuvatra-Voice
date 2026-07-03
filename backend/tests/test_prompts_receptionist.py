@@ -39,7 +39,7 @@ def test_prompt_includes_time_off_and_closures(monkeypatch):
     from datetime import datetime
     import business_hours
 
-    monkeypatch.setattr(business_hours, "business_local_now", lambda info=None: datetime(2026, 7, 1, 12, 0))
+    monkeypatch.setattr(business_hours, "business_local_now", lambda info=None, now=None: datetime(2026, 7, 1, 12, 0))
     biz = {
         "name": "Salon",
         "hours": "9-5",
@@ -95,7 +95,7 @@ def test_prompt_gives_weekday_date_reference(monkeypatch):
     from datetime import datetime
     import business_hours
 
-    monkeypatch.setattr(business_hours, "business_local_now", lambda info=None: datetime(2026, 7, 3, 14, 0))
+    monkeypatch.setattr(business_hours, "business_local_now", lambda info=None, now=None: datetime(2026, 7, 3, 14, 0))
     biz = {
         "name": "Salon",
         "hours": "Monday–Friday: 9:00 AM – 5:00 PM, Saturday–Sunday: Closed",

@@ -435,6 +435,16 @@ def build_system_prompt(
             "requested day, look up that date's weekday here, then check it against the hours / the "
             "stylist's listed days above. Never say the shop is closed on a weekday the hours list as open."
         )
+        # State plainly whether TODAY is open, computed server-side, so the model never has to
+        # infer it (it kept calling an open day "closed"). The real after-hours note (injected
+        # elsewhere) still overrides when the shop has already closed for the day.
+        from business_hours import is_past_closing_for_date as _past_closing
+
+        if not _past_closing(business_info, today_local):
+            date_reference_block += (
+                f"\n- TODAY is {today_dow} {today_str} and the shop is OPEN today. You MAY take "
+                "bookings for today. Do NOT tell the caller the shop is closed today."
+            )
         staff_booking_rules = ""
         if multi_staff:
             staff_booking_rules = (
@@ -473,7 +483,6 @@ def build_system_prompt(
             )
         slots_block += f"""
 - TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
-- AFTER HOURS: If the prompt includes an AFTER HOURS note, the shop is already closed for today—do not book same-day appointments; tell the caller we're closed for today and ask for another day.
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date, time, service, and stylist when applicable. Do NOT ask for email—we confirm by text/SMS only.
