@@ -137,6 +137,17 @@ def test_validate_booking_normalizes_service_name(monkeypatch):
     assert service == "Haircut"
 
 
+def test_caller_phone_ignores_model_placeholder():
+    # The model sometimes copies the literal "phone" placeholder into the BOOKING phone field;
+    # for voice, the caller's Twilio number is authoritative and must win.
+    from conversation_service import _caller_phone_for_booking as f
+
+    assert f("phone", "+19255551234") == "+19255551234"  # placeholder -> caller ID
+    assert f("", "+19255551234") == "+19255551234"
+    assert f(None, "+19255551234") == "+19255551234"
+    assert f("+15551234567", "+19255551234") == "+15551234567"  # a real number is kept
+
+
 def test_validate_booking_rejects_stylist_who_lacks_service(monkeypatch):
     # The chosen stylist must actually offer the chosen service — applies to mid-call changes too.
     monkeypatch.setattr(

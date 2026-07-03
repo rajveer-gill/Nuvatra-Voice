@@ -508,6 +508,16 @@ def parse_booking(ai_text: str) -> Optional[dict]:
     }
 
 
+def _caller_phone_for_booking(booking_phone: Optional[str], from_num: str) -> str:
+    """Caller ID is authoritative for voice bookings. Use the phone the model emitted only if it
+    is a real number (>=7 digits); otherwise fall back to the caller's Twilio number. Guards
+    against the model copying the literal 'phone' placeholder from the BOOKING template into the
+    field (which then showed up as 'Phone: phone' in the confirmation text)."""
+    ai = (booking_phone or "").strip()
+    digits = sum(c.isdigit() for c in ai)
+    return ai if digits >= 7 else (from_num or "")
+
+
 def _strip_booking_directive_for_voice(ai_text: str) -> str:
     """Remove BOOKING:... from model output so it is never read aloud by TTS."""
     if not ai_text or "BOOKING:" not in ai_text.upper():
@@ -1048,7 +1058,7 @@ def reconcile_booking_at_call_end(
         return False
     from_num = (call_data.get("from_number") or "").strip()
     if from_num:
-        booking["phone"] = (booking.get("phone") or "").strip() or from_num
+        booking["phone"] = _caller_phone_for_booking(booking.get("phone"), from_num)
     ok_booking, fail_msg, _, canonical_service = _validate_booking_requirements(
         booking, conversation_history=history
     )
@@ -1292,9 +1302,9 @@ async def generate_response_async(
                     )
                     # Use caller's phone from Twilio when available (don't require asking)
                     if from_num:
-                        booking["phone"] = (
-                            booking.get("phone") or ""
-                        ).strip() or from_num
+                        booking["phone"] = _caller_phone_for_booking(
+                            booking.get("phone"), from_num
+                        )
                     cid = (call_data.get("client_id") or "").strip() or None
                     ok_booking, fail_msg, _, canonical_service = (
                         _validate_booking_requirements(
