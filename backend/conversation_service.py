@@ -59,6 +59,11 @@ from prompts.receptionist import (
 
 logger = logging.getLogger("nuvatra")
 
+# Voice reasoning model. gpt-4o-mini is faster and cheaper than gpt-3.5-turbo and far more
+# reliable at per-stylist scheduling (gpt-3.5 would misapply one stylist's working days to
+# another). Override via VOICE_LLM_MODEL to roll back or A/B a different model without a deploy.
+VOICE_LLM_MODEL = (os.getenv("VOICE_LLM_MODEL") or "gpt-4o-mini").strip()
+
 _STYLIST_NO_PREF_PHRASES = (
     "anyone",
     "any stylist",
@@ -418,7 +423,7 @@ def _extract_booking_line_from_conversation(
     )
     try:
         resp = runtime.client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=VOICE_LLM_MODEL,
             messages=[
                 {"role": "system", "content": sys},
                 {"role": "user", "content": transcript},
@@ -1137,7 +1142,7 @@ async def generate_response_async(
         # reason.) A hung request is bounded by the client timeout in runtime.py.
         ai_response = await asyncio.to_thread(
             runtime.client.chat.completions.create,
-            model="gpt-3.5-turbo",
+            model=VOICE_LLM_MODEL,
             messages=messages,
             temperature=0.8,
             max_tokens=200,

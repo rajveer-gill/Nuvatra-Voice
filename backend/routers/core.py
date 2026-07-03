@@ -106,7 +106,10 @@ def handle_conversation(
         runtime.messages.append({"role": "user", "content": request.message})
 
         response = runtime.client.chat.completions.create(
-            model="gpt-3.5-turbo", messages=runtime.messages, temperature=0.7, max_tokens=200
+            model=conversation_service.VOICE_LLM_MODEL,
+            messages=runtime.messages,
+            temperature=0.7,
+            max_tokens=200,
         )
 
         ai_response = response.choices[0].message.content

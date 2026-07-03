@@ -264,7 +264,8 @@ async def pre_warm_openai():
         print("[WARM] Pre-warming OpenAI client...")
         await asyncio.to_thread(
             client.chat.completions.create,
-            model="gpt-3.5-turbo",
+            # Warm the model actually used for voice reasoning (see conversation_service).
+            model=os.getenv("VOICE_LLM_MODEL") or "gpt-4o-mini",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=5,
             temperature=0,

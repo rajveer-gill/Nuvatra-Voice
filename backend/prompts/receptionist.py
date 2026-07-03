@@ -316,7 +316,8 @@ def build_system_prompt(
         from business_hours import business_local_now
 
         sched_today = business_local_now(business_info).date()
-        schedule_lines: List[str] = []
+        restricted_lines: List[str] = []
+        unrestricted_names: List[str] = []
         for s in staff:
             n = (s.get("name") or "").strip()
             if not n:
@@ -329,22 +330,33 @@ def build_system_prompt(
             if off:
                 parts.append(f"OFF (not available) on {off}")
             if parts:
-                schedule_lines.append(f"  • {n}: {'; '.join(parts)}")
-        if schedule_lines:
+                restricted_lines.append(f"  • {n}: {'; '.join(parts)}")
+            else:
+                unrestricted_names.append(n)
+        # Only spell out schedules when at least one stylist is actually restricted. When we do,
+        # list EVERY stylist explicitly — restricted ones with their days, everyone else as "any
+        # day" — so the model can never apply one stylist's days to another (a real failure we saw:
+        # a stylist with no schedule was told they were only available on another stylist's days).
+        if restricted_lines:
+            all_lines = restricted_lines + [
+                f"  • {n}: works any day the shop is open" for n in unrestricted_names
+            ]
             staff_block += (
-                "\n- Stylist availability (a stylist is NOT available on days/times not listed for them, or on their OFF dates):\n"
-                + "\n".join(schedule_lines)
+                "\n- Stylist availability — each stylist's OWN schedule. These are per-stylist: "
+                "NEVER apply one stylist's days/hours to another. A stylist is NOT available on "
+                "days/times not listed for them, or on their OFF dates:\n"
+                + "\n".join(all_lines)
                 + "\n  CRITICAL — enforce this BEFORE agreeing to any day/time: work out which weekday the caller's "
-                "requested date falls on, then check it against that stylist's listed working days/hours. "
+                "requested date falls on, then check it against THAT specific stylist's own line above. "
                 "If the caller asks for a specific stylist on a day that stylist does NOT work, at a time outside "
                 "their hours for that day, or on a date they are OFF, you must NOT book them and must NOT say they "
                 "are booked, all set, scheduled, or confirmed. Instead, immediately tell the caller that stylist "
                 "isn't available then, name the days/times that stylist DOES work, and offer either one of those or "
                 "another available stylist. Only after the caller agrees to a day/time the stylist actually works may "
-                "you confirm the booking. Example: if a stylist works Monday, Wednesday, Friday and the caller asks for "
-                "Thursday, respond that they don't work Thursdays and offer Monday, Wednesday, or Friday (or another "
-                "stylist) — never confirm the Thursday slot. Stylists with no availability listed can be booked any day "
-                "the shop is open."
+                "you confirm the booking. Example: if the caller asks for a stylist whose line says 'works any day the "
+                "shop is open', do NOT restrict them to another stylist's days — book them on the requested day. "
+                "Another example: if a stylist works Monday, Wednesday, Friday and the caller asks for Thursday, "
+                "respond that they don't work Thursdays and offer Monday, Wednesday, or Friday (or another stylist)."
             )
 
     memory_block = ""

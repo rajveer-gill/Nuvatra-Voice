@@ -67,7 +67,26 @@ def test_prompt_includes_stylist_working_days():
     # Hardened: the AI must refuse an off-day request and must not falsely confirm it.
     assert "must not book them" in low
     assert "isn't available then" in low
-    assert "never confirm the thursday slot" in low
+    # Per-stylist emphasis: never apply one stylist's schedule to another.
+    assert "never apply one stylist" in low
+
+
+def test_prompt_unrestricted_stylist_listed_explicitly_when_another_is_restricted():
+    # Regression: a stylist with NO working_days was told they were only available on ANOTHER
+    # stylist's days. Every stylist must get their own explicit line so days can't be misapplied.
+    biz = {
+        "name": "Salon",
+        "hours": "9-5",
+        "services": [{"id": "s1", "name": "Cut"}],
+        "staff": [
+            {"id": "1", "name": "Jake", "working_days": ["mon", "wed", "fri"]},
+            {"id": "2", "name": "Tom"},  # no schedule → any day
+        ],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=True)
+    assert "Jake: works Monday, Wednesday, Friday" in p
+    # Tom must be spelled out as unrestricted, not left to inherit Jake's days.
+    assert "Tom: works any day the shop is open" in p
 
 
 def test_prompt_no_working_days_section_when_unset():
