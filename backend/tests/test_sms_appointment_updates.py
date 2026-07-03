@@ -265,7 +265,7 @@ def test_parse_stylist_ignores_customer_own_name():
     assert parse_stylist_from_sms("my name is Andrew", current_stylist="Tom", known_stylists=_ROSTER) is None
 
 
-def _run_stylist_change(body, *, known_staff, service_id_by_name, stored):
+def _run_stylist_change(body, *, known_staff, service_id_by_name, stored, rejection_out=None):
     def fake_update(aid, client_id, **kwargs):
         stored.update(kwargs)
         return dict(stored)
@@ -282,6 +282,7 @@ def _run_stylist_change(body, *, known_staff, service_id_by_name, stored):
         logger=_logging.getLogger("test"),
         known_staff=known_staff,
         service_id_by_name=service_id_by_name,
+        rejection_out=rejection_out,
     )
 
 
@@ -310,11 +311,16 @@ def test_apply_stylist_change_rejected_when_off_that_day():
 
 def test_apply_stylist_change_rejected_when_service_not_offered():
     stored = {"id": 12, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
+    rej: dict = {}
     out, changed = _run_stylist_change(
         "switch to Andrew",
         # Andrew only does svc2; the appointment's service (Long Cut) is svc1 -> must not apply.
         known_staff=[{"id": "s1", "name": "Tom", "service_ids": []}, {"id": "s2", "name": "Andrew", "service_ids": ["svc2"]}],
         service_id_by_name={"long cut": "svc1"},
         stored=stored,
+        rejection_out=rej,
     )
     assert out.get("staff_id") == "s1"  # unchanged
+    # The caller must be told why, not silently kept on the old stylist.
+    assert "Andrew doesn't do Long Cut" in rej.get("message", "")
+    assert rej.get("reason") == "not_offered"

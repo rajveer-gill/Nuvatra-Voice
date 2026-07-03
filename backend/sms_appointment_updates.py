@@ -314,8 +314,13 @@ def apply_sms_appointment_detail_updates_from_bodies(
     known_services: Optional[list[str]] = None,
     known_staff: Optional[list[dict]] = None,
     service_id_by_name: Optional[dict] = None,
+    rejection_out: Optional[dict] = None,
 ) -> DetailUpdateResult:
-    """Apply name/time/date/service/stylist from the latest values across recent inbound SMS."""
+    """Apply name/time/date/service/stylist from the latest values across recent inbound SMS.
+
+    When a requested stylist change is refused (the stylist doesn't offer the service or is off
+    that day), a caller-facing explanation is written to rejection_out["message"] so the SMS
+    handler can tell the customer the truth instead of silently keeping the old stylist."""
     if not apt or not apt.get("id"):
         return apt, []
     st = (apt.get("status") or "").strip()
@@ -413,6 +418,30 @@ def apply_sms_appointment_detail_updates_from_bodies(
                 kwargs["staff_id"] = new_sid
             else:
                 stylist_rejected = "not_offered" if not offers else "unavailable"
+                if rejection_out is not None:
+                    if not offers:
+                        # Who DOES offer the effective service (excluding the refused stylist)?
+                        alts = [
+                            (r.get("name") or "").strip()
+                            for r in (known_staff or [])
+                            if (r.get("name") or "").strip()
+                            and (r.get("name") or "").strip().lower() != latest_stylist.lower()
+                            and (
+                                not (r.get("service_ids") or [])
+                                or (svc_id and svc_id in (r.get("service_ids") or []))
+                            )
+                        ]
+                        msg = f"{latest_stylist} doesn't do {eff_service}."
+                        if alts:
+                            msg += f" For {eff_service}, you can book {', '.join(alts[:3])}."
+                        msg += " Want one of them, or a different service?"
+                    else:
+                        msg = (
+                            f"{latest_stylist} isn't available that day. "
+                            "Want another day, or a different stylist?"
+                        )
+                    rejection_out["message"] = msg
+                    rejection_out["reason"] = stylist_rejected
                 sms_info(
                     "sms_stylist_change_rejected",
                     apt_id=aid,
