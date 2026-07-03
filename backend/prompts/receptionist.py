@@ -483,6 +483,7 @@ def build_system_prompt(
             )
         slots_block += f"""
 - TIMES: Always say times in 12-hour format with AM/PM (e.g. 9:00 AM, 2:30 PM). Never use 24-hour/military time (no 13:00, 14:00, etc.) when speaking to the caller.
+- DATES: When saying a date OUT LOUD to the caller, use the month name and ordinal day (e.g. "July 7th", "March 2nd"), or "today"/"tomorrow" when it applies. NEVER read a date as digits or ISO/numeric format—do not say "2026-07-07", "07-07", "7/7", or "oh seven oh seven". (The dates in the DATE REFERENCE list are for your lookup only; convert them to the spoken month-and-day form before saying them.)
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date, time, service, and stylist when applicable. Do NOT ask for email—we confirm by text/SMS only.
