@@ -636,11 +636,20 @@ async def handle_incoming_sms(request: Request):
             # The shop's real service menu, so "make it a long cut" matches without the caller
             # having to say the rigid phrase "change service to ...".
             _svc_cfg = config_service.load_client_config(tenant["client_id"]) or {}
+            _svc_entries = config_service._normalize_service_entries(_svc_cfg.get("services") or [])
             known_services = [
                 (s.get("name") or "").strip()
-                for s in config_service._normalize_service_entries(_svc_cfg.get("services") or [])
+                for s in _svc_entries
                 if (s.get("name") or "").strip()
             ]
+            service_id_by_name = {
+                (s.get("name") or "").strip().lower(): (s.get("id") or "").strip()
+                for s in _svc_entries
+                if (s.get("name") or "").strip()
+            }
+            # Staff roster (with service_ids / working days) so an SMS "switch me to Andrew"
+            # resolves to a stylist and is validated against the service + that day.
+            known_staff = [s for s in (_svc_cfg.get("staff") or []) if (s.get("name") or "").strip()]
             sms_trace(
                 "sms_detail_updates_session_context",
                 request_id=rid,
@@ -663,6 +672,8 @@ async def handle_incoming_sms(request: Request):
                     system_info=system_info,
                     logger=logger,
                     known_services=known_services,
+                    known_staff=known_staff,
+                    service_id_by_name=service_id_by_name,
                 )
             )
             if detail_fields_updated and apt and any(

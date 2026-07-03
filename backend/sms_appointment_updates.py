@@ -274,6 +274,31 @@ def parse_service_from_sms(
     return None
 
 
+def parse_stylist_from_sms(
+    body: str, *, current_stylist: str = "", known_stylists: Optional[list[str]] = None
+) -> Optional[str]:
+    """Best-effort stylist request from a change text ("switch me to Andrew", "can I see Tom
+    instead"). Matches a name from the shop's roster (longest-first) that differs from the
+    current stylist. Returns the matched roster name, or None."""
+    text = (body or "").strip()
+    if not text or _is_likely_sms_confirmation_body(text):
+        return None
+    # "my name is Andrew" is the CUSTOMER's own name, not a request to switch stylists.
+    if re.search(r"\bmy\s+name\s+is\b", text, re.I):
+        return None
+    cur = (current_stylist or "").strip().lower()
+    for name in sorted(
+        (n.strip() for n in (known_stylists or []) if (n or "").strip()),
+        key=len,
+        reverse=True,
+    ):
+        if name.lower() == cur:
+            continue
+        if re.search(r"\b" + re.escape(name) + r"\b", text, re.I):
+            return name
+    return None
+
+
 def apply_sms_appointment_detail_updates_from_bodies(
     bodies: list[str],
     apt: Optional[dict],
@@ -287,8 +312,10 @@ def apply_sms_appointment_detail_updates_from_bodies(
     system_info,
     logger,
     known_services: Optional[list[str]] = None,
+    known_staff: Optional[list[dict]] = None,
+    service_id_by_name: Optional[dict] = None,
 ) -> DetailUpdateResult:
-    """Apply name/time/date/service from the latest values across recent inbound SMS texts."""
+    """Apply name/time/date/service/stylist from the latest values across recent inbound SMS."""
     if not apt or not apt.get("id"):
         return apt, []
     st = (apt.get("status") or "").strip()
@@ -301,10 +328,24 @@ def apply_sms_appointment_detail_updates_from_bodies(
     )
     prior_date = (apt.get("date") or "").strip()
     prior_service = (apt.get("reason") or "").strip()
+    # Staff roster maps for resolving a "switch me to Andrew" text to a staff_id.
+    staff_by_name: dict[str, dict] = {}
+    staff_by_id: dict[str, dict] = {}
+    for row in known_staff or []:
+        nm = (row.get("name") or "").strip()
+        if nm:
+            staff_by_name[nm.lower()] = row
+        sid = str(row.get("id") or "").strip()
+        if sid:
+            staff_by_id[sid] = row
+    staff_names = [(r.get("name") or "").strip() for r in (known_staff or []) if (r.get("name") or "").strip()]
+    prior_staff_id = str(apt.get("staff_id") or "").strip()
+    prior_stylist_name = (staff_by_id.get(prior_staff_id, {}).get("name") or "").strip()
     latest_name: Optional[str] = None
     latest_time: Optional[str] = None
     latest_date: Optional[str] = None
     latest_service: Optional[str] = None
+    latest_stylist: Optional[str] = None
     cur_name = prior_name
     cur_time = prior_time
     user_body_count = sum(1 for b in bodies if (b or "").strip())
@@ -336,6 +377,11 @@ def apply_sms_appointment_detail_updates_from_bodies(
         )
         if sv:
             latest_service = sv
+        sty = parse_stylist_from_sms(
+            body, current_stylist=prior_stylist_name, known_stylists=staff_names
+        )
+        if sty:
+            latest_stylist = sty
     kwargs: dict[str, Any] = {}
     if latest_name:
         kwargs["name"] = latest_name
@@ -345,6 +391,35 @@ def apply_sms_appointment_detail_updates_from_bodies(
         kwargs["date"] = latest_date
     if latest_service:
         kwargs["reason"] = latest_service
+    # Stylist change: resolve to a staff_id, but only apply it when the new stylist offers the
+    # (effective) service AND works the (effective) day/time — never book an invalid combo.
+    stylist_rejected = ""
+    if latest_stylist:
+        row = staff_by_name.get(latest_stylist.lower())
+        new_sid = str((row or {}).get("id") or "").strip()
+        if row and new_sid and new_sid != prior_staff_id:
+            eff_service = (latest_service or prior_service or "").strip()
+            eff_date = (latest_date or prior_date or "").strip()
+            eff_time = latest_time or prior_time or ""
+            svc_id = (service_id_by_name or {}).get(eff_service.lower())
+            ids = row.get("service_ids") or []
+            offers = (not eff_service) or (svc_id is None) or (not ids) or (svc_id in ids)
+            unavail = None
+            if eff_date:
+                import staff_schedule
+
+                unavail = staff_schedule.staff_unavailable_message(row, eff_date, eff_time)
+            if offers and not unavail:
+                kwargs["staff_id"] = new_sid
+            else:
+                stylist_rejected = "not_offered" if not offers else "unavailable"
+                sms_info(
+                    "sms_stylist_change_rejected",
+                    apt_id=aid,
+                    client_id=client_id,
+                    reason=stylist_rejected,
+                    stylist_initial=name_initial_for_log(latest_stylist),
+                )
     if not kwargs:
         sms_info(
             "sms_detail_updates_no_match",
@@ -362,6 +437,8 @@ def apply_sms_appointment_detail_updates_from_bodies(
         will_update_time=bool(latest_time),
         will_update_date=bool(latest_date),
         will_update_service=bool(latest_service),
+        will_update_stylist=bool(kwargs.get("staff_id")),
+        stylist_rejected=stylist_rejected or None,
         prior_name_initial=name_initial_for_log(prior_name),
         new_name_initial=name_initial_for_log(latest_name),
         prior_time=prior_time or None,

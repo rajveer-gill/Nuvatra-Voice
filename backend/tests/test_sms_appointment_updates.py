@@ -237,3 +237,84 @@ def test_format_appointment_details_confirmation_sms():
     assert "2:00 PM" in msg
     assert "YES or CONFIRM" in msg
     assert "Email:" not in msg
+
+
+# --- Stylist change over SMS -------------------------------------------------
+
+import logging as _logging
+
+from sms_appointment_updates import (
+    apply_sms_appointment_detail_updates_from_bodies,
+    parse_stylist_from_sms,
+)
+
+_ROSTER = ["Tom", "Andrew"]
+
+
+def test_parse_stylist_switch_phrasing():
+    assert parse_stylist_from_sms("can I switch to Andrew instead", current_stylist="Tom", known_stylists=_ROSTER) == "Andrew"
+    assert parse_stylist_from_sms("actually with tom please", current_stylist="Andrew", known_stylists=_ROSTER) == "Tom"
+
+
+def test_parse_stylist_same_as_current_returns_none():
+    assert parse_stylist_from_sms("Andrew is great", current_stylist="Andrew", known_stylists=_ROSTER) is None
+
+
+def test_parse_stylist_ignores_customer_own_name():
+    # "my name is Andrew" is the customer identifying themselves, not a stylist switch.
+    assert parse_stylist_from_sms("my name is Andrew", current_stylist="Tom", known_stylists=_ROSTER) is None
+
+
+def _run_stylist_change(body, *, known_staff, service_id_by_name, stored):
+    def fake_update(aid, client_id, **kwargs):
+        stored.update(kwargs)
+        return dict(stored)
+
+    return apply_sms_appointment_detail_updates_from_bodies(
+        [body],
+        stored,
+        client_id="test",
+        from_number="+15551234567",
+        db_appointments_update=fake_update,
+        db_appointments_get_by_id=lambda aid, client_id: dict(stored),
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=_logging.getLogger("test"),
+        known_staff=known_staff,
+        service_id_by_name=service_id_by_name,
+    )
+
+
+def test_apply_stylist_change_updates_staff_id():
+    stored = {"id": 10, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
+    out, changed = _run_stylist_change(
+        "can I switch to Andrew instead",
+        known_staff=[{"id": "s1", "name": "Tom", "service_ids": []}, {"id": "s2", "name": "Andrew", "service_ids": []}],
+        service_id_by_name={"long cut": "svc1"},
+        stored=stored,
+    )
+    assert out["staff_id"] == "s2"
+
+
+def test_apply_stylist_change_rejected_when_off_that_day():
+    stored = {"id": 11, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
+    out, changed = _run_stylist_change(
+        "switch me to Andrew",
+        # Andrew is on time off that exact date -> must not apply.
+        known_staff=[{"id": "s1", "name": "Tom", "service_ids": []}, {"id": "s2", "name": "Andrew", "service_ids": [], "time_off": ["2026-07-06"]}],
+        service_id_by_name={"long cut": "svc1"},
+        stored=stored,
+    )
+    assert out.get("staff_id") == "s1"  # unchanged
+
+
+def test_apply_stylist_change_rejected_when_service_not_offered():
+    stored = {"id": 12, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
+    out, changed = _run_stylist_change(
+        "switch to Andrew",
+        # Andrew only does svc2; the appointment's service (Long Cut) is svc1 -> must not apply.
+        known_staff=[{"id": "s1", "name": "Tom", "service_ids": []}, {"id": "s2", "name": "Andrew", "service_ids": ["svc2"]}],
+        service_id_by_name={"long cut": "svc1"},
+        stored=stored,
+    )
+    assert out.get("staff_id") == "s1"  # unchanged
