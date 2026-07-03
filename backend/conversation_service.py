@@ -1174,7 +1174,8 @@ async def generate_response_async(
                 call_sid=call_sid,
                 text=(
                     f"model={VOICE_LLM_MODEL} tz={getattr(_tz.tzinfo, 'key', _tz.tzinfo)} "
-                    f"today={_tz.date()} tomorrow={(_tz + timedelta(days=1)).date()} "
+                    f"today={_tz.strftime('%A')} {_tz.date()} "
+                    f"tomorrow={(_tz + timedelta(days=1)).strftime('%A')} {(_tz + timedelta(days=1)).date()} "
                     f"hours=[{(_biz.get('hours') or '')[:60]}] | roster: {_roster}"
                 ),
             )

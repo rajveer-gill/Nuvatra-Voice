@@ -89,6 +89,25 @@ def test_prompt_unrestricted_stylist_listed_explicitly_when_another_is_restricte
     assert "Tom: works any day the shop is open" in p
 
 
+def test_prompt_gives_weekday_date_reference(monkeypatch):
+    # The AI kept calling an open Friday "closed" because it computed weekdays itself and got them
+    # wrong. It must be handed an explicit weekday↔date table instead.
+    from datetime import datetime
+    import business_hours
+
+    monkeypatch.setattr(business_hours, "business_local_now", lambda info=None: datetime(2026, 7, 3, 14, 0))
+    biz = {
+        "name": "Salon",
+        "hours": "Monday–Friday: 9:00 AM – 5:00 PM, Saturday–Sunday: Closed",
+        "services": [{"id": "s1", "name": "Cut"}],
+        "staff": [{"name": "Tom"}],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=True)
+    assert "DATE REFERENCE" in p
+    assert "Friday 2026-07-03" in p  # today, named
+    assert "Saturday 2026-07-04" in p  # tomorrow named, so it won't book the closed weekend
+
+
 def test_prompt_instructs_reemit_booking_on_change():
     # A caller changing the service/stylist/time after booking must trigger a fresh BOOKING line,
     # otherwise the change isn't saved (regression: a service change didn't update the record).
