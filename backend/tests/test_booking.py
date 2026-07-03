@@ -137,6 +137,63 @@ def test_validate_booking_normalizes_service_name(monkeypatch):
     assert service == "Haircut"
 
 
+def test_validate_booking_rejects_stylist_who_lacks_service(monkeypatch):
+    # The chosen stylist must actually offer the chosen service — applies to mid-call changes too.
+    monkeypatch.setattr(
+        "config_service.get_business_info",
+        lambda: {
+            "staff": [
+                {"id": "s1", "name": "Mia", "service_ids": ["svc1"]},  # only Haircut
+                {"id": "s2", "name": "Tom", "service_ids": ["svc2"]},  # only Color
+            ],
+            "services": [
+                {"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30},
+                {"id": "svc2", "name": "Color", "price": 50, "duration_minutes": 60},
+            ],
+        },
+    )
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "Mia", "reason": "Color"},
+        conversation_history=[{"role": "user", "content": "I'd like Color with Mia"}],
+    )
+    assert not ok
+    assert "mia doesn't do color" in (msg or "").lower()
+    assert "tom" in (msg or "").lower()  # suggests the stylist who does offer it
+
+
+def test_validate_booking_allows_stylist_who_offers_service(monkeypatch):
+    monkeypatch.setattr(
+        "config_service.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "Mia", "service_ids": ["svc1"]}],
+            "services": [{"id": "svc1", "name": "Haircut", "price": 20, "duration_minutes": 30}],
+        },
+    )
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "Mia", "reason": "Haircut"},
+        conversation_history=[{"role": "user", "content": "Haircut with Mia"}],
+    )
+    assert ok
+    assert service == "Haircut"
+
+
+def test_validate_booking_empty_service_ids_offers_everything(monkeypatch):
+    # A stylist with no service_ids does every service — must not be rejected.
+    monkeypatch.setattr(
+        "config_service.get_business_info",
+        lambda: {
+            "staff": [{"id": "s1", "name": "Mia"}],  # no service_ids
+            "services": [{"id": "svc1", "name": "Color", "price": 50, "duration_minutes": 60}],
+        },
+    )
+    ok, msg, staff_id, service = _validate_booking_requirements(
+        {"staff": "Mia", "reason": "Color"},
+        conversation_history=[{"role": "user", "content": "Color with Mia"}],
+    )
+    assert ok
+    assert service == "Color"
+
+
 def test_validate_booking_rejects_auto_stylist_without_caller_choice(monkeypatch):
     monkeypatch.setattr(
         "config_service.get_business_info",

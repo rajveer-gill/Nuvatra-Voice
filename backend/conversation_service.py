@@ -98,9 +98,13 @@ def _supersede_pending_customer_drafts_for_slot(
     phone: Optional[str] = None,
 ) -> int:
     """
-    Cancel stale voice bookings for this slot so the same caller can rebook after a failed flow.
-    - pending_customer: unconfirmed draft (slot not held until SMS YES).
-    - pending_review: same caller + receptionist source — frees a held slot when they call again.
+    Cancel stale voice bookings so the same caller can rebook / modify without leaving duplicates.
+    - pending_customer: unconfirmed draft (slot not held until SMS YES). When the caller's phone is
+      known, ALL of their same-date drafts are superseded — so a mid-call change to the time,
+      service, or stylist replaces the draft instead of leaving a stale one. Without a phone, falls
+      back to exact-slot matching.
+    - pending_review: same caller + receptionist source at the exact slot — frees a held slot when
+      they call again.
     """
     if not runtime.USE_DB:
         return 0
@@ -114,24 +118,34 @@ def _supersede_pending_customer_drafts_for_slot(
         st = apt.get("status") or ""
         if st not in ("pending_customer", "pending_review"):
             continue
-        if st == "pending_review":
-            if (apt.get("source") or "").strip() != "receptionist":
-                continue
-            if not phone or not _phones_match_for_booking(
-                phone, apt.get("phone") or ""
-            ):
-                continue
         if (apt.get("date") or "") != date:
             continue
-        apt_time = booking_service._normalize_time_to_hhmm(apt.get("time") or "") or (
-            apt.get("time") or ""
-        )
-        if apt_time != norm_time:
-            continue
-        if booking_service._staff_slot_key(apt.get("staff_id")) != want_staff:
-            continue
-        if phone and not _phones_match_for_booking(phone, apt.get("phone") or ""):
-            continue
+        if st == "pending_customer" and phone:
+            # An unconfirmed draft holds no slot, so a caller should have at most one per day.
+            # Match any of THIS caller's same-date drafts so a mid-call change (time, service, OR
+            # stylist) REPLACES the draft instead of leaving a stale duplicate on the dashboard.
+            if not _phones_match_for_booking(phone, apt.get("phone") or ""):
+                continue
+        else:
+            # pending_review (a held slot) or an anonymous draft with no caller phone: only
+            # supersede the exact same slot, and for pending_review require the same caller +
+            # receptionist source so we never free an unrelated held slot.
+            if st == "pending_review":
+                if (apt.get("source") or "").strip() != "receptionist":
+                    continue
+                if not phone or not _phones_match_for_booking(
+                    phone, apt.get("phone") or ""
+                ):
+                    continue
+            apt_time = booking_service._normalize_time_to_hhmm(apt.get("time") or "") or (
+                apt.get("time") or ""
+            )
+            if apt_time != norm_time:
+                continue
+            if booking_service._staff_slot_key(apt.get("staff_id")) != want_staff:
+                continue
+            if phone and not _phones_match_for_booking(phone, apt.get("phone") or ""):
+                continue
         aid = apt.get("id")
         if not aid:
             continue
@@ -635,6 +649,24 @@ def _stylists_offering_service(biz: dict, service_name: Optional[str]) -> list:
     return matched or all_names
 
 
+def _staff_offers_service(biz: dict, staff_row: dict, service_name: Optional[str]) -> bool:
+    """True if this stylist provides the service. Empty service_ids = does everything. An
+    unknown/unmatched service is NOT blocked (we can't prove it isn't offered)."""
+    if not service_name:
+        return True
+    ids = staff_row.get("service_ids") or []
+    if not ids:
+        return True
+    svc_id = None
+    for s in config_service._normalize_service_entries(biz.get("services") or []):
+        if (s.get("name") or "").strip().lower() == service_name.strip().lower():
+            svc_id = (s.get("id") or "").strip()
+            break
+    if not svc_id:
+        return True
+    return svc_id in ids
+
+
 def _validate_booking_requirements(
     booking: dict,
     info: Optional[dict] = None,
@@ -729,6 +761,20 @@ def _validate_booking_requirements(
             + " Or say anyone if you have no preference."
         )
         return False, msg, None, None
+
+    # Hard check: the chosen stylist must actually offer the chosen service. Applies to changes
+    # too (e.g. caller keeps the stylist but switches to a service that stylist doesn't do).
+    if staff_id and service_name:
+        srow = next((s for s in staff_rows if str(s.get("id")) == str(staff_id)), None)
+        if srow is not None and not _staff_offers_service(biz, srow, service_name):
+            name = (srow.get("name") or "").strip() or "That stylist"
+            alt = ", ".join(_stylists_offering_service(biz, service_name)[:5])
+            msg = (
+                f"{name} doesn't do {service_name}. "
+                + (f"For {service_name} you can book {alt}. " if alt else "")
+                + "Would you like one of them, or a different service?"
+            )
+            return False, msg, staff_id, service_name
 
     # Backstop: never book a stylist on a day/time they don't work, even if the AI tried to.
     if staff_id and booking_date:

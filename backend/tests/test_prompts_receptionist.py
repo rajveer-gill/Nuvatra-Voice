@@ -89,6 +89,21 @@ def test_prompt_unrestricted_stylist_listed_explicitly_when_another_is_restricte
     assert "Tom: works any day the shop is open" in p
 
 
+def test_prompt_instructs_reemit_booking_on_change():
+    # A caller changing the service/stylist/time after booking must trigger a fresh BOOKING line,
+    # otherwise the change isn't saved (regression: a service change didn't update the record).
+    biz = {
+        "name": "Salon",
+        "hours": "9-5",
+        "services": [{"id": "s1", "name": "Cut"}],
+        "staff": [{"name": "Jake"}],
+    }
+    p = build_system_prompt(business_info=biz, include_booked_slots=True)
+    low = p.lower()
+    assert "changes any already-agreed detail" in low
+    assert "new booking line" in low
+
+
 def test_prompt_no_working_days_section_when_unset():
     biz = {
         "name": "Salon",
