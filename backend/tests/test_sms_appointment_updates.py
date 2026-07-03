@@ -309,6 +309,72 @@ def test_apply_stylist_change_rejected_when_off_that_day():
     assert out.get("staff_id") == "s1"  # unchanged
 
 
+_HOURS = "Monday–Friday: 9:00 AM – 5:00 PM, Saturday–Sunday: Closed"
+
+
+def _run_date_change(body, *, stored, business_info, known_staff, rejection_out=None):
+    def fake_update(aid, client_id, **kwargs):
+        stored.update(kwargs)
+        return dict(stored)
+
+    return apply_sms_appointment_detail_updates_from_bodies(
+        [body],
+        stored,
+        client_id="test",
+        from_number="+15551234567",
+        db_appointments_update=fake_update,
+        db_appointments_get_by_id=lambda aid, client_id: dict(stored),
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=_logging.getLogger("test"),
+        business_info=business_info,
+        known_staff=known_staff,
+        rejection_out=rejection_out,
+    )
+
+
+def test_apply_date_change_rejected_on_closure():
+    stored = {"id": 20, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
+    rej: dict = {}
+    out, _ = _run_date_change(
+        "change to 2026-07-04",  # a Saturday AND a shop closure
+        stored=stored,
+        business_info={"hours": _HOURS, "closures": ["2026-07-04"]},
+        known_staff=[{"id": "s1", "name": "Jake", "working_days": ["mon", "wed", "fri"]}],
+        rejection_out=rej,
+    )
+    assert out.get("date") == "2026-07-06"  # unchanged
+    assert "closed" in rej.get("message", "").lower()
+
+
+def test_apply_date_change_rejected_when_stylist_off_that_day():
+    stored = {"id": 21, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
+    rej: dict = {}
+    out, _ = _run_date_change(
+        "change to 2026-07-07",  # Tuesday: shop open, but Jake works Mon/Wed/Fri
+        stored=stored,
+        business_info={"hours": _HOURS, "closures": []},
+        known_staff=[{"id": "s1", "name": "Jake", "working_days": ["mon", "wed", "fri"]}],
+        rejection_out=rej,
+    )
+    assert out.get("date") == "2026-07-06"  # unchanged
+    assert rej.get("message")
+
+
+def test_apply_date_change_allowed_on_valid_open_day():
+    stored = {"id": 22, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
+    rej: dict = {}
+    out, _ = _run_date_change(
+        "change to 2026-07-08",  # Wednesday: shop open and Jake works Wednesdays
+        stored=stored,
+        business_info={"hours": _HOURS, "closures": []},
+        known_staff=[{"id": "s1", "name": "Jake", "working_days": ["mon", "wed", "fri"]}],
+        rejection_out=rej,
+    )
+    assert out.get("date") == "2026-07-08"  # applied
+    assert not rej.get("message")
+
+
 def test_apply_stylist_change_rejected_when_service_not_offered():
     stored = {"id": 12, "status": "pending_customer", "name": "Raj", "date": "2026-07-06", "time": "14:00", "reason": "Long Cut", "staff_id": "s1"}
     rej: dict = {}

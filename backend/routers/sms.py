@@ -678,6 +678,7 @@ async def handle_incoming_sms(request: Request):
                     known_services=known_services,
                     known_staff=known_staff,
                     service_id_by_name=service_id_by_name,
+                    business_info=_svc_cfg,
                     rejection_out=stylist_rejection,
                 )
             )
@@ -685,14 +686,15 @@ async def handle_incoming_sms(request: Request):
                 f in detail_fields_updated for f in ("time", "date")
             ):
                 booking_service._reconcile_sms_appointment_slot_after_detail_change(apt)
-            # A requested stylist switch was refused (wrong service / off that day). Tell the
-            # customer the truth directly instead of letting the AI confirm a switch that didn't
-            # happen. Mirrors the applied-change summary short-circuit below.
+            # A requested change was refused (stylist can't do the service / is off that day, or
+            # the new date is a closed day). Tell the customer the truth directly instead of
+            # letting the AI confirm a change that didn't happen. Mirrors the applied-change
+            # summary short-circuit below.
             if stylist_rejection.get("message") and not _is_sms_confirmation(body):
                 reject_msg = stylist_rejection["message"]
                 send_ok = sms_service.send_sms(from_number, reject_msg, from_override=to_number)
                 sms_info(
-                    "sms_stylist_change_rejected_reply",
+                    "sms_change_rejected_reply",
                     request_id=rid,
                     apt_id=apt.get("id") if apt else None,
                     client_id=tenant["client_id"],

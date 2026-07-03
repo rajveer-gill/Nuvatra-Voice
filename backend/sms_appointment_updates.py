@@ -314,6 +314,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
     known_services: Optional[list[str]] = None,
     known_staff: Optional[list[dict]] = None,
     service_id_by_name: Optional[dict] = None,
+    business_info: Optional[dict] = None,
     rejection_out: Optional[dict] = None,
 ) -> DetailUpdateResult:
     """Apply name/time/date/service/stylist from the latest values across recent inbound SMS.
@@ -449,6 +450,42 @@ def apply_sms_appointment_detail_updates_from_bodies(
                     reason=stylist_rejected,
                     stylist_initial=name_initial_for_log(latest_stylist),
                 )
+    # Date/time change validation: never move an appointment onto a day the shop is closed
+    # (weekend or a shop closure) or a day/time the assigned stylist doesn't work.
+    if ("date" in kwargs) or ("time" in kwargs):
+        import staff_schedule
+
+        eff_date = latest_date or prior_date
+        eff_time = latest_time or prior_time or ""
+        eff_row = staff_by_id.get(str(kwargs.get("staff_id") or prior_staff_id))
+        closures = (business_info or {}).get("closures") or []
+        block_msg = None
+        if eff_date:
+            if staff_schedule.shop_closure_message(closures, eff_date):
+                block_msg = f"We're closed on {staff_schedule.friendly_date(eff_date)}. Want another day?"
+            else:
+                try:
+                    import business_hours as _bh
+
+                    if getattr(_bh.day_slot_for_date(business_info or {}, eff_date), "closed", False):
+                        block_msg = (
+                            f"We're closed on {staff_schedule.friendly_date(eff_date)}. Want another day?"
+                        )
+                except Exception:
+                    pass
+            if not block_msg and eff_row:
+                unavail = staff_schedule.staff_unavailable_message(eff_row, eff_date, eff_time)
+                if unavail:
+                    block_msg = unavail
+        if block_msg:
+            kwargs.pop("date", None)
+            kwargs.pop("time", None)
+            if rejection_out is not None and not rejection_out.get("message"):
+                rejection_out["message"] = block_msg
+                rejection_out["reason"] = "date_unavailable"
+            sms_info(
+                "sms_date_change_rejected", apt_id=aid, client_id=client_id, eff_date=eff_date or None
+            )
     if not kwargs:
         sms_info(
             "sms_detail_updates_no_match",
