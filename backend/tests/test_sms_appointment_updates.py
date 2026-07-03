@@ -309,6 +309,31 @@ def test_apply_stylist_change_rejected_when_off_that_day():
     assert out.get("staff_id") == "s1"  # unchanged
 
 
+def test_parse_date_natural_phrasings():
+    from datetime import date
+    from sms_appointment_updates import parse_date_from_sms as p
+
+    base = date(2026, 7, 3)  # Friday
+    assert p("move it to July 8th", today=base) == "2026-07-08"
+    assert p("make it July 8", today=base) == "2026-07-08"
+    assert p("the 8th of July", today=base) == "2026-07-08"
+    assert p("can we do the 8th", today=base) == "2026-07-08"  # bare ordinal
+    assert p("change it to Tuesday", today=base) == "2026-07-07"  # next Tuesday
+    assert p("switch to next Monday", current_date="2026-07-10", today=base) == "2026-07-06"
+    assert p("change to August 12th", today=base) == "2026-08-12"
+    assert p("2026-07-08", today=base) == "2026-07-08"  # ISO still works
+
+
+def test_parse_date_ignores_times_and_confirmations():
+    from datetime import date
+    from sms_appointment_updates import parse_date_from_sms as p
+
+    base = date(2026, 7, 3)
+    assert p("make it 3 PM", today=base) is None  # a time, not a date
+    assert p("yes", today=base) is None
+    assert p("looks good", today=base) is None
+
+
 _HOURS = "Monday–Friday: 9:00 AM – 5:00 PM, Saturday–Sunday: Closed"
 
 

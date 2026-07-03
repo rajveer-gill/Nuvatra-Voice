@@ -37,6 +37,26 @@ _TIME_PATTERNS = (
 )
 _DATE_ISO_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 _DATE_RELATIVE_RE = re.compile(r"\b(today|tomorrow)\b", re.I)
+
+# Natural-language date parsing (so "July 8th", "the 8th", "next Monday" work, not just ISO).
+_MONTH_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_WEEKDAY_NUM = {
+    "monday": 0, "mon": 0, "tuesday": 1, "tues": 1, "tue": 1, "wednesday": 2, "wed": 2,
+    "thursday": 3, "thurs": 3, "thur": 3, "thu": 3, "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5, "sunday": 6, "sun": 6,
+}
+_MONTH_NAME = r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+_MONTH_DAY_RE = re.compile(rf"\b{_MONTH_NAME}\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I)
+_DAY_MONTH_RE = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+of\s+{_MONTH_NAME}\b", re.I)
+_ORDINAL_DAY_RE = re.compile(r"\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b", re.I)
+_WEEKDAY_RE = re.compile(
+    r"\b(?:next|this|coming|on)?\s*"
+    r"(monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)\b",
+    re.I,
+)
 _SERVICE_PATTERNS = (
     re.compile(
         r"(?:change|switch|update)\s+(?:the\s+)?service\s+(?:to\s+)?(?:a\s+)?"
@@ -208,25 +228,88 @@ def parse_time_from_sms(body: str, *, current_time: str = "") -> Optional[str]:
     return None
 
 
-def parse_date_from_sms(body: str, *, current_date: str = "") -> Optional[str]:
+def _future_date_for_month_day(base: date, month: int, day: int) -> Optional[date]:
+    """The next occurrence of month/day on or after base (this year, else next year)."""
+    for yr in (base.year, base.year + 1):
+        try:
+            d = date(yr, month, day)
+        except ValueError:
+            return None
+        if d >= base:
+            return d
+    return None
+
+
+def _future_day_of_month(base: date, day: int) -> Optional[date]:
+    """Nearest date on or after base that falls on the given day-of-month."""
+    y, m = base.year, base.month
+    for _ in range(14):
+        try:
+            d = date(y, m, day)
+        except ValueError:
+            d = None
+        if d and d >= base:
+            return d
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return None
+
+
+def parse_date_from_sms(
+    body: str, *, current_date: str = "", today: Optional[date] = None
+) -> Optional[str]:
+    """Best-effort date from a change text. Handles ISO (2026-07-08), today/tomorrow, month +
+    day ("July 8th", "the 8th of July"), a bare ordinal ("the 8th"), and weekdays ("next
+    Monday"). Relative dates are computed from `today` (business-local when supplied)."""
     text = (body or "").strip()
     if not text or _is_likely_sms_confirmation_body(text):
         return None
+    base = today or date.today()
+    cur = (current_date or "").strip()
+
+    def _result(d: Optional[date]) -> Optional[str]:
+        if not d:
+            return None
+        iso = d.isoformat()
+        return iso if iso != cur else None
+
     iso = _DATE_ISO_RE.search(text)
     if iso:
-        candidate = iso.group(1)
-        if candidate != (current_date or "").strip():
-            return candidate
+        try:
+            return _result(date.fromisoformat(iso.group(1)))
+        except ValueError:
+            return None
+
     rel = _DATE_RELATIVE_RE.search(text)
     if rel:
-        word = rel.group(1).lower()
-        base = date.today()
-        if word == "tomorrow":
-            candidate = (base + timedelta(days=1)).isoformat()
-        else:
-            candidate = base.isoformat()
-        if candidate != (current_date or "").strip():
-            return candidate
+        d = base + timedelta(days=1) if rel.group(1).lower() == "tomorrow" else base
+        return _result(d)
+
+    # Month + day, either order ("July 8th" / "8th of July").
+    m = _MONTH_DAY_RE.search(text)
+    month = day = None
+    if m:
+        month, day = _MONTH_ABBR.get(m.group(1)[:3].lower()), int(m.group(2))
+    else:
+        dm = _DAY_MONTH_RE.search(text)
+        if dm:
+            month, day = _MONTH_ABBR.get(dm.group(2)[:3].lower()), int(dm.group(1))
+    if month and day:
+        return _result(_future_date_for_month_day(base, month, day))
+
+    od = _ORDINAL_DAY_RE.search(text)
+    if od:
+        return _result(_future_day_of_month(base, int(od.group(1))))
+
+    wd = _WEEKDAY_RE.search(text)
+    if wd:
+        target = _WEEKDAY_NUM.get(wd.group(1).lower())
+        if target is not None:
+            ahead = (target - base.weekday()) % 7
+            if ahead == 0:  # "Monday" means the upcoming Monday, not today
+                ahead = 7
+            return _result(base + timedelta(days=ahead))
     return None
 
 
@@ -347,6 +430,14 @@ def apply_sms_appointment_detail_updates_from_bodies(
     staff_names = [(r.get("name") or "").strip() for r in (known_staff or []) if (r.get("name") or "").strip()]
     prior_staff_id = str(apt.get("staff_id") or "").strip()
     prior_stylist_name = (staff_by_id.get(prior_staff_id, {}).get("name") or "").strip()
+    # Business-local "today" so "tomorrow"/"next Monday" resolve to the caller's day, not UTC's.
+    _sms_today = None
+    try:
+        import business_hours as _bh
+
+        _sms_today = _bh.business_local_now(business_info or {}).date()
+    except Exception:
+        _sms_today = None
     latest_name: Optional[str] = None
     latest_time: Optional[str] = None
     latest_date: Optional[str] = None
@@ -375,7 +466,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
         if tm:
             latest_time = tm
             cur_time = tm
-        dt = parse_date_from_sms(body, current_date=prior_date)
+        dt = parse_date_from_sms(body, current_date=prior_date, today=_sms_today)
         if dt:
             latest_date = dt
         sv = parse_service_from_sms(
