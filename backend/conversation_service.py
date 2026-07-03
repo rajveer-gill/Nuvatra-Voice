@@ -1176,7 +1176,8 @@ async def generate_response_async(
                     f"model={VOICE_LLM_MODEL} tz={getattr(_tz.tzinfo, 'key', _tz.tzinfo)} "
                     f"today={_tz.strftime('%A')} {_tz.date()} "
                     f"tomorrow={(_tz + timedelta(days=1)).strftime('%A')} {(_tz + timedelta(days=1)).date()} "
-                    f"hours=[{(_biz.get('hours') or '')[:60]}] | roster: {_roster}"
+                    f"hours=[{(_biz.get('hours') or '')[:60]}] "
+                    f"closures={(_biz.get('closures') or [])[:15]} | roster: {_roster}"
                 ),
             )
         except Exception:
