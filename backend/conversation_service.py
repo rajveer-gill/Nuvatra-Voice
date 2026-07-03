@@ -1155,6 +1155,31 @@ async def generate_response_async(
             from_number=call_data.get("from_number") or None,
             client_id=call_data.get("client_id") or None,
         )
+        # Diagnostic (only emitted when OBS_TRACE_TRANSCRIPT=1): the exact date + per-stylist
+        # schedule the AI is reasoning over, so a wrong "tomorrow" or a misattributed stylist
+        # schedule is visible in the logs instead of inferred.
+        try:
+            import staff_schedule as _ss
+
+            _biz = config_service.get_business_info()
+            _tz = business_local_now(_biz)
+            _roster = "; ".join(
+                f"{(s.get('name') or '?').strip()}="
+                + (",".join(_ss.normalize_working_days(s.get("working_days"))) or "any")
+                for s in (_biz.get("staff") or [])
+                if (s.get("name") or "").strip()
+            )
+            voice_transcript(
+                "booking_debug_context",
+                call_sid=call_sid,
+                text=(
+                    f"model={VOICE_LLM_MODEL} tz={getattr(_tz.tzinfo, 'key', _tz.tzinfo)} "
+                    f"today={_tz.date()} tomorrow={(_tz + timedelta(days=1)).date()} "
+                    f"hours=[{(_biz.get('hours') or '')[:60]}] | roster: {_roster}"
+                ),
+            )
+        except Exception:
+            pass
 
         # Always include booked slots (skip cache so prompt and is_slot_available see same data—avoids "available" then "booked")
         messages = [
