@@ -633,6 +633,14 @@ async def handle_incoming_sms(request: Request):
                 for m in messages
                 if (m.get("role") or "").strip() == "user"
             ][-8:]
+            # The shop's real service menu, so "make it a long cut" matches without the caller
+            # having to say the rigid phrase "change service to ...".
+            _svc_cfg = config_service.load_client_config(tenant["client_id"]) or {}
+            known_services = [
+                (s.get("name") or "").strip()
+                for s in config_service._normalize_service_entries(_svc_cfg.get("services") or [])
+                if (s.get("name") or "").strip()
+            ]
             sms_trace(
                 "sms_detail_updates_session_context",
                 request_id=rid,
@@ -654,6 +662,7 @@ async def handle_incoming_sms(request: Request):
                     ),
                     system_info=system_info,
                     logger=logger,
+                    known_services=known_services,
                 )
             )
             if detail_fields_updated and apt and any(

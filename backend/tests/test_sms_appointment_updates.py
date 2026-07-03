@@ -4,9 +4,36 @@ from sms_appointment_updates import (
     apply_sms_appointment_detail_updates,
     parse_email_from_sms,
     parse_name_from_sms,
+    parse_service_from_sms,
     parse_time_from_sms,
     normalize_time_to_hhmm,
 )
+
+_MENU = ["Short Cut", "Long Cut", "Fade", "Beard Trim"]
+
+
+def test_parse_service_natural_phrasing_matches_menu():
+    # Regression: a text like this returned no match because the parser required the literal
+    # word "service" — so a customer's SMS service change never reached the dashboard.
+    assert parse_service_from_sms("make it a long cut", current_service="Short Cut", known_services=_MENU) == "Long Cut"
+    assert parse_service_from_sms("can I change to a fade instead", current_service="Short Cut", known_services=_MENU) == "Fade"
+
+
+def test_parse_service_longest_menu_name_wins():
+    assert parse_service_from_sms("i'd like a long cut", current_service="Fade", known_services=_MENU) == "Long Cut"
+
+
+def test_parse_service_same_as_current_returns_none():
+    assert parse_service_from_sms("long cut is good", current_service="Long Cut", known_services=_MENU) is None
+
+
+def test_parse_service_pure_confirmation_returns_none():
+    assert parse_service_from_sms("yes", current_service="Fade", known_services=_MENU) is None
+
+
+def test_parse_service_regex_fallback_without_menu():
+    # Back-compat: the rigid pattern still works when no menu is supplied.
+    assert parse_service_from_sms("change service to Balayage") == "Balayage"
 
 
 def test_parse_name_correction_not_jake():

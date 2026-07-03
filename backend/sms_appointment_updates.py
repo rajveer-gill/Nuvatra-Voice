@@ -230,13 +230,27 @@ def parse_date_from_sms(body: str, *, current_date: str = "") -> Optional[str]:
     return None
 
 
-def parse_service_from_sms(body: str, *, current_service: str = "") -> Optional[str]:
+def parse_service_from_sms(
+    body: str, *, current_service: str = "", known_services: Optional[list[str]] = None
+) -> Optional[str]:
     text = (body or "").strip()
     if not text or _is_likely_sms_confirmation_body(text):
         return None
     if re.search(r"\bname\s+is\b", text, re.I):
         return None
     cur = (current_service or "").strip().lower()
+    # Match against the shop's actual menu first — real texts say "make it a long cut" or
+    # "long cut instead", not the rigid "change service to Long Cut". Longest name first so a
+    # multi-word service ("Long Cut") wins over a shorter substring ("Cut").
+    for svc in sorted(
+        (s.strip() for s in (known_services or []) if (s or "").strip()),
+        key=len,
+        reverse=True,
+    ):
+        if svc.lower() == cur:
+            continue
+        if re.search(r"\b" + re.escape(svc) + r"\b", text, re.I):
+            return svc
     skip_words = {
         "time",
         "date",
@@ -272,6 +286,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
     db_appointments_update_active_name_by_phone=None,
     system_info,
     logger,
+    known_services: Optional[list[str]] = None,
 ) -> DetailUpdateResult:
     """Apply name/time/date/service from the latest values across recent inbound SMS texts."""
     if not apt or not apt.get("id"):
@@ -316,7 +331,9 @@ def apply_sms_appointment_detail_updates_from_bodies(
         dt = parse_date_from_sms(body, current_date=prior_date)
         if dt:
             latest_date = dt
-        sv = parse_service_from_sms(body, current_service=prior_service)
+        sv = parse_service_from_sms(
+            body, current_service=prior_service, known_services=known_services
+        )
         if sv:
             latest_service = sv
     kwargs: dict[str, Any] = {}
@@ -361,6 +378,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
         db_appointments_update_active_name_by_phone=db_appointments_update_active_name_by_phone,
         system_info=system_info,
         logger=logger,
+        known_services=known_services,
         _forced_kwargs=kwargs,
     )
 
@@ -377,6 +395,7 @@ def apply_sms_appointment_detail_updates(
     db_appointments_update_active_name_by_phone=None,
     system_info,
     logger,
+    known_services: Optional[list[str]] = None,
     _forced_kwargs: Optional[dict[str, Any]] = None,
 ) -> DetailUpdateResult:
     """
@@ -400,7 +419,9 @@ def apply_sms_appointment_detail_updates(
         dt = parse_date_from_sms(body, current_date=(apt.get("date") or ""))
         if dt:
             kwargs["date"] = dt
-        sv = parse_service_from_sms(body, current_service=(apt.get("reason") or ""))
+        sv = parse_service_from_sms(
+            body, current_service=(apt.get("reason") or ""), known_services=known_services
+        )
         if sv:
             kwargs["reason"] = sv
     if not kwargs:
