@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -162,8 +163,19 @@ def business_timezone(info: Optional[dict] = None) -> ZoneInfo:
         tz_name = (os.getenv("BUSINESS_TIMEZONE") or "America/Los_Angeles").strip()
     try:
         return ZoneInfo(tz_name)
-    except Exception:
-        return ZoneInfo("UTC")
+    except Exception as e:
+        # Almost always a missing IANA tz database (slim container without `tzdata`). Falling
+        # back to UTC silently corrupts "today"/"tomorrow" date math, so make it loud.
+        logging.getLogger("nuvatra").warning(
+            "business_timezone: could not load %r (%s); falling back to UTC. "
+            "Ensure the `tzdata` package is installed.",
+            tz_name,
+            e,
+        )
+        try:
+            return ZoneInfo("UTC")
+        except Exception:
+            return timezone.utc
 
 
 def business_local_now(

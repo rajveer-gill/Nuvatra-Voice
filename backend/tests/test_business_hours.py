@@ -5,10 +5,26 @@ from zoneinfo import ZoneInfo
 
 from business_hours import (
     after_hours_prompt_block,
+    business_local_now,
+    business_timezone,
     is_past_closing_for_date,
     parse_hours_to_weekly,
     same_day_after_hours_message,
 )
+
+
+def test_default_timezone_is_pacific_not_utc():
+    # Guards the tzdata regression: with no timezone configured we must resolve to Pacific,
+    # NOT silently fall back to UTC. Fails if the `tzdata` package is missing from the image.
+    assert business_timezone({}).key == "America/Los_Angeles"
+
+
+def test_business_local_now_converts_utc_to_local_date():
+    # 04:37 UTC on Jul 3 is still Jul 2 (9:37 PM) in Pacific. When this resolved to UTC, the
+    # AI computed "tomorrow" a day early and refused valid same-week bookings on evening calls.
+    now = datetime(2026, 7, 3, 4, 37, tzinfo=timezone.utc)
+    local = business_local_now({}, now=now)
+    assert str(local.date()) == "2026-07-02"
 
 
 def test_parse_hours_mon_fri():

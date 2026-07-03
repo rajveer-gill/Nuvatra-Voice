@@ -20,6 +20,10 @@ PyJWT[crypto]==2.8.0
 pytest==7.4.3
 pytest-asyncio==0.21.1
 stripe>=8.0.0
+# IANA timezone database for zoneinfo. python:3.11-slim ships no system tzdata, so without
+# this ZoneInfo("America/Los_Angeles") raises and business-local time silently falls back to
+# UTC — which broke "today"/"tomorrow" date math on calls every evening.
+tzdata>=2024.1
 
 
 
