@@ -325,7 +325,10 @@ class AppointmentRejectBody(BaseModel):
 class PreviewDeclineSmsBody(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2000)
     appointment_id: Optional[int] = None
-    event: Literal["decline", "cancel"] = "decline"
+    # The dashboard sends its internal action name ("reject" for declining a pending request,
+    # "cancel" for an accepted booking). Accept "reject" too — the handler maps it to "decline" —
+    # so the SMS preview doesn't 422 and show "Could not generate preview".
+    event: Literal["decline", "cancel", "reject"] = "decline"
 
 
 _ACCEPTED_APPOINTMENT_STATUSES = frozenset({"accepted", "confirmed", "completed"})
