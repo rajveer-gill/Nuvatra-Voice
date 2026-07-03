@@ -13,7 +13,7 @@ Environment:
   DEEPGRAM_API_KEY         — Required when VOICE_STT_PROVIDER=deepgram.
   MEDIA_STREAM_SIGNING_SECRET — Optional HMAC secret for stream tokens; falls back to TWILIO_AUTH_TOKEN.
   VOICE_MEDIA_STREAM_MAX_SEC — Max seconds per Connect+Stream listening window (default 30).
-  VOICE_DEEPGRAM_FINAL_DEBOUNCE_MS — Debounce after Deepgram finals before committing utterance (default 450).
+  VOICE_DEEPGRAM_FINAL_DEBOUNCE_MS — Silence (ms) to wait after the caller stops before committing the utterance / playing "got it" (default 800). Higher = caller feels less rushed on pauses; too high = slower replies.
 
 Phone numbers are masked in log lines (security.redaction).
 """

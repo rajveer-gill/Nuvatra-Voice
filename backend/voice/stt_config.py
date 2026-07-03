@@ -44,10 +44,13 @@ def media_stream_max_sec() -> float:
 
 
 def utterance_finalize_debounce_ms() -> int:
+    # Silence to wait after the caller stops before we commit the utterance and play "got it,
+    # one moment". Higher = the caller can pause mid-sentence without being cut off (less
+    # rushed); too high and the AI feels slow to answer. Tune per shop via the env var.
     try:
-        return int(os.getenv("VOICE_DEEPGRAM_FINAL_DEBOUNCE_MS", "450"))
+        return int(os.getenv("VOICE_DEEPGRAM_FINAL_DEBOUNCE_MS", "800"))
     except ValueError:
-        return 450
+        return 800
 
 
 def deepgram_max_frame_bytes() -> int:
