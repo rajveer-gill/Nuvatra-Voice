@@ -495,6 +495,15 @@ def parse_booking(ai_text: str) -> Optional[dict]:
         return None
     rest = (m.group(1) or "").strip()
     vals = [v.strip() for v in rest.split("|")]
+    # The model sometimes drops one of the always-empty phone/email fields (e.g.
+    # "Raj||2026-07-06|2:00 PM|..."), which shifts the date into an earlier slot and gets the
+    # whole booking thrown out as invalid_date. Realign by the ISO date: pad empty fields before
+    # it so it lands in the date position (index 3).
+    _date_idx = next(
+        (i for i, v in enumerate(vals) if re.match(r"^\d{4}-\d{2}-\d{2}$", v)), None
+    )
+    if _date_idx is not None and _date_idx < 3:
+        vals = vals[:_date_idx] + [""] * (3 - _date_idx) + vals[_date_idx:]
     if len(vals) < 5:
         return None
     return {

@@ -46,6 +46,23 @@ def test_parse_booking_no_booking_marker():
     assert parse_booking("Thanks for calling!") is None
 
 
+def test_parse_booking_realigns_dropped_empty_fields():
+    # Regression: the model dropped an always-empty field ("Raj||2026-07-06|..." instead of
+    # "Raj|||2026-07-06|..."), shifting the date into the email slot -> rejected as invalid_date
+    # -> "scheduled" said but nothing booked. The parser must realign by the ISO date.
+    for text in (
+        "Great! BOOKING: Raj||2026-07-06|2:00 PM|Long Cut|Jake",  # dropped email
+        "BOOKING: Raj|2026-07-06|2:00 PM|Long Cut|Jake",  # dropped phone AND email
+        "BOOKING: Raj|||2026-07-06|2:00 PM|Long Cut|Jake",  # correct 7-field
+    ):
+        got = parse_booking(text)
+        assert got is not None
+        assert got["date"] == "2026-07-06"
+        assert got["time"] == "2:00 PM"
+        assert got["reason"] == "Long Cut"
+        assert got["staff"] == "Jake"
+
+
 def test_parse_booking_too_few_fields():
     text = "BOOKING: John|555"
     got = parse_booking(text)
