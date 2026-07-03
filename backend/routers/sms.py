@@ -634,8 +634,11 @@ async def handle_incoming_sms(request: Request):
                 if (m.get("role") or "").strip() == "user"
             ][-8:]
             # The shop's real service menu, so "make it a long cut" matches without the caller
-            # having to say the rigid phrase "change service to ...".
-            _svc_cfg = config_service.load_client_config(tenant["client_id"]) or {}
+            # having to say the rigid phrase "change service to ...". Use get_business_info (the
+            # NORMALIZED staff + services) so the service ids in the menu line up with the ids in
+            # each stylist's service_ids — the raw config didn't align, which let an SMS switch a
+            # stylist onto a service they don't offer.
+            _svc_cfg = config_service.get_business_info() or {}
             _svc_entries = config_service._normalize_service_entries(_svc_cfg.get("services") or [])
             known_services = [
                 (s.get("name") or "").strip()
