@@ -7,6 +7,7 @@ Environment:
   OBS_TRACE_WEBHOOKS=1     — INFO log for each /api/phone/* and /api/sms/* request (timing + status).
   OBS_TRACE_SMS=1          — INFO logs each inbound SMS pipeline step (tenant resolve, compliance, AI, DB); use when debugging delivery or replies.
   OBS_TRACE_VOICE=1        — INFO logs each voice pipeline step (incoming, respond branches, transfers, STT); recommended when debugging calls on Render.
+  OBS_TRACE_TRANSCRIPT=1   — INFO logs the FULL caller and AI utterances (whole conversation). PII: contains raw transcript text, so keep OFF by default and enable only while actively debugging a call.
   GREETING_DEBUG=1         — INFO logs resolved phone greeting text (spoken_preview) on each call and Settings save; also enabled when SETTINGS_LOAD_DEBUG=1.
   VOICE_STT_PROVIDER=twilio|deepgram — Default twilio (Gather). deepgram uses Media Streams on every listen turn (/api/phone/media + Deepgram Nova-2); Gather remains fail-open fallback.
   DEEPGRAM_API_KEY         — Required when VOICE_STT_PROVIDER=deepgram.
@@ -43,6 +44,7 @@ OBS_VERBOSE: bool = _truthy("OBS_VERBOSE")
 OBS_TRACE_WEBHOOKS: bool = _truthy("OBS_TRACE_WEBHOOKS")
 OBS_TRACE_SMS: bool = _truthy("OBS_TRACE_SMS")
 OBS_TRACE_VOICE: bool = _truthy("OBS_TRACE_VOICE")
+OBS_TRACE_TRANSCRIPT: bool = _truthy("OBS_TRACE_TRANSCRIPT")
 
 
 def name_initial_for_log(name: Optional[str]) -> str:
@@ -151,6 +153,21 @@ def voice_trace(event: str, **fields: Any) -> None:
     if not OBS_TRACE_VOICE:
         return
     voice_event(logging.INFO, event, **fields)
+
+
+def voice_transcript(event: str, *, call_sid: str = "", text: str = "", **fields: Any) -> None:
+    """Log a full caller/AI utterance at INFO when OBS_TRACE_TRANSCRIPT=1, so the whole
+    conversation is reconstructable from the logs. PII: emits raw transcript text (capped to
+    2000 chars), so keep the flag OFF except while actively debugging a call."""
+    if not OBS_TRACE_TRANSCRIPT:
+        return
+    voice_event(
+        logging.INFO,
+        event,
+        call_sid=call_sid,
+        text=(text or "").strip()[:2000],
+        **fields,
+    )
 
 
 def voice_warning(event: str, **fields: Any) -> None:

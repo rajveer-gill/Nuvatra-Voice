@@ -10,7 +10,7 @@ from typing import Any, Optional
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
-from observability import voice_debug, voice_info
+from observability import voice_debug, voice_info, voice_transcript
 from voice.twilio_call import safe_twilio_call_update
 from voice.deepgram_bridge import connect_deepgram_listen, parse_deepgram_transcript_message
 from voice.media_token import token_stream_generation, verify_pending_media_stream_token
@@ -121,6 +121,7 @@ class _UtteranceCollector:
             transcript_len=len(text),
             confidence=conf,
         )
+        voice_transcript("caller_said", call_sid=self.call_sid, text=text)
         if not (text or "").strip():
             # Deepgram often sends an empty final on stream end; do not replace live TwiML or
             # hit Gather/process-speech with silence — let Twilio continue to play/got-it/respond.

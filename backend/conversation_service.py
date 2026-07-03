@@ -33,6 +33,7 @@ from observability import (
     voice_debug,
     voice_forward,
     voice_info,
+    voice_transcript,
     voice_warning,
 )
 from booking_fields import (
@@ -1197,6 +1198,9 @@ async def generate_response_async(
 
         ai_text = ai_response.choices[0].message.content
         voice_debug("gpt_reply", call_sid=call_sid, reply_preview=(ai_text or "")[:80])
+        # Full AI reply (incl. any BOOKING marker) when OBS_TRACE_TRANSCRIPT=1 — pairs with the
+        # caller_said lines so the whole conversation is reconstructable from the logs.
+        voice_transcript("ai_said", call_sid=call_sid, text=ai_text or "")
         booking = parse_booking(ai_text)
         if booking:
             booking, repairs, reject = _prepare_parsed_booking(

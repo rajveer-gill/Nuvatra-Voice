@@ -9,7 +9,14 @@ from typing import Literal, Optional
 from urllib.parse import quote
 
 import runtime  # the live call-session store singleton lives here (not on main)
-from observability import voice_call_phase, voice_debug, voice_forward, voice_info, voice_warning
+from observability import (
+    voice_call_phase,
+    voice_debug,
+    voice_forward,
+    voice_info,
+    voice_transcript,
+    voice_warning,
+)
 from voice.call_session_store import UtteranceLockError
 from voice.stt_runtime import deepgram_stt_active
 from voice.twiml_stt import empty_retry_twiml
@@ -49,6 +56,7 @@ async def apply_caller_utterance(
         transcript_len=len(speech_result or ""),
         confidence=confidence,
     )
+    voice_transcript("caller_said", call_sid=call_sid, text=speech_result or "")
 
     try:
         async with runtime.call_store.utterance_lock(call_sid):
