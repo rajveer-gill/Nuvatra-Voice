@@ -9,6 +9,7 @@ import {
   Loader2,
   Mail,
   Phone,
+  Scissors,
   Trash2,
   X,
 } from 'lucide-react'
@@ -123,16 +124,17 @@ export function AppointmentCard({
             {apt.reason && apt.reason !== '—' && (
               <span className="rounded-lg bg-white/5 px-2 py-0.5 text-zinc-400">{apt.reason}</span>
             )}
+            {staffLabel && (
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-teal-500/15 px-2.5 py-0.5 font-semibold text-teal-200 ring-1 ring-teal-500/30">
+                <Scissors className="h-3.5 w-3.5" />
+                {staffLabel}
+              </span>
+            )}
           </div>
           <div className="flex flex-wrap gap-2 text-xs text-zinc-500">
             <span className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5">
               {apt.source === 'receptionist' ? 'AI Receptionist' : 'Manual'}
             </span>
-            {staffLabel && (
-              <span className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5">
-                {staffLabel}
-              </span>
-            )}
           </div>
           {apt.confirmation_sms_failed && (
             <div className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-medium text-amber-200">
