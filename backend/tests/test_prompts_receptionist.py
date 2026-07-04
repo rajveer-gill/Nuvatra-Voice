@@ -85,8 +85,10 @@ def test_prompt_unrestricted_stylist_listed_explicitly_when_another_is_restricte
     }
     p = build_system_prompt(business_info=biz, include_booked_slots=True)
     assert "Jake: works Monday, Wednesday, Friday" in p
-    # Tom must be spelled out as unrestricted, not left to inherit Jake's days.
-    assert "Tom: works any day the shop is open" in p
+    # Tom must be spelled out as unrestricted, not left to inherit Jake's days — and firmly, so
+    # the model doesn't invent a day-off (a real failure: it told a caller Tom was off Mondays).
+    assert "Tom: works EVERY day the shop is open" in p
+    assert "never tell the caller Tom is off on a day the shop is open" in p
 
 
 def test_prompt_gives_weekday_date_reference(monkeypatch):

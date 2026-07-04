@@ -507,12 +507,12 @@ export function StaffMembersSection({
                       ) : availableServices.length > 0 ? (
                         <span className="text-[10px] text-gray-400 mt-1 block">All services (none selected)</span>
                       ) : null}
-                      {s.working_days?.length ? (
-                        <span className="mt-1 flex items-center gap-1 text-[10px] text-gray-500">
-                          <Clock className="w-2.5 h-2.5 shrink-0" />
-                          {WORKING_DAYS.filter((d) => s.working_days.includes(d.code)).map((d) => d.label).join(', ')}
-                        </span>
-                      ) : null}
+                      <span className="mt-1 flex items-center gap-1 text-[10px] text-gray-500">
+                        <Clock className="w-2.5 h-2.5 shrink-0" />
+                        {s.working_days?.length
+                          ? WORKING_DAYS.filter((d) => s.working_days.includes(d.code)).map((d) => d.label).join(', ')
+                          : 'Any open day'}
+                      </span>
                     </span>
                     <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-teal-600 shrink-0" />
                   </button>

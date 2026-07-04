@@ -339,7 +339,9 @@ def build_system_prompt(
         # a stylist with no schedule was told they were only available on another stylist's days).
         if restricted_lines:
             all_lines = restricted_lines + [
-                f"  • {n}: works any day the shop is open" for n in unrestricted_names
+                f"  • {n}: works EVERY day the shop is open — available on ALL open days; "
+                f"never tell the caller {n} is off on a day the shop is open"
+                for n in unrestricted_names
             ]
             staff_block += (
                 "\n- Stylist availability — each stylist's OWN schedule. These are per-stylist: "
