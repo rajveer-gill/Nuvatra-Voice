@@ -46,6 +46,16 @@ def test_parse_booking_no_booking_marker():
     assert parse_booking("Thanks for calling!") is None
 
 
+def test_ai_implies_committed_booking_catches_change_acknowledgments():
+    # Regression: the model narrated "I've updated your request to 3 PM" WITHOUT re-emitting the
+    # BOOKING marker, so the mid-call change was lost. These phrases must trigger the extraction
+    # safety net so the change still gets applied.
+    assert _ai_implies_committed_booking("Alright, I've updated your request to 3:00 PM")
+    assert _ai_implies_committed_booking("I have changed your appointment to Andrew")
+    assert _ai_implies_committed_booking("I've switched your stylist to Jake")
+    assert not _ai_implies_committed_booking("What service would you like?")
+
+
 def test_parse_booking_realigns_dropped_empty_fields():
     # Regression: the model dropped an always-empty field ("Raj||2026-07-06|..." instead of
     # "Raj|||2026-07-06|..."), shifting the date into the email slot -> rejected as invalid_date

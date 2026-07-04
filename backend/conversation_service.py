@@ -353,6 +353,19 @@ def _ai_implies_committed_booking(ai_text: str) -> bool:
             "see you at",
             "we'll see you",
             "we will see you",
+            # Mid-call CHANGE acknowledgments — the model narrates an update without re-emitting
+            # BOOKING, so the change is lost unless the extraction net fires on these too.
+            "i've updated",
+            "i have updated",
+            "updated your request",
+            "updated your appointment",
+            "i've changed",
+            "i have changed",
+            "changed your appointment",
+            "changed it to",
+            "i've switched",
+            "i have switched",
+            "switched your",
         )
     )
 
@@ -431,6 +444,8 @@ def _extract_booking_line_from_conversation(
         "(6) service/reason from menu, (7) stylist name.\n"
         "Leave phone and email empty. reason=exact service from menu if known. "
         "staff=stylist name if chosen.\n"
+        "If the caller CHANGED a detail during the call (e.g. asked for a different time, day, "
+        "service, or stylist), use the LATEST value they agreed to — not the earlier one.\n"
         f"Staff: {', '.join(staff_names) or 'none'}. "
         f"Services: {', '.join(service_names) or 'any'}.\n"
         f"Caller name on file: {mem_name or 'unknown'}.\n"
