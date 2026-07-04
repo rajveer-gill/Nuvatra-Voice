@@ -1060,8 +1060,6 @@ def reconcile_booking_at_call_end(
     Returns False when there is nothing to book, the details are incomplete, or the schedule
     backstop rejects it (e.g. a stylist on a day they don't work) — in which case the call
     correctly falls through to lead capture. Never books past the stylist/shop schedule."""
-    if call_data.get("appointment_created"):
-        return False
     history = call_data.get("conversation_history")
     if not _conversation_suggests_booking(history):
         return False
@@ -1071,6 +1069,11 @@ def reconcile_booking_at_call_end(
     call_sid = call_sid or call_data.get("call_sid")
     if cid:
         database.set_request_client_id(cid)
+    # A booking already exists this call: the caller may have CHANGED a detail afterward that the
+    # model narrated ("let's do 3 PM") but never re-marked, so the change was lost. Apply it
+    # deterministically from the transcript instead of trusting the model to re-emit the marker.
+    if call_data.get("appointment_created"):
+        return _reconcile_change_to_existing(call_data, call_sid, cid)
     try:
         booking = _extract_booking_line_from_conversation(
             history or [], caller_memory=call_data.get("caller_memory")
@@ -1122,6 +1125,93 @@ def reconcile_booking_at_call_end(
     _send_booking_confirmation_sms(apt, call_data, cid, call_sid)
     system_info(
         "reconcile_booking_created",
+        call_sid=call_sid or "",
+        client_id=cid or "",
+        apt_id=apt.get("id"),
+        date=apt.get("date"),
+        time=apt.get("time"),
+    )
+    return True
+
+
+def _reconcile_change_to_existing(
+    call_data: dict, call_sid: Optional[str], cid: Optional[str]
+) -> bool:
+    """End-of-call safety net for a CHANGE the model narrated but never re-marked. Re-extract the
+    latest agreed booking from the transcript; if it differs from the caller's still-unconfirmed
+    appointment (and is valid), replace it and re-send the confirmation. Returns True if changed."""
+    from_num = (call_data.get("from_number") or "").strip()
+    if not (runtime.USE_DB and from_num):
+        return False
+    existing = database.db_appointments_get_pending_by_phone(from_num)
+    # Only touch a still-unconfirmed draft — never rewrite a booking the customer already YES'd.
+    if not existing or (existing.get("status") or "") != "pending_customer":
+        return False
+    history = call_data.get("conversation_history")
+    try:
+        booking = _extract_booking_line_from_conversation(
+            history or [], caller_memory=call_data.get("caller_memory")
+        )
+    except Exception:
+        return False
+    if not booking:
+        return False
+    booking["phone"] = _caller_phone_for_booking(booking.get("phone"), from_num)
+    ok_booking, fail_msg, staff_id, canonical_service = _validate_booking_requirements(
+        booking, conversation_history=history
+    )
+    if not ok_booking:
+        system_info(
+            "reconcile_change_rejected",
+            call_sid=call_sid or "",
+            client_id=cid or "",
+            reason=(fail_msg or "requirements_not_met")[:120],
+        )
+        return False
+    if canonical_service:
+        booking["reason"] = canonical_service
+
+    def _hh(t: str) -> str:
+        return booking_service._normalize_time_to_hhmm(t or "") or (t or "").strip()
+
+    new = (
+        (booking.get("date") or "").strip(),
+        _hh(booking.get("time") or ""),
+        (booking.get("reason") or "").strip().lower(),
+        str(staff_id or "").strip(),
+    )
+    old = (
+        (existing.get("date") or "").strip(),
+        _hh(existing.get("time") or ""),
+        (existing.get("reason") or "").strip().lower(),
+        str(existing.get("staff_id") or "").strip(),
+    )
+    if new == old:
+        return False  # nothing actually changed — don't re-text the customer
+    # Cancel the old draft first, then create the new one, so a date change can't leave a duplicate.
+    try:
+        database.db_appointments_update(int(existing["id"]), status="cancelled", client_id=cid)
+        booking_service.release_slot(int(existing["id"]))
+    except Exception:
+        pass
+    apt = _create_appointment_from_booking(
+        booking,
+        client_id_override=cid,
+        reserve_slot_immediately=False,
+        caller_memory=call_data.get("caller_memory"),
+    )
+    if not apt:
+        return False
+    if not (apt.get("phone") or "").strip() and from_num:
+        apt["phone"] = from_num
+        if apt.get("id"):
+            try:
+                database.db_appointments_update(apt["id"], phone=apt["phone"])
+            except Exception:
+                pass
+    _send_booking_confirmation_sms(apt, call_data, cid, call_sid)
+    system_info(
+        "reconcile_change_applied",
         call_sid=call_sid or "",
         client_id=cid or "",
         apt_id=apt.get("id"),

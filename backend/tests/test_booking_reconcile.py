@@ -145,3 +145,74 @@ def test_reconcile_noop_when_already_booked(monkeypatch):
         "conversation_history": _agreed_history(),
     }
     assert cs.reconcile_booking_at_call_end(call_data, "CA5") is False
+
+
+def _change_wire(monkeypatch, *, existing, extracted):
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(cs.runtime, "USE_DB", True)
+    monkeypatch.setattr(
+        cs.database, "db_appointments_get_pending_by_phone",
+        lambda phone: (dict(existing) if existing else None),
+    )
+    monkeypatch.setattr(
+        cs, "_extract_booking_line_from_conversation",
+        lambda *a, **k: (dict(extracted) if extracted else None),
+    )
+    monkeypatch.setattr(
+        cs, "_validate_booking_requirements",
+        lambda booking, conversation_history=None: (True, None, "s1", "Cut"),
+    )
+    calls = {}
+
+    def _fake_create(booking, **k):
+        calls["created"] = dict(booking)
+        return {"id": 6, "date": booking.get("date"), "time": booking.get("time"), "reason": booking.get("reason"), "phone": "+15551234567"}
+
+    monkeypatch.setattr(cs, "_create_appointment_from_booking", _fake_create)
+    monkeypatch.setattr(cs, "_send_booking_confirmation_sms", lambda *a, **k: calls.__setitem__("texted", True))
+    cancels = []
+    monkeypatch.setattr(cs.database, "db_appointments_update", lambda aid, **k: cancels.append((aid, k)))
+    monkeypatch.setattr(cs.booking_service, "release_slot", lambda aid: None)
+    return calls, cancels
+
+
+def _change_call_data():
+    return {
+        "appointment_created": True,
+        "client_id": "test",
+        "from_number": "+15551234567",
+        "conversation_history": _agreed_history(),
+    }
+
+
+def test_reconcile_applies_mid_call_change(monkeypatch):
+    # The model narrated "let's do the 8th" without a marker; the change must still apply.
+    calls, cancels = _change_wire(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_customer", "date": "2026-07-06", "time": "14:00", "reason": "Cut", "staff_id": "s1"},
+        extracted={"name": "Sam", "date": "2026-07-08", "time": "10:00", "reason": "Cut", "staff": "Mia"},
+    )
+    assert cs.reconcile_booking_at_call_end(_change_call_data(), "CA1") is True
+    assert calls.get("created", {}).get("date") == "2026-07-08"  # new details applied
+    assert calls.get("texted")  # updated confirmation sent
+    assert any(k.get("status") == "cancelled" for _, k in cancels)  # old draft cancelled (no dup)
+
+
+def test_reconcile_change_noop_when_nothing_changed(monkeypatch):
+    calls, _ = _change_wire(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_customer", "date": "2026-07-06", "time": "14:00", "reason": "Cut", "staff_id": "s1"},
+        extracted={"name": "Sam", "date": "2026-07-06", "time": "14:00", "reason": "Cut", "staff": "Mia"},
+    )
+    assert cs.reconcile_booking_at_call_end(_change_call_data(), "CA2") is False
+    assert "created" not in calls  # don't re-text when nothing changed
+
+
+def test_reconcile_change_skips_confirmed_appointment(monkeypatch):
+    calls, _ = _change_wire(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_review", "date": "2026-07-06", "time": "14:00", "reason": "Cut", "staff_id": "s1"},
+        extracted={"name": "Sam", "date": "2026-07-08", "time": "10:00", "reason": "Cut", "staff": "Mia"},
+    )
+    assert cs.reconcile_booking_at_call_end(_change_call_data(), "CA3") is False
+    assert "created" not in calls  # never rewrite an already-confirmed booking
