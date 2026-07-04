@@ -216,3 +216,95 @@ def test_reconcile_change_skips_confirmed_appointment(monkeypatch):
     )
     assert cs.reconcile_booking_at_call_end(_change_call_data(), "CA3") is False
     assert "created" not in calls  # never rewrite an already-confirmed booking
+
+
+import sms_appointment_updates as _sau
+
+
+def _wire_voice_change(monkeypatch, *, existing, updater):
+    monkeypatch.setattr(cs.runtime, "USE_DB", True)
+    monkeypatch.setattr(
+        cs.database, "db_appointments_get_pending_by_phone",
+        lambda phone: (dict(existing) if existing else None),
+    )
+    monkeypatch.setattr(
+        cs.config_service, "get_business_info",
+        lambda: {"staff": [{"id": "s1", "name": "Tom"}], "services": [{"id": "svc1", "name": "Short Cut"}]},
+    )
+    monkeypatch.setattr(cs.config_service, "_normalize_service_entries", lambda s: s)
+    monkeypatch.setattr(_sau, "apply_sms_appointment_detail_updates_from_bodies", updater)
+    monkeypatch.setattr(cs.database, "db_appointments_update", lambda *a, **k: None)
+    monkeypatch.setattr(cs.database, "db_appointments_get_by_id", lambda *a, **k: None)
+    monkeypatch.setattr(cs.caller_memory, "update_caller_memory", lambda *a, **k: None)
+    monkeypatch.setattr(cs.database, "db_appointments_update_active_name_by_phone", lambda *a, **k: 0)
+    monkeypatch.setattr(cs.booking_service, "_reconcile_sms_appointment_slot_after_detail_change", lambda apt: None)
+    sent = {}
+    monkeypatch.setattr(
+        cs, "_send_booking_confirmation_sms",
+        lambda apt, cd, cid, sid: sent.setdefault("text", "Perfect — I've texted your updated confirmation. Text YES to confirm."),
+    )
+    return sent
+
+
+def _voice_call_data():
+    return {
+        "appointment_created": True,
+        "client_id": "test",
+        "from_number": "+15551234567",
+        "conversation_history": [{"role": "user", "content": "actually let's do 3 PM"}],
+    }
+
+
+def test_voice_change_applies_and_texts(monkeypatch):
+    sent = _wire_voice_change(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_customer", "date": "2026-07-06", "time": "14:00", "reason": "Short Cut", "staff_id": "s1"},
+        updater=lambda bodies, apt, **k: ({**apt, "time": "15:00"}, ["time"]),
+    )
+    out = cs._apply_voice_detail_change_if_pending(_voice_call_data(), "CA1")
+    assert out and "confirmation" in out.lower()  # spoke the fresh confirmation
+    assert sent.get("text")  # updated text sent immediately (mid-call)
+
+
+def test_voice_change_returns_rejection(monkeypatch):
+    def updater(bodies, apt, **k):
+        ro = k.get("rejection_out")
+        if ro is not None:
+            ro["message"] = "Tom isn't available that day. Want another day?"
+            ro["reason"] = "unavailable"
+        return (apt, [])
+
+    sent = _wire_voice_change(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_customer", "date": "2026-07-06", "time": "14:00", "reason": "Short Cut", "staff_id": "s1"},
+        updater=updater,
+    )
+    out = cs._apply_voice_detail_change_if_pending(_voice_call_data(), "CA2")
+    assert out == "Tom isn't available that day. Want another day?"  # truthful refusal spoken
+    assert "text" not in sent  # no confirmation sent for a refused change
+
+
+def test_voice_change_noop_returns_none(monkeypatch):
+    sent = _wire_voice_change(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_customer", "date": "2026-07-06", "time": "14:00", "reason": "Short Cut", "staff_id": "s1"},
+        updater=lambda bodies, apt, **k: (apt, []),
+    )
+    assert cs._apply_voice_detail_change_if_pending(_voice_call_data(), "CA3") is None
+    assert "text" not in sent  # don't re-text when nothing changed
+
+
+def test_voice_change_skips_confirmed(monkeypatch):
+    called = {"n": 0}
+
+    def updater(bodies, apt, **k):
+        called["n"] += 1
+        return (apt, ["time"])
+
+    _wire_voice_change(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_review", "date": "2026-07-06", "time": "14:00", "reason": "Short Cut", "staff_id": "s1"},
+        updater=updater,
+    )
+    assert cs._apply_voice_detail_change_if_pending(_voice_call_data(), "CA4") is None
+    assert called["n"] == 0  # never touch an already-confirmed appointment

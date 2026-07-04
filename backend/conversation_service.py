@@ -1134,6 +1134,96 @@ def reconcile_booking_at_call_end(
     return True
 
 
+def _apply_voice_detail_change_if_pending(
+    call_data: dict, call_sid: Optional[str]
+) -> Optional[str]:
+    """Real-time mid-call change. The caller altered a detail (time/date/service/stylist) on the
+    booking they already made this call, but the model narrated the change without re-emitting a
+    marker. Apply it deterministically from what the caller JUST said — no reliance on the model's
+    wording — and re-send the confirmation. Returns the spoken confirmation (or a truthful
+    rejection when the change isn't allowed), or None if nothing changed. Only touches a still-
+    unconfirmed (pending_customer) draft; never rewrites a booking the customer already YES'd."""
+    from_num = (call_data.get("from_number") or "").strip()
+    if not (runtime.USE_DB and from_num):
+        return None
+    existing = database.db_appointments_get_pending_by_phone(from_num)
+    if not existing or (existing.get("status") or "") != "pending_customer":
+        return None
+    history = call_data.get("conversation_history") or []
+    latest_user = ""
+    for m in reversed(history):
+        if (m.get("role") or "").strip() == "user" and (m.get("content") or "").strip():
+            latest_user = (m.get("content") or "").strip()
+            break
+    if not latest_user:
+        return None
+    from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
+
+    biz = config_service.get_business_info() or {}
+    svc_entries = config_service._normalize_service_entries(biz.get("services") or [])
+    known_services = [
+        (s.get("name") or "").strip() for s in svc_entries if (s.get("name") or "").strip()
+    ]
+    service_id_by_name = {
+        (s.get("name") or "").strip().lower(): (s.get("id") or "").strip()
+        for s in svc_entries
+        if (s.get("name") or "").strip()
+    }
+    known_staff = [s for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
+    cid = (call_data.get("client_id") or "").strip() or None
+    rejection: dict = {}
+    try:
+        apt, changed = apply_sms_appointment_detail_updates_from_bodies(
+            [latest_user],
+            existing,
+            client_id=cid or "",
+            from_number=from_num,
+            db_appointments_update=database.db_appointments_update,
+            db_appointments_get_by_id=database.db_appointments_get_by_id,
+            update_caller_memory=caller_memory.update_caller_memory,
+            db_appointments_update_active_name_by_phone=(
+                database.db_appointments_update_active_name_by_phone
+                if runtime.USE_DB
+                else None
+            ),
+            system_info=system_info,
+            logger=logger,
+            known_services=known_services,
+            known_staff=known_staff,
+            service_id_by_name=service_id_by_name,
+            business_info=biz,
+            rejection_out=rejection,
+        )
+    except Exception as e:
+        logger.exception("voice_detail_change_failed call_sid=%s: %s", call_sid, e)
+        return None
+    if rejection.get("message"):
+        system_info(
+            "voice_change_rejected",
+            call_sid=call_sid or "",
+            client_id=cid or "",
+            reason=(rejection.get("reason") or "")[:60],
+        )
+        return rejection["message"]
+    if not changed:
+        return None
+    if any(f in changed for f in ("time", "date")):
+        try:
+            booking_service._reconcile_sms_appointment_slot_after_detail_change(apt)
+        except Exception:
+            pass
+    system_info(
+        "voice_change_applied",
+        call_sid=call_sid or "",
+        client_id=cid or "",
+        apt_id=apt.get("id"),
+        fields=",".join(changed),
+        date=apt.get("date"),
+        time=apt.get("time"),
+    )
+    return _send_booking_confirmation_sms(apt, call_data, cid, call_sid)
+
+
 def _reconcile_change_to_existing(
     call_data: dict, call_sid: Optional[str], cid: Optional[str]
 ) -> bool:
@@ -1387,6 +1477,17 @@ async def generate_response_async(
                     call_sid=call_sid,
                     client_id=str(call_data.get("client_id") or ""),
                 )
+        # Real-time mid-call change: the caller altered a detail on the booking they already made
+        # this call and the model narrated it without re-emitting a marker (its wording is
+        # unreliable, so phrase-matching can't catch it). Apply the change deterministically from
+        # what the caller just said and re-send the confirmation — before falling through.
+        if not booking and call_data.get("appointment_created"):
+            _change_text = _apply_voice_detail_change_if_pending(call_data, call_sid)
+            if _change_text:
+                # Speak the fresh confirmation/rejection and fall through the normal pipeline
+                # (history append + session persist). The booking blocks below are skipped since
+                # `booking` is None and the appointment already exists.
+                ai_text = _change_text
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         if booking:
             fail_msg = None
