@@ -308,3 +308,23 @@ def test_voice_change_skips_confirmed(monkeypatch):
     )
     assert cs._apply_voice_detail_change_if_pending(_voice_call_data(), "CA4") is None
     assert called["n"] == 0  # never touch an already-confirmed appointment
+
+
+def test_voice_change_ignores_a_question_mentioning_a_stylist(monkeypatch):
+    # A caller with a pending Tom booking asking "does Andrew work Tuesdays?" must NOT silently
+    # switch the appointment to Andrew — the change handler only fires on an explicit request.
+    called = {"n": 0}
+
+    def updater(bodies, apt, **k):
+        called["n"] += 1
+        return ({**apt, "staff_id": "s9"}, ["staff_id"])
+
+    _wire_voice_change(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_customer", "date": "2026-07-06", "time": "14:00", "reason": "Short Cut", "staff_id": "s1"},
+        updater=updater,
+    )
+    cd = _voice_call_data()
+    cd["conversation_history"] = [{"role": "user", "content": "Does Andrew work Tuesdays?"}]
+    assert cs._apply_voice_detail_change_if_pending(cd, "CAq") is None
+    assert called["n"] == 0  # updater never invoked — no cue word, treated as a question

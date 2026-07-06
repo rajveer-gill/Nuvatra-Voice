@@ -1134,6 +1134,39 @@ def reconcile_booking_at_call_end(
     return True
 
 
+# Pivot words that mark a caller ASKING to change an existing booking, vs merely mentioning a
+# stylist/time in a question ("does Andrew work Tuesdays?"). The real-time change handler fires
+# only when one of these is present, so a question can never silently rewrite the appointment.
+_CHANGE_INTENT_CUES = (
+    "actually",
+    "instead",
+    "change",
+    "switch",
+    "rather",
+    "make it",
+    "let's do",
+    "lets do",
+    "let us do",
+    "can we do",
+    "could we do",
+    "can we make",
+    "reschedule",
+    "move it",
+    "move that",
+    "move my",
+    "push it",
+    "bump it",
+    "different ",
+    "how about",
+    "what about",
+)
+
+
+def _utterance_requests_change(text: str) -> bool:
+    t = (text or "").lower()
+    return any(cue in t for cue in _CHANGE_INTENT_CUES)
+
+
 def _apply_voice_detail_change_if_pending(
     call_data: dict, call_sid: Optional[str]
 ) -> Optional[str]:
@@ -1156,6 +1189,11 @@ def _apply_voice_detail_change_if_pending(
             latest_user = (m.get("content") or "").strip()
             break
     if not latest_user:
+        return None
+    # Only act on an explicit change request — never on a question that happens to name a stylist
+    # or time (e.g. "does Andrew work Tuesdays?"), which must not silently rewrite the booking.
+    # A genuine change with no cue word still gets caught by the end-of-call reconciler.
+    if not _utterance_requests_change(latest_user):
         return None
     from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
 
