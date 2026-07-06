@@ -1105,18 +1105,6 @@ def should_forward_to_human(
     if not user_input:
         return False
 
-    # "Take a message instead" wins over any dial number: the business opted out of live
-    # transfers, so a "talk to a person" request must be handled by capturing a message (the
-    # prompt's NO LIVE TRANSFER LINE branch), never by dialing. Don't forward.
-    if config_service.transfer_takes_message():
-        voice_forward(
-            "human_request_takes_message",
-            call_sid=call_sid,
-            client_id=client_id,
-            forward_kind="take_message",
-        )
-        return False
-
     user_lower = user_input.lower()
     ai_lower = ai_response.lower() if ai_response else ""
 
@@ -1142,21 +1130,37 @@ def should_forward_to_human(
         "supervisor",
     ]
 
-    # Check user input
-    for keyword in forward_keywords:
-        if keyword in user_lower:
-            voice_forward(
-                "caller_requested_human",
-                call_sid=call_sid,
-                client_id=client_id,
-                forward_kind="fallback",
-                matched_keyword=keyword,
-                input_len=len(user_input or ""),
-            )
-            return True
+    matched_keyword = next((k for k in forward_keywords if k in user_lower), None)
+    # AI response may itself signal a transfer intent even if the caller's words didn't match.
+    ai_transfer_intent = matched_keyword is None and (
+        "transfer" in ai_lower and ("you" in ai_lower or "connect" in ai_lower)
+    )
+    if not matched_keyword and not ai_transfer_intent:
+        return False
 
-    # Check AI response for forwarding signals (AI might detect intent)
-    if "transfer" in ai_lower and ("you" in ai_lower or "connect" in ai_lower):
+    # A human handoff was requested. "Take a message instead" wins over any dial number: the
+    # business opted out of live transfers, so capture a message (prompt's NO LIVE TRANSFER LINE
+    # branch) instead of dialing. Only log this on an actual human request, not every turn.
+    if config_service.transfer_takes_message():
+        voice_forward(
+            "human_request_takes_message",
+            call_sid=call_sid,
+            client_id=client_id,
+            forward_kind="take_message",
+            matched_keyword=matched_keyword or "ai_transfer_intent",
+        )
+        return False
+
+    if matched_keyword:
+        voice_forward(
+            "caller_requested_human",
+            call_sid=call_sid,
+            client_id=client_id,
+            forward_kind="fallback",
+            matched_keyword=matched_keyword,
+            input_len=len(user_input or ""),
+        )
+    else:
         voice_forward(
             "ai_transfer_intent_in_reply",
             call_sid=call_sid,
@@ -1164,9 +1168,7 @@ def should_forward_to_human(
             forward_kind="fallback",
             reply_preview=(ai_response or "")[:80],
         )
-        return True
-
-    return False
+    return True
 
 
 def append_forward_call_verbs(
