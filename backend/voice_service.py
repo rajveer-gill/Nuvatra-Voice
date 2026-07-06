@@ -1105,6 +1105,18 @@ def should_forward_to_human(
     if not user_input:
         return False
 
+    # "Take a message instead" wins over any dial number: the business opted out of live
+    # transfers, so a "talk to a person" request must be handled by capturing a message (the
+    # prompt's NO LIVE TRANSFER LINE branch), never by dialing. Don't forward.
+    if config_service.transfer_takes_message():
+        voice_forward(
+            "human_request_takes_message",
+            call_sid=call_sid,
+            client_id=client_id,
+            forward_kind="take_message",
+        )
+        return False
+
     user_lower = user_input.lower()
     ai_lower = ai_response.lower() if ai_response else ""
 

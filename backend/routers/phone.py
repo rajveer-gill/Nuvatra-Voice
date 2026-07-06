@@ -1368,7 +1368,7 @@ async def handle_no_speech(request: Request):
             )
             return Response(content=xml, media_type="application/xml")
 
-        if forwarding_phone:
+        if forwarding_phone and not config_service.transfer_takes_message():
             voice_forward(
                 "no_speech_timeout",
                 call_sid=call_sid or "",
