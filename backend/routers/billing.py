@@ -196,6 +196,10 @@ def create_checkout_session(
             customer=stripe_customer_id,
             mode="subscription",
             line_items=[{"price": price_id, "quantity": 1}],
+            # Let the customer enter a Stripe promo code at checkout (e.g. a partner/intro
+            # discount). The coupon + code are created in the Stripe dashboard; this just
+            # surfaces the input field.
+            allow_promotion_codes=True,
             success_url=success_url,
             cancel_url=cancel_url,
             metadata={
