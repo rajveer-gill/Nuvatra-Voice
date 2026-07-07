@@ -382,6 +382,109 @@ def parse_stylist_from_sms(
     return None
 
 
+def _match_known(value: Optional[str], options: list[str]) -> Optional[str]:
+    """Return the option that case-insensitively equals value, else None. Keeps the model from
+    inventing a service/stylist that isn't on the menu/roster."""
+    v = (value or "").strip().lower()
+    if not v:
+        return None
+    for o in options or []:
+        if (o or "").strip().lower() == v:
+            return o
+    return None
+
+
+def _llm_extract_sms_change(
+    bodies: list[str],
+    apt: dict,
+    *,
+    known_services: list[str],
+    staff_names: list[str],
+    current_stylist: str,
+    today,
+    sms_info,
+) -> Optional[dict]:
+    """AI-first interpretation of an appointment CHANGE from the customer's natural-language texts,
+    so we're not limited to hard-coded keyword patterns ("let's actually do 4:30" etc.). Returns
+    {name,time,date,service,stylist} (each a value or None), or None if the model is unavailable or
+    errors — in which case the caller falls back to the regex parsers. This is interpretation ONLY;
+    the caller still validates against the roster/hours/closures and does the deterministic write."""
+    msgs = [b.strip() for b in bodies if (b or "").strip()]
+    if not msgs:
+        return None
+    # Pure confirmations ("yes"/"confirm") aren't change requests — let the normal flow handle them.
+    if _is_likely_sms_confirmation_body(msgs[-1]):
+        return None
+    try:
+        import json as _json
+        import os
+        import runtime
+    except Exception:
+        return None
+    client = getattr(runtime, "client", None)
+    if client is None:
+        return None
+    model = (os.getenv("SMS_EXTRACT_MODEL") or "gpt-4o-mini").strip()
+    today_str = today.isoformat() if today else ""
+    current = {
+        "date": apt.get("date") or "",
+        "time": apt.get("time") or "",
+        "service": apt.get("reason") or "",
+        "stylist": current_stylist or "",
+    }
+    sys = (
+        "You read a salon customer's text messages and extract whether they want to CHANGE their "
+        "existing appointment. Reply with ONLY a JSON object with keys time, date, service, "
+        "stylist, name — each the NEW requested value, or null if they didn't ask to change it.\n"
+        "Rules:\n"
+        "- Fill a field ONLY when the customer clearly requests that change; otherwise null.\n"
+        "- time: 12-hour clock WITH am/pm, e.g. \"4:30 PM\". If they omit am/pm, choose the value "
+        "that fits normal salon hours (an afternoon time is PM).\n"
+        "- date: YYYY-MM-DD. Resolve \"tomorrow\", \"next Monday\", \"the 8th\" against today.\n"
+        "- service: EXACTLY one of the offered services, else null.\n"
+        "- stylist: EXACTLY one of the roster names, else null.\n"
+        "- If they are only confirming (yes/ok), thanking, or asking a question, every value is null.\n"
+        "- Never invent details the customer did not say."
+    )
+    usr = (
+        f"Today: {today_str}\n"
+        f"Offered services: {', '.join(known_services) or '(none)'}\n"
+        f"Roster stylists: {', '.join(staff_names) or '(none)'}\n"
+        f"Current appointment: {_json.dumps(current)}\n"
+        "Customer messages (oldest to newest — act on the most recent request):\n"
+        + "\n".join(f"- {m}" for m in msgs[-6:])
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
+            temperature=0,
+            max_tokens=150,
+            response_format={"type": "json_object"},
+        )
+        data = _json.loads(resp.choices[0].message.content or "{}")
+    except Exception as e:
+        sms_info("sms_llm_extract_failed", reason=type(e).__name__)
+        return None
+
+    def _val(k):
+        v = data.get(k)
+        if v in (None, "", "null", "None"):
+            return None
+        return str(v).strip()
+
+    out = {k: _val(k) for k in ("time", "date", "service", "stylist", "name")}
+    sms_info(
+        "sms_llm_extract_ok",
+        model=model,
+        got_time=bool(out["time"]),
+        got_date=bool(out["date"]),
+        got_service=bool(out["service"]),
+        got_stylist=bool(out["stylist"]),
+    )
+    return out
+
+
 def apply_sms_appointment_detail_updates_from_bodies(
     bodies: list[str],
     apt: Optional[dict],
@@ -455,30 +558,53 @@ def apply_sms_appointment_detail_updates_from_bodies(
         apt_status=st,
         prior_time=prior_time or None,
     )
-    for body in bodies:
-        if not (body or "").strip():
-            continue
-        nm = parse_name_from_sms(body, current_name=cur_name)
-        if nm:
-            latest_name = nm
-            cur_name = nm
-        tm = parse_time_from_sms(body, current_time=cur_time or (apt.get("time") or ""))
-        if tm:
-            latest_time = tm
-            cur_time = tm
-        dt = parse_date_from_sms(body, current_date=prior_date, today=_sms_today)
-        if dt:
-            latest_date = dt
-        sv = parse_service_from_sms(
-            body, current_service=prior_service, known_services=known_services
+    # AI-first: let the model interpret the requested change from natural language (any phrasing),
+    # instead of matching fixed keyword patterns. Validation + the DB write below stay
+    # deterministic. Falls back to the regex parsers only when the model is unavailable or errors.
+    llm = _llm_extract_sms_change(
+        bodies,
+        apt,
+        known_services=known_services or [],
+        staff_names=staff_names,
+        current_stylist=prior_stylist_name,
+        today=_sms_today,
+        sms_info=sms_info,
+    )
+    if llm is not None:
+        latest_name = llm.get("name")
+        latest_time = (
+            normalize_time_to_hhmm(llm["time"], reference_time=prior_time or (apt.get("time") or ""))
+            if llm.get("time")
+            else None
         )
-        if sv:
-            latest_service = sv
-        sty = parse_stylist_from_sms(
-            body, current_stylist=prior_stylist_name, known_stylists=staff_names
-        )
-        if sty:
-            latest_stylist = sty
+        latest_date = llm.get("date") or None
+        latest_service = _match_known(llm.get("service"), known_services or [])
+        latest_stylist = _match_known(llm.get("stylist"), staff_names)
+    else:
+        for body in bodies:
+            if not (body or "").strip():
+                continue
+            nm = parse_name_from_sms(body, current_name=cur_name)
+            if nm:
+                latest_name = nm
+                cur_name = nm
+            tm = parse_time_from_sms(body, current_time=cur_time or (apt.get("time") or ""))
+            if tm:
+                latest_time = tm
+                cur_time = tm
+            dt = parse_date_from_sms(body, current_date=prior_date, today=_sms_today)
+            if dt:
+                latest_date = dt
+            sv = parse_service_from_sms(
+                body, current_service=prior_service, known_services=known_services
+            )
+            if sv:
+                latest_service = sv
+            sty = parse_stylist_from_sms(
+                body, current_stylist=prior_stylist_name, known_stylists=staff_names
+            )
+            if sty:
+                latest_stylist = sty
     kwargs: dict[str, Any] = {}
     if latest_name:
         kwargs["name"] = latest_name

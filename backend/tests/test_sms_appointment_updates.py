@@ -1,5 +1,8 @@
 """Unit tests for SMS appointment detail parsing."""
 
+import pytest
+
+import sms_appointment_updates
 from sms_appointment_updates import (
     apply_sms_appointment_detail_updates,
     parse_email_from_sms,
@@ -10,6 +13,14 @@ from sms_appointment_updates import (
 )
 
 _MENU = ["Short Cut", "Long Cut", "Fade", "Beard Trim"]
+
+
+@pytest.fixture(autouse=True)
+def _no_real_llm(monkeypatch):
+    # Keep the deterministic parser tests fast and offline: with no LLM client, the extractor
+    # returns None and the regex fallback runs. LLM-path tests substitute a fake client below.
+    import runtime
+    monkeypatch.setattr(runtime, "client", None, raising=False)
 
 
 def test_parse_service_natural_phrasing_matches_menu():
@@ -415,3 +426,78 @@ def test_apply_stylist_change_rejected_when_service_not_offered():
     # The caller must be told why, not silently kept on the old stylist.
     assert "Andrew doesn't do Long Cut" in rej.get("message", "")
     assert rej.get("reason") == "not_offered"
+
+
+# --- AI-first extraction path -------------------------------------------------
+
+def _fake_client(json_content):
+    """Minimal stand-in for runtime.client returning a fixed JSON completion."""
+    class _Msg:
+        content = json_content
+    class _Choice:
+        message = _Msg()
+    class _Resp:
+        choices = [_Choice()]
+    class _Completions:
+        def create(self, **kwargs):
+            return _Resp()
+    class _Chat:
+        completions = _Completions()
+    class _Client:
+        chat = _Chat()
+    return _Client()
+
+
+def test_llm_extract_catches_natural_time_change(monkeypatch):
+    # The exact bug: "let's actually do 4:30" — regex missed it; the LLM extractor must catch it.
+    import runtime
+    monkeypatch.setattr(runtime, "client", _fake_client('{"time":"4:30 PM","date":null,"service":null,"stylist":null,"name":null}'), raising=False)
+    apt = {"id": 1, "status": "pending_customer", "date": "2026-07-07", "time": "16:00", "reason": "Short Cut", "staff_id": "s1"}
+    updated = {}
+    out, changed = sms_appointment_updates.apply_sms_appointment_detail_updates_from_bodies(
+        ["let's actually do 4:30"],
+        apt,
+        client_id="test",
+        from_number="+15551230000",
+        db_appointments_update=lambda aid, **k: (updated.update(k) or {**apt, **k}),
+        db_appointments_get_by_id=lambda aid, **k: {**apt, **updated},
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=type("L", (), {"info": staticmethod(lambda *a, **k: None), "exception": staticmethod(lambda *a, **k: None)})(),
+        known_services=_MENU,
+        known_staff=[{"id": "s1", "name": "Tom"}],
+        service_id_by_name={"short cut": "svc1"},
+        business_info={"hours": "Monday-Friday: 9 AM - 5 PM", "timezone": "America/Los_Angeles"},
+    )
+    assert updated.get("time") == "16:30"  # 4:30 PM applied, not left at 16:00
+    assert "time" in changed
+
+
+def test_llm_extract_no_change_on_confirmation(monkeypatch):
+    # "yes" is a confirmation, not a change — extractor must not fire (returns None -> regex no-op).
+    import runtime
+    called = {"n": 0}
+    class _C:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**k):
+                    called.__setitem__("n", called["n"] + 1)
+                    raise AssertionError("should not call LLM on a confirmation")
+    monkeypatch.setattr(runtime, "client", _C(), raising=False)
+    apt = {"id": 2, "status": "pending_customer", "date": "2026-07-07", "time": "16:00", "reason": "Short Cut", "staff_id": "s1"}
+    out, changed = sms_appointment_updates.apply_sms_appointment_detail_updates_from_bodies(
+        ["yes"],
+        apt,
+        client_id="test",
+        from_number="+15551230000",
+        db_appointments_update=lambda aid, **k: {**apt, **k},
+        db_appointments_get_by_id=lambda aid, **k: apt,
+        update_caller_memory=lambda *a, **k: None,
+        system_info=lambda *a, **k: None,
+        logger=type("L", (), {"info": staticmethod(lambda *a, **k: None), "exception": staticmethod(lambda *a, **k: None)})(),
+        known_services=_MENU,
+        known_staff=[{"id": "s1", "name": "Tom"}],
+    )
+    assert changed == []
+    assert called["n"] == 0
