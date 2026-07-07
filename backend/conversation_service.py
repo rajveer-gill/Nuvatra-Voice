@@ -272,9 +272,9 @@ def _count_booking_user_turns(conversation_history: Optional[list]) -> int:
 
 
 def _assistant_awaiting_message_content(conversation_history: Optional[list]) -> bool:
-    """True when the assistant's most recent turn asked the caller for the content of a message to
-    leave (take-a-message mode). In that mode the caller's reply is the message — the booking nudge
-    must not hijack booking-sounding words ("I want to book an appointment") into a live booking."""
+    """True when the assistant's most recent turn asked the caller for the CONTENT of a message to
+    leave (take-a-message mode). Narrow to content-request phrasing — not the generic "I can take a
+    message" offer or the disambiguation question, which would over-trigger / loop."""
     for m in reversed(conversation_history or []):
         if (m.get("role") or "").strip() != "assistant":
             continue
@@ -286,13 +286,49 @@ def _assistant_awaiting_message_content(conversation_history: Optional[list]) ->
                 "message would you like",
                 "like me to leave",
                 "leave for the team",
-                "take a message",
-                "leave a message",
-                "pass that along",
-                "pass it along",
+                "message to say",
+                "the message to be",
             )
         )
     return False
+
+
+_RELAY_MARKERS = (
+    "tell them",
+    "tell her",
+    "tell him",
+    "let them know",
+    "let her know",
+    "let him know",
+    "have them know",
+    "leave a message",
+    "leave them a message",
+    "message that",
+    "message saying",
+    "pass along",
+    "pass it along",
+)
+_BOOKING_WORDS = ("appointment", "book", "schedul", "reschedul", "cancel")
+_CHOSE_MESSAGE_MARKERS = (
+    "leave it as a message",
+    "just a message",
+    "just leave a message",
+    "as a message",
+    "leave the message",
+    "just the message",
+)
+
+
+def _text_mentions_booking(text: str) -> bool:
+    return any(w in (text or "").lower() for w in _BOOKING_WORDS)
+
+
+def _text_has_relay_marker(text: str) -> bool:
+    return any(w in (text or "").lower() for w in _RELAY_MARKERS)
+
+
+def _caller_chose_to_leave_message(text: str) -> bool:
+    return any(w in (text or "").lower() for w in _CHOSE_MESSAGE_MARKERS)
 
 
 def _voice_booking_nudge_message(
@@ -302,9 +338,26 @@ def _voice_booking_nudge_message(
     biz = info or config_service.get_business_info()
     if not _conversation_suggests_booking(conversation_history):
         return None
-    # Don't nudge toward booking while taking a message — let the prompt ask the caller whether
-    # they want it booked now or just left as a message (booking-vs-message disambiguation).
-    if _assistant_awaiting_message_content(conversation_history):
+    last_user = latest_user_message(conversation_history)
+    awaiting_msg = _assistant_awaiting_message_content(conversation_history)
+    # Caller committed to just leaving a message (and it isn't itself a booking request) — let the
+    # AI capture it; don't push booking.
+    if last_user and _caller_chose_to_leave_message(last_user) and not _text_mentions_booking(last_user):
+        return None
+    # Caller voiced a booking/reschedule/cancel AS a message ("tell them I want an appointment"), or
+    # said something booking-ish while we're capturing a message. Ask which they meant rather than
+    # assuming — don't start booking and don't silently record it.
+    if last_user and _text_mentions_booking(last_user) and (
+        awaiting_msg or _text_has_relay_marker(last_user)
+    ):
+        return (
+            "DISAMBIGUATION REMINDER: The caller mentioned booking, rescheduling, or canceling "
+            "while leaving (or being offered) a message. Do NOT start booking and do NOT silently "
+            "record it. Ask ONE short question: whether they'd like you to take care of it right "
+            "now, or just leave it as a message for the team. Then act on their answer."
+        )
+    # Otherwise, still in message mode: don't nudge toward booking.
+    if awaiting_msg:
         return None
     turns = _count_booking_user_turns(conversation_history)
     user_text = _conversation_user_text(conversation_history)

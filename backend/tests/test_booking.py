@@ -540,10 +540,9 @@ def test_validate_booking_rejects_same_day_after_hours(monkeypatch):
 
 
 
-def test_voice_booking_nudge_suppressed_while_taking_a_message(monkeypatch):
-    # Regression: a message whose content sounds like a booking ("I want to book an appointment")
-    # tripped the booking nudge, which forced a pivot to booking instead of letting the AI ask
-    # whether to book or just take the message.
+def test_voice_booking_nudge_disambiguates_booking_as_message_content(monkeypatch):
+    # A message whose content sounds like a booking, given right after "what's the message?", must
+    # make the AI ask which the caller meant — not silently pivot to booking, not silently record.
     from conversation_service import _voice_booking_nudge_message
     history = [
         {"role": "user", "content": "I'd like to talk to a real person."},
@@ -551,5 +550,30 @@ def test_voice_booking_nudge_suppressed_while_taking_a_message(monkeypatch):
         {"role": "user", "content": "Leave a message."},
         {"role": "assistant", "content": "Of course. What message would you like me to leave for the team?"},
         {"role": "user", "content": "That I want to book an appointment with a real person."},
+    ]
+    nudge = _voice_booking_nudge_message(history)
+    assert nudge is not None and "DISAMBIGUATION" in nudge
+
+
+def test_voice_booking_nudge_disambiguates_relay_phrasing(monkeypatch):
+    # "Tell them that I wanna make an appointment" — a booking voiced as a message to relay — must
+    # trigger the ask, even before the AI has entered message-capture mode.
+    from conversation_service import _voice_booking_nudge_message
+    history = [
+        {"role": "user", "content": "I wanna talk to a real person."},
+        {"role": "assistant", "content": "I can take a message or help you book. What would you like?"},
+        {"role": "user", "content": "Tell them that I wanna make an appointment."},
+    ]
+    nudge = _voice_booking_nudge_message(history)
+    assert nudge is not None and "DISAMBIGUATION" in nudge
+
+
+def test_voice_booking_nudge_lets_caller_leave_message(monkeypatch):
+    # Once the caller chooses to just leave a message, don't push booking — let the AI capture it.
+    from conversation_service import _voice_booking_nudge_message
+    history = [
+        {"role": "user", "content": "I want to book an appointment."},
+        {"role": "assistant", "content": "Do you want me to book it now, or just leave it as a message?"},
+        {"role": "user", "content": "Just leave it as a message."},
     ]
     assert _voice_booking_nudge_message(history) is None
