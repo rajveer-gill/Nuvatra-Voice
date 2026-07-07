@@ -538,3 +538,18 @@ def test_validate_booking_rejects_same_day_after_hours(monkeypatch):
     assert msg
     assert "closed for today" in msg.lower()
 
+
+
+def test_voice_booking_nudge_suppressed_while_taking_a_message(monkeypatch):
+    # Regression: a message whose content sounds like a booking ("I want to book an appointment")
+    # tripped the booking nudge, which forced a pivot to booking instead of letting the AI ask
+    # whether to book or just take the message.
+    from conversation_service import _voice_booking_nudge_message
+    history = [
+        {"role": "user", "content": "I'd like to talk to a real person."},
+        {"role": "assistant", "content": "I can take a message or help you book. What would you like?"},
+        {"role": "user", "content": "Leave a message."},
+        {"role": "assistant", "content": "Of course. What message would you like me to leave for the team?"},
+        {"role": "user", "content": "That I want to book an appointment with a real person."},
+    ]
+    assert _voice_booking_nudge_message(history) is None

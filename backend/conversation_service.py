@@ -271,12 +271,40 @@ def _count_booking_user_turns(conversation_history: Optional[list]) -> int:
     )
 
 
+def _assistant_awaiting_message_content(conversation_history: Optional[list]) -> bool:
+    """True when the assistant's most recent turn asked the caller for the content of a message to
+    leave (take-a-message mode). In that mode the caller's reply is the message — the booking nudge
+    must not hijack booking-sounding words ("I want to book an appointment") into a live booking."""
+    for m in reversed(conversation_history or []):
+        if (m.get("role") or "").strip() != "assistant":
+            continue
+        t = (m.get("content") or "").lower()
+        return any(
+            p in t
+            for p in (
+                "what message",
+                "message would you like",
+                "like me to leave",
+                "leave for the team",
+                "take a message",
+                "leave a message",
+                "pass that along",
+                "pass it along",
+            )
+        )
+    return False
+
+
 def _voice_booking_nudge_message(
     conversation_history: list, info: Optional[dict] = None
 ) -> Optional[str]:
     """Inject during booking if GPT has not emitted BOOKING: yet."""
     biz = info or config_service.get_business_info()
     if not _conversation_suggests_booking(conversation_history):
+        return None
+    # Don't nudge toward booking while taking a message — let the prompt ask the caller whether
+    # they want it booked now or just left as a message (booking-vs-message disambiguation).
+    if _assistant_awaiting_message_content(conversation_history):
         return None
     turns = _count_booking_user_turns(conversation_history)
     user_text = _conversation_user_text(conversation_history)
