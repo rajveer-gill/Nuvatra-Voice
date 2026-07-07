@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
@@ -232,9 +232,25 @@ def after_hours_prompt_block(
     biz = (info.get("name") or "the business").strip() or "the business"
     hours = (info.get("hours") or "").strip()
     hours_line = f" Store hours: {hours}" if hours else ""
+    # Spell out tomorrow's status explicitly. Without it the model has inverted things after hours —
+    # telling the caller an OPEN tomorrow was closed while offering the already-past today.
+    tomorrow = local_now.date() + timedelta(days=1)
+    tmr_slot = day_slot_for_date(info, tomorrow)
+    if tmr_slot.closed:
+        tomorrow_line = (
+            f" Tomorrow ({tomorrow.strftime('%A')} {tomorrow.isoformat()}) the shop is closed."
+        )
+    else:
+        tomorrow_line = (
+            f" Tomorrow ({tomorrow.strftime('%A')} {tomorrow.isoformat()}) the shop is OPEN "
+            "as normal — you MAY book then."
+        )
     return (
         f"AFTER HOURS: It is currently after closing on {local_now.strftime('%A')} "
         f"({local_now.date().isoformat()}) at {biz}.{hours_line} "
-        "If the caller tries to book an appointment for TODAY, politely tell them the shop is already closed for today "
-        "and ask them to choose another day. Do NOT output BOOKING for today."
+        "ONLY today is already over — every FUTURE day still follows the normal hours above."
+        f"{tomorrow_line} "
+        "If the caller tries to book for TODAY, tell them the shop is already closed for today and "
+        "offer another day; do NOT output BOOKING for today. NEVER tell the caller a future day "
+        "(including tomorrow) is closed unless the hours list that weekday as closed."
     )

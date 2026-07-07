@@ -76,6 +76,22 @@ def test_after_hours_prompt_block():
     assert "closed for today" in block.lower() or "TODAY" in block
 
 
+def test_after_hours_block_affirms_open_tomorrow():
+    # Regression: after closing on Monday, the model told a caller an OPEN Tuesday was closed. The
+    # block must state tomorrow's real status so it can't invert today/tomorrow.
+    info = {
+        "name": "Test",
+        "hours": "Monday-Friday: 9 AM - 5 PM",
+        "timezone": "America/Los_Angeles",
+    }
+    now = datetime(2026, 7, 6, 20, 0, tzinfo=ZoneInfo("America/Los_Angeles"))  # Monday 8pm
+    block = after_hours_prompt_block(info, now)
+    assert block is not None
+    assert "Tomorrow (Tuesday 2026-07-07)" in block
+    assert "OPEN" in block
+    assert "never tell the caller a future day" in block.lower()
+
+
 def test_same_day_message():
     msg = same_day_after_hours_message({"name": "Test Spa"})
     assert "closed for today" in msg.lower()
