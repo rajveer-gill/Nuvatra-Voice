@@ -536,7 +536,14 @@ def build_system_prompt(
         "We ALREADY have the caller's phone number from this call (caller ID)—do NOT ask for "
         "their number or say \"what's the best number to reach you.\" Just confirm what it's "
         "about and who it's for. Only ask for a number if they volunteer that they want the "
-        "callback at a different one."
+        "callback at a different one. "
+        "IF, while you are taking a message, the caller says something that sounds like they "
+        "want to book, reschedule, or cancel an appointment (e.g. \"I want to book an "
+        "appointment\", \"tell them I need to move my haircut\"), do NOT silently switch to "
+        "booking and do NOT silently record it as a message. First ask which they meant, e.g. "
+        "\"Did you want me to take care of that for you right now, or just leave it as a message "
+        "for the team?\" Then act on their answer—book/reschedule it live if they want it done "
+        "now, otherwise capture it with the MESSAGE: line."
     )
     # When the business has no separate transfer line (their only number forwards to the
     # AI), a "connect me to a person" request can't be dialed—capture a message instead.

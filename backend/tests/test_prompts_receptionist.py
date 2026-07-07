@@ -185,6 +185,14 @@ def test_prompt_take_a_message_when_no_transfer_line(minimal_business):
     assert "NO LIVE TRANSFER LINE" not in off
 
 
+def test_prompt_disambiguates_booking_intent_while_taking_a_message(minimal_business):
+    # A message that sounds like a booking ("I want to book an appointment") must not silently
+    # switch to booking or silently be recorded — the AI asks which the caller meant first.
+    p = build_system_prompt(business_info=minimal_business, include_booked_slots=False).lower()
+    assert "just leave it as a message" in p
+    assert "right now" in p
+
+
 def test_prompt_requires_12_hour_spoken_times(minimal_business):
     p = build_system_prompt(
         business_info=minimal_business,
