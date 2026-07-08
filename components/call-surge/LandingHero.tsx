@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { motion, useReducedMotion } from 'framer-motion'
-import { Sparkles } from 'lucide-react'
+import { Check, Sparkles } from 'lucide-react'
 import { HeroPrimaryCTA } from '@/components/call-surge/LandingCTAs'
 import { AuroraBackground } from '@/components/motion'
 
@@ -43,7 +43,7 @@ export function LandingHero() {
           variants={item}
         >
           <Sparkles className="h-3.5 w-3.5 md:h-4 md:w-4" aria-hidden />
-          AI voice receptionist
+          AI receptionist for appointment-based businesses
         </motion.p>
         <motion.h1
           className="font-display text-4xl font-semibold leading-[1.08] tracking-tight text-white md:text-6xl lg:text-7xl"
@@ -59,8 +59,8 @@ export function LandingHero() {
           className="mx-auto mt-6 max-w-2xl text-lg text-zinc-400 md:text-xl md:leading-relaxed"
           variants={item}
         >
-          Call Surge answers calls and texts like your best front desk—24/7—so leads book, buyers get answers, and
-          nothing slips through.
+          Call Surge answers your calls and texts on your existing number—24/7—like your best front desk. Every
+          caller books the right appointment, and nothing slips through.
         </motion.p>
         <motion.div
           className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row"
@@ -74,6 +74,17 @@ export function LandingHero() {
             Talk to us
           </Link>
         </motion.div>
+        <motion.ul
+          className="mx-auto mt-8 flex max-w-2xl flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm text-zinc-300"
+          variants={item}
+        >
+          {['Keeps your current number', 'Books the right appointment', 'Texts every caller to confirm'].map((t) => (
+            <li key={t} className="inline-flex items-center gap-1.5">
+              <Check className="h-4 w-4 text-cyan-400" aria-hidden />
+              {t}
+            </li>
+          ))}
+        </motion.ul>
         <motion.p className="mt-6 text-sm text-zinc-500" variants={item}>
           Sign in with email and password, Google, Facebook, or Microsoft — then open your dashboard.
         </motion.p>

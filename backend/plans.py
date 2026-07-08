@@ -16,7 +16,7 @@ PLAN_HAS_EXPORT = {"starter": False, "growth": True, "pro": True}
 # SMS conversations inbox (read/search full caller<->receptionist threads). Texting
 # itself happens on all plans; the inbox viewer is a Growth+ management perk.
 PLAN_HAS_MESSAGES = {"starter": False, "growth": True, "pro": True}
-PLAN_HAS_CALL_RECORDING = {"starter": False, "growth": False, "pro": True}
+PLAN_HAS_CALL_RECORDING = {"starter": False, "growth": True, "pro": True}
 PLAN_CONVERSATIONAL_SMS_SESSIONS = {"starter": 100, "growth": 300, "pro": 1000}
 # Plan list prices (USD/month) — the basis for referral commissions. Keep in sync
 # with the prices shown on the create-business page and your Stripe products.

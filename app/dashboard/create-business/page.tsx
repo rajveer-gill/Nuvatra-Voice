@@ -42,6 +42,7 @@ const PLANS = [
       'Appointment reminders (cut no-shows)',
       'Lead capture & follow-up texts',
       'Messages inbox — read & search every text',
+      'Call recording & AI summaries',
       'SMS automations + CSV export',
       '90-day call history',
     ],
@@ -54,7 +55,6 @@ const PLANS = [
     features: [
       'Everything in Growth, plus:',
       '3,500 call minutes / month',
-      'Call recording & AI summaries',
       'Unlimited SMS automations & transfers',
       '1,000 text conversations / month',
       'Unlimited call history',

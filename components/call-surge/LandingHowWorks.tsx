@@ -5,7 +5,7 @@ import { motion, useReducedMotion } from 'framer-motion'
 const STEPS = [
   { step: '01', title: 'Connect', desc: 'Link your business context, hours, and services.' },
   { step: '02', title: 'Configure', desc: 'Tune voice, SMS, routing, and escalation rules.' },
-  { step: '03', title: 'Launch', desc: 'Point traffic at Call Surge—calls and texts flow in.' },
+  { step: '03', title: 'Launch', desc: 'Forward your existing number—no porting, no new line. Calls and texts flow in.' },
   { step: '04', title: 'Optimize', desc: 'Review transcripts, outcomes, and funnel metrics.' },
 ] as const
 
