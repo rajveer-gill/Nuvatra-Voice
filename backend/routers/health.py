@@ -20,9 +20,10 @@ def root():
     return {"message": "Call Surge API", "status": "running"}
 
 
-@router.get("/api/health")
+@router.api_route("/api/health", methods=["GET", "HEAD"])
 def health():
-    """Health check for load balancers and monitoring. Returns 503 when DB is required but unreachable."""
+    """Health check for load balancers and monitoring. Returns 503 when DB is required but unreachable.
+    Accepts HEAD as well as GET — most uptime monitors (UptimeRobot etc.) probe with HEAD by default."""
     db_ok = (
         "ok"
         if (runtime.USE_DB and database.db_ping())
