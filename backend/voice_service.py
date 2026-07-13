@@ -9,6 +9,7 @@ qualified (database / config_service / deps / plans) per the strangler-fig disci
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -276,7 +277,7 @@ def _got_it_cache_key(client_id: str) -> tuple:
         GOT_IT_PHRASE,
         (config_service.get_tts_voice() or "fable").strip(),
         speed_key,
-    )
+    ) + _tts_variant_suffix()
 
 
 def _one_moment_cache_key(client_id: str) -> tuple:
@@ -290,7 +291,7 @@ def _one_moment_cache_key(client_id: str) -> tuple:
         ONE_MOMENT_PHRASE,
         (config_service.get_tts_voice() or "fable").strip(),
         speed_key,
-    )
+    ) + _tts_variant_suffix()
 
 
 def _filler_cache_key(client_id: str, phrase: str) -> tuple:
@@ -304,7 +305,7 @@ def _filler_cache_key(client_id: str, phrase: str) -> tuple:
         phrase,
         (config_service.get_tts_voice() or "fable").strip(),
         speed_key,
-    )
+    ) + _tts_variant_suffix()
 
 
 def pending_filler_for_poll(poll_count: int):
@@ -317,15 +318,37 @@ def pending_filler_for_poll(poll_count: int):
     return idx, PENDING_FILLER_PHRASES[idx]
 
 
-def _synthesize_tts_clip(text: str, *, voice: str, speed: float) -> bytes:
+def _synthesize_tts_clip(
+    text: str,
+    *,
+    voice: str,
+    speed: float,
+    model: Optional[str] = None,
+    instructions: Optional[str] = None,
+) -> bytes:
+    """Synthesize an mp3 clip. Defaults to the configured TTS model; `instructions` steers
+    delivery on gpt-4o TTS models and is omitted for tts-1/tts-1-hd (which reject it)."""
     runtime._ensure_openai_client()
-    resp = runtime.client.audio.speech.create(
-        model="tts-1-hd",
+    model = (model or config_service.get_tts_model()).strip()
+    kwargs: dict[str, Any] = dict(
+        model=model,
         voice=voice,
         input=add_sentence_pauses(text),
         speed=max(0.25, min(4.0, float(speed))),
     )
+    if instructions and model.startswith("gpt-"):
+        kwargs["instructions"] = instructions
+    resp = runtime.client.audio.speech.create(**kwargs)
     return resp.content
+
+
+def _tts_variant_suffix() -> tuple:
+    """Model + instructions fingerprint appended to clip cache keys so switching the TTS
+    model or steering style bypasses stale clips on disk instead of serving them."""
+    model = config_service.get_tts_model()
+    instr = config_service.get_tts_instructions() if model.startswith("gpt-") else ""
+    instr_fp = hashlib.sha256(instr.encode("utf-8")).hexdigest()[:12] if instr else ""
+    return (model, instr_fp)
 
 
 def _ensure_greeting_audio_cached(client_id: str) -> bool:
@@ -344,7 +367,12 @@ def _ensure_greeting_audio_cached(client_id: str) -> bool:
     payload = build_phone_greeting_payload(info, tenant)
     voice = (payload.get("voice") or config_service.get_tts_voice() or "fable").strip()
     speed = config_service.get_tts_speed()
-    data = _synthesize_tts_clip(payload["spoken_text"], voice=voice, speed=speed)
+    data = _synthesize_tts_clip(
+        payload["spoken_text"],
+        voice=voice,
+        speed=speed,
+        instructions=config_service.get_tts_instructions(),
+    )
     put_cached(PROJECT_ROOT, "greeting", greeting_key, data)
     voice_info(
         "greeting_audio_prewarmed",
@@ -367,7 +395,12 @@ def _warm_auxiliary_voice_cache(client_id: str) -> None:
     if not get_cached(PROJECT_ROOT, "got_it", got_it_key):
         voice = got_it_key[2]
         speed = got_it_key[3]
-        data = _synthesize_tts_clip(GOT_IT_PHRASE, voice=voice, speed=speed)
+        data = _synthesize_tts_clip(
+            GOT_IT_PHRASE,
+            voice=voice,
+            speed=speed,
+            instructions=config_service.get_tts_instructions(),
+        )
         put_cached(PROJECT_ROOT, "got_it", got_it_key, data)
         voice_info(
             "got_it_audio_prewarmed",
@@ -379,7 +412,12 @@ def _warm_auxiliary_voice_cache(client_id: str) -> None:
     if not get_cached(PROJECT_ROOT, "one_moment", one_moment_key):
         voice = one_moment_key[2]
         speed = one_moment_key[3]
-        data = _synthesize_tts_clip(ONE_MOMENT_PHRASE, voice=voice, speed=speed)
+        data = _synthesize_tts_clip(
+            ONE_MOMENT_PHRASE,
+            voice=voice,
+            speed=speed,
+            instructions=config_service.get_tts_instructions(),
+        )
         put_cached(PROJECT_ROOT, "one_moment", one_moment_key, data)
         voice_info(
             "one_moment_audio_prewarmed",
@@ -472,14 +510,14 @@ def _greeting_audio_cache_key(client_id: str) -> tuple:
         payload["spoken_text"],
         (payload.get("voice") or "fable").strip(),
         speed_key,
-    )
+    ) + _tts_variant_suffix()
 
 
 # ===== STT provider selection (cut 3) =====
 
 
 def _voice_stt_use_deepgram() -> bool:
-    """Nova-2 live STT via Twilio Media Streams when env and credentials are present."""
+    """Nova-3 live STT via Twilio Media Streams when env and credentials are present."""
     try:
         from voice.stt_runtime import deepgram_stt_active
     except ImportError:

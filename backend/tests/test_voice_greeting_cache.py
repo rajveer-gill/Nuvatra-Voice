@@ -39,7 +39,7 @@ def test_ensure_greeting_audio_cached_skips_resynthesis(voice_cache_env, monkeyp
     cid = voice_cache_env
     calls = {"n": 0}
 
-    def fake_synthesize(text, *, voice, speed):
+    def fake_synthesize(text, *, voice, speed, model=None, instructions=None):
         calls["n"] += 1
         return b"mp3-bytes"
 

@@ -59,7 +59,13 @@ def test_text_to_speech_accepts_valid_payload_returns_audio(client):
             assert "input" in call_kw
             assert "Hi there" in call_kw["input"]
             assert call_kw.get("voice") == "fable"
-            assert call_kw.get("model") == "tts-1-hd"
+            # Uses the configured (steerable) TTS model, and forwards delivery
+            # instructions when that model is a gpt-4o TTS model.
+            import config_service
+
+            assert call_kw.get("model") == config_service.get_tts_model()
+            if config_service.get_tts_model().startswith("gpt-"):
+                assert call_kw.get("instructions")
         finally:
             app.dependency_overrides.pop(require_tenant, None)
 
@@ -83,6 +89,47 @@ def test_text_to_speech_all_voices_accepted(client):
                 assert "audio/mpeg" in resp.headers.get("content-type", "")
         finally:
             app.dependency_overrides.pop(require_tenant, None)
+
+
+def test_synthesize_clip_forwards_instructions_only_for_gpt_model():
+    """gpt-4o TTS models receive delivery `instructions`; tts-1/tts-1-hd must not (they reject it)."""
+    import voice_service
+
+    mock_speech = MagicMock()
+    mock_speech.content = FAKE_MP3_BYTES
+    with patch("runtime.client") as mock_client:
+        mock_client.audio.speech.create.return_value = mock_speech
+
+        voice_service._synthesize_tts_clip(
+            "Hello.", voice="fable", speed=1.0, model="gpt-4o-mini-tts", instructions="Be warm."
+        )
+        gpt_kw = mock_client.audio.speech.create.call_args[1]
+        assert gpt_kw["model"] == "gpt-4o-mini-tts"
+        assert gpt_kw.get("instructions") == "Be warm."
+
+        voice_service._synthesize_tts_clip(
+            "Hello.", voice="fable", speed=1.0, model="tts-1", instructions="Be warm."
+        )
+        legacy_kw = mock_client.audio.speech.create.call_args[1]
+        assert legacy_kw["model"] == "tts-1"
+        assert "instructions" not in legacy_kw
+
+
+def test_tts_variant_suffix_changes_with_model_env(monkeypatch):
+    """Switching VOICE_TTS_MODEL changes the clip cache-key suffix so stale mp3s are bypassed."""
+    import voice_service
+
+    monkeypatch.setenv("VOICE_TTS_MODEL", "gpt-4o-mini-tts")
+    gpt_suffix = voice_service._tts_variant_suffix()
+    monkeypatch.setenv("VOICE_TTS_MODEL", "tts-1-hd")
+    legacy_suffix = voice_service._tts_variant_suffix()
+
+    assert gpt_suffix != legacy_suffix
+    assert gpt_suffix[0] == "gpt-4o-mini-tts"
+    assert legacy_suffix[0] == "tts-1-hd"
+    # instructions fingerprint is present for the steerable model, empty for tts-1-hd
+    assert gpt_suffix[1] != ""
+    assert legacy_suffix[1] == ""
 
 
 def test_text_to_speech_speed_clamped(client):

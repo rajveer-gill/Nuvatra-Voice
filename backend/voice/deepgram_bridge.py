@@ -1,4 +1,4 @@
-"""Deepgram live listen WebSocket helpers (Nova-2, 8kHz mu-law from Twilio)."""
+"""Deepgram live listen WebSocket helpers (Nova-3, 8kHz mu-law from Twilio)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from voice.stt_config import deepgram_api_key
 
 # Twilio PSTN inbound is typically mu-law 8k mono — Deepgram accepts this encoding directly.
 DEEPGRAM_LISTEN_QUERY = (
-    "model=nova-2"
+    "model=nova-3"
     "&encoding=mulaw"
     "&sample_rate=8000"
     "&channels=1"

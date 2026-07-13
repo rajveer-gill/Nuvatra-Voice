@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate pre-recorded voice sample MP3s for the dashboard voice preview.
-Uses the same TTS pipeline as production (add_sentence_pauses, tts-1-hd, speed 1.0).
+Uses the same TTS pipeline as production (add_sentence_pauses, VOICE_TTS_MODEL, speed 1.0).
 
 Run from project root:
   python backend/scripts/generate_voice_samples.py
@@ -43,16 +43,23 @@ def main() -> None:
     client = openai.OpenAI(api_key=api_key)
     text_with_pauses = add_sentence_pauses(VOICE_PREVIEW_SAMPLE_TEXT)
 
+    # Match production: same env lever (VOICE_TTS_MODEL) and steering as config_service.
+    model = (os.getenv("VOICE_TTS_MODEL") or "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+    instructions = (
+        "Voice: a warm, friendly salon receptionist. Tone: welcoming and upbeat but "
+        "calm, never rushed. Pacing: natural and relaxed, with clear enunciation. "
+        "Sound like a real person who is genuinely happy to help."
+    )
+    print(f"Model: {model}")
+
     for voice in TTS_VOICES:
         out_path = out_dir / f"{voice}.mp3"
         print(f"Generating {voice}...", end=" ", flush=True)
         try:
-            response = client.audio.speech.create(
-                model="tts-1-hd",
-                voice=voice,
-                input=text_with_pauses,
-                speed=1.0,
-            )
+            kwargs = dict(model=model, voice=voice, input=text_with_pauses, speed=1.0)
+            if model.startswith("gpt-"):
+                kwargs["instructions"] = instructions
+            response = client.audio.speech.create(**kwargs)
             out_path.write_bytes(response.content)
             print(f"OK -> {out_path.name}")
         except Exception as e:
