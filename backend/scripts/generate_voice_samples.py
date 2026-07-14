@@ -43,8 +43,8 @@ def main() -> None:
     client = openai.OpenAI(api_key=api_key)
     text_with_pauses = add_sentence_pauses(VOICE_PREVIEW_SAMPLE_TEXT)
 
-    # Match production: same env lever (VOICE_TTS_MODEL) and steering as config_service.
-    model = (os.getenv("VOICE_TTS_MODEL") or "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+    # Match production: same env lever (VOICE_TTS_MODEL) and default as config_service.
+    model = (os.getenv("VOICE_TTS_MODEL") or "tts-1-hd").strip() or "tts-1-hd"
     instructions = (
         "Voice: a friendly, upbeat salon receptionist — natural and personable, not "
         "exaggerated. Pace: a normal, brisk conversational speed; do NOT slow down, "
