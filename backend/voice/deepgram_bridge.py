@@ -10,8 +10,9 @@ import websockets
 from voice.stt_config import deepgram_api_key
 
 # Twilio PSTN inbound is typically mu-law 8k mono — Deepgram accepts this encoding directly.
+DEEPGRAM_MODEL = "nova-3"
 DEEPGRAM_LISTEN_QUERY = (
-    "model=nova-3"
+    f"model={DEEPGRAM_MODEL}"
     "&encoding=mulaw"
     "&sample_rate=8000"
     "&channels=1"

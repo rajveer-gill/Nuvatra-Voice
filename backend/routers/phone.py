@@ -467,6 +467,7 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             "tts_audio_generated",
             text_prefix=text[:40],
             voice=voice,
+            model="tts-1",  # live per-turn path stays on tts-1 (Tier 1 phase 2 will A/B this)
             gen_ms=int((time.time() - _gen_start) * 1000),
             bytes=len(data),
         )

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
@@ -330,16 +331,31 @@ def _synthesize_tts_clip(
     delivery on gpt-4o TTS models and is omitted for tts-1/tts-1-hd (which reject it)."""
     runtime._ensure_openai_client()
     model = (model or config_service.get_tts_model()).strip()
+    apply_instructions = bool(instructions) and model.startswith("gpt-")
     kwargs: dict[str, Any] = dict(
         model=model,
         voice=voice,
         input=add_sentence_pauses(text),
         speed=max(0.25, min(4.0, float(speed))),
     )
-    if instructions and model.startswith("gpt-"):
+    if apply_instructions:
         kwargs["instructions"] = instructions
+    _synth_start = time.perf_counter()
     resp = runtime.client.audio.speech.create(**kwargs)
-    return resp.content
+    data = resp.content
+    # DEBUG: proves which TTS model + steering actually ran on this synth (Tier 1 verification).
+    voice_info(
+        "tts_synth",
+        model=model,
+        instructions_applied=apply_instructions,
+        instr_len=(len(instructions) if apply_instructions else 0),
+        voice=voice,
+        speed=round(float(speed), 2),
+        input_len=len(text or ""),
+        gen_ms=int((time.perf_counter() - _synth_start) * 1000),
+        bytes=len(data or b""),
+    )
+    return data
 
 
 def _tts_variant_suffix() -> tuple:
