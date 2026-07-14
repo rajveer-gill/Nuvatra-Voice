@@ -473,9 +473,11 @@ def get_tts_model() -> str:
 # above), so this is one good default plus a hook for future verticals. Ignored by tts-1/hd.
 _TTS_INSTRUCTIONS_BY_VERTICAL = {
     "salon_chair": (
-        "Voice: a warm, friendly salon receptionist. Tone: welcoming and upbeat but "
-        "calm, never rushed. Pacing: natural and relaxed, with clear enunciation. "
-        "Sound like a real person who is genuinely happy to help."
+        "Voice: a friendly, upbeat salon receptionist — natural and personable, not "
+        "exaggerated. Pace: a normal, brisk conversational speed; do NOT slow down, "
+        "draw out words, or over-enunciate. Tone: pleasant and helpful with even, "
+        "consistent energy and a natural pitch. Sound like a real receptionist answering "
+        "the phone — not a narrator or voice actor."
     ),
 }
 _DEFAULT_TTS_INSTRUCTIONS = _TTS_INSTRUCTIONS_BY_VERTICAL["salon_chair"]
