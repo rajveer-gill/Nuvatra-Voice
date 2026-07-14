@@ -46,9 +46,11 @@ def main() -> None:
     # Match production: same env lever (VOICE_TTS_MODEL) and steering as config_service.
     model = (os.getenv("VOICE_TTS_MODEL") or "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
     instructions = (
-        "Voice: a warm, friendly salon receptionist. Tone: welcoming and upbeat but "
-        "calm, never rushed. Pacing: natural and relaxed, with clear enunciation. "
-        "Sound like a real person who is genuinely happy to help."
+        "Voice: a friendly, upbeat salon receptionist — natural and personable, not "
+        "exaggerated. Pace: a normal, brisk conversational speed; do NOT slow down, "
+        "draw out words, or over-enunciate. Tone: pleasant and helpful with even, "
+        "consistent energy and a natural pitch. Sound like a real receptionist answering "
+        "the phone — not a narrator or voice actor."
     )
     print(f"Model: {model}")
 
