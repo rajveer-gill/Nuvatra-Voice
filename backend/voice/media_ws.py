@@ -12,7 +12,11 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from observability import voice_debug, voice_info, voice_transcript
 from voice.twilio_call import safe_twilio_call_update
-from voice.deepgram_bridge import connect_deepgram_listen, parse_deepgram_transcript_message
+from voice.deepgram_bridge import (
+    DEEPGRAM_MODEL,
+    connect_deepgram_listen,
+    parse_deepgram_transcript_message,
+)
 from voice.media_token import token_stream_generation, verify_pending_media_stream_token
 from voice.stt_config import deepgram_max_frame_bytes, media_stream_max_sec, utterance_finalize_debounce_ms
 from voice.twilio_fallback_twiml import gather_process_speech_twiml
@@ -288,7 +292,7 @@ async def handle_phone_media_websocket(websocket: WebSocket, twilio_client: Any)
                 stream_deadline = time.monotonic() + max_sec
                 try:
                     dg_ws = await connect_deepgram_listen()
-                    voice_info("deepgram_connect_ok", call_sid=call_sid)
+                    voice_info("deepgram_connect_ok", call_sid=call_sid, model=DEEPGRAM_MODEL)
                 except Exception as e:
                     await fail_open_gather(str(e))
                     return

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -454,6 +455,36 @@ def get_tts_speed() -> float:
         return max(0.25, min(4.0, s))
     except (TypeError, ValueError):
         return 1.0
+
+
+# Default TTS model. gpt-4o-mini-tts is steerable (accepts `instructions`) and sounds
+# more human than tts-1-hd, at lower cost, while still taking `speed` and returning mp3.
+# The single rollback lever: set VOICE_TTS_MODEL=tts-1-hd to revert every pre-warmed clip.
+_DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
+
+
+def get_tts_model() -> str:
+    """TTS model for phone/preview synthesis. Env-overridable for rollout/rollback."""
+    return (os.getenv("VOICE_TTS_MODEL") or _DEFAULT_TTS_MODEL).strip() or _DEFAULT_TTS_MODEL
+
+
+# Delivery style passed to steerable TTS (gpt-4o-mini-tts). Keyed by business vertical so
+# each vertical can sound right; only salon_chair is live today (see ALLOWED_BUSINESS_VERTICALS
+# above), so this is one good default plus a hook for future verticals. Ignored by tts-1/hd.
+_TTS_INSTRUCTIONS_BY_VERTICAL = {
+    "salon_chair": (
+        "Voice: a warm, friendly salon receptionist. Tone: welcoming and upbeat but "
+        "calm, never rushed. Pacing: natural and relaxed, with clear enunciation. "
+        "Sound like a real person who is genuinely happy to help."
+    ),
+}
+_DEFAULT_TTS_INSTRUCTIONS = _TTS_INSTRUCTIONS_BY_VERTICAL["salon_chair"]
+
+
+def get_tts_instructions() -> str:
+    """Steering instructions for the current tenant's vertical (empty to skip steering)."""
+    vertical = (get_business_info().get("business_vertical") or "").strip()
+    return _TTS_INSTRUCTIONS_BY_VERTICAL.get(vertical, _DEFAULT_TTS_INSTRUCTIONS)
 
 
 def get_client_data_dir() -> Optional[Path]:

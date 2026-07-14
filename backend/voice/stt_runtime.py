@@ -12,7 +12,7 @@ _log = logging.getLogger("nuvatra")
 
 def deepgram_stt_active(*, twilio_available: bool, twilio_client: Any) -> bool:
     """
-    True when inbound/ongoing turns should use Twilio Media Streams + Deepgram Nova-2.
+    True when inbound/ongoing turns should use Twilio Media Streams + Deepgram Nova-3.
 
     Requires env, credentials, and a working Twilio REST client (for fail-open Gather updates).
     """

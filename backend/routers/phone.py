@@ -116,16 +116,17 @@ def text_to_speech(
     try:
         tts_speed = request.speed if request.speed is not None else config_service.get_tts_speed()
         tts_speed = max(0.25, min(4.0, float(tts_speed)))
-        # Generate speech using OpenAI TTS HD model for maximum quality
-        response = runtime.client.audio.speech.create(
-            model="tts-1-hd",  # HD model for smooth, natural, human-like quality
+        # Steerable TTS (configured model + per-vertical delivery instructions) via the
+        # shared synth helper, which handles sentence pauses and the speed clamp.
+        audio_data = voice_service._synthesize_tts_clip(
+            request.text,
             voice=request.voice,
-            input=add_sentence_pauses(request.text),
             speed=tts_speed,
+            instructions=config_service.get_tts_instructions(),
         )
 
         # Convert response to bytes
-        audio_bytes = io.BytesIO(response.content)
+        audio_bytes = io.BytesIO(audio_data)
         audio_bytes.seek(0)
 
         # Return as streaming audio
@@ -400,16 +401,16 @@ def get_tts_audio_hd_for_phone(text: str, voice: str = "fable"):
     # input to keep an attacker from looping huge strings into paid OpenAI TTS.
     text = (text or "")[:TTS_MAX_INPUT_CHARS]
     try:
-        # Use tts-1-hd for ultra-smooth, natural speech (no choppiness)
-        response = runtime.client.audio.speech.create(
-            model="tts-1-hd",  # HD model for ultra-smooth, natural speech
+        # Steerable TTS for the greeting. Pre-warmed / cached, so not latency-sensitive.
+        audio_data = voice_service._synthesize_tts_clip(
+            text,
             voice=voice,
-            input=add_sentence_pauses(text),
             speed=config_service.get_tts_speed(),
+            instructions=config_service.get_tts_instructions(),
         )
 
         # Convert response to bytes
-        audio_bytes = io.BytesIO(response.content)
+        audio_bytes = io.BytesIO(audio_data)
         audio_bytes.seek(0)
 
         # Return as streaming audio
@@ -449,8 +450,9 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             },
         )
     try:
-        # Use tts-1 for faster generation while maintaining quality
-        # tts-1 is faster than tts-1-hd but still sounds natural and smooth
+        # Live per-turn path: dynamic reply text is a cache miss every time, so keep the
+        # fast tts-1 for low first-byte latency. Tier 1 phase 2 will A/B gpt-4o-mini-tts
+        # here with stream_format=sse to hold latency down.
         _gen_start = time.time()
         response = runtime.client.audio.speech.create(
             model="tts-1",  # Faster generation, still high quality
@@ -465,6 +467,7 @@ def get_tts_audio_for_phone(text: str, voice: str = "fable"):
             "tts_audio_generated",
             text_prefix=text[:40],
             voice=voice,
+            model="tts-1",  # live per-turn path stays on tts-1 (Tier 1 phase 2 will A/B this)
             gen_ms=int((time.time() - _gen_start) * 1000),
             bytes=len(data),
         )
@@ -1917,7 +1920,7 @@ def get_active_calls(_: str = Depends(deps.require_admin)):
 
 @router.websocket("/api/phone/media")
 async def phone_media_websocket(websocket: WebSocket):
-    """Twilio Media Streams → Deepgram Nova-2 live STT (when VOICE_STT_PROVIDER=deepgram)."""
+    """Twilio Media Streams → Deepgram Nova-3 live STT (when VOICE_STT_PROVIDER=deepgram)."""
     if not TWILIO_AVAILABLE or not runtime.twilio_client:
         await websocket.close(code=1011)
         return

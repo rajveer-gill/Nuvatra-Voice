@@ -9,7 +9,7 @@ Environment:
   OBS_TRACE_VOICE=1        — INFO logs each voice pipeline step (incoming, respond branches, transfers, STT); recommended when debugging calls on Render.
   OBS_TRACE_TRANSCRIPT=1   — INFO logs the FULL caller and AI utterances (whole conversation). PII: contains raw transcript text, so keep OFF by default and enable only while actively debugging a call.
   GREETING_DEBUG=1         — INFO logs resolved phone greeting text (spoken_preview) on each call and Settings save; also enabled when SETTINGS_LOAD_DEBUG=1.
-  VOICE_STT_PROVIDER=twilio|deepgram — Default twilio (Gather). deepgram uses Media Streams on every listen turn (/api/phone/media + Deepgram Nova-2); Gather remains fail-open fallback.
+  VOICE_STT_PROVIDER=twilio|deepgram — Default twilio (Gather). deepgram uses Media Streams on every listen turn (/api/phone/media + Deepgram Nova-3); Gather remains fail-open fallback.
   DEEPGRAM_API_KEY         — Required when VOICE_STT_PROVIDER=deepgram.
   MEDIA_STREAM_SIGNING_SECRET — Optional HMAC secret for stream tokens; falls back to TWILIO_AUTH_TOKEN.
   VOICE_MEDIA_STREAM_MAX_SEC — Max seconds per Connect+Stream listening window (default 30).
