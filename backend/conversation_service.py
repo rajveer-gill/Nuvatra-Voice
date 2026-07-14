@@ -22,6 +22,7 @@ import booking_service
 import caller_memory
 import config_service
 import database
+import llm_provider
 import runtime
 import sms_service
 import voice_service
@@ -533,16 +534,18 @@ def _extract_booking_line_from_conversation(
         "If name, date, or time is missing or ambiguous, reply with exactly: NONE"
     )
     try:
-        resp = runtime.client.chat.completions.create(
-            model=VOICE_LLM_MODEL,
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": transcript},
-            ],
-            temperature=0,
-            max_tokens=120,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
+        raw = (
+            llm_provider.chat(
+                model=VOICE_LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": sys},
+                    {"role": "user", "content": transcript},
+                ],
+                temperature=0,
+                max_tokens=120,
+            )
+            or ""
+        ).strip()
     except Exception as e:
         logger.warning("voice_booking_extraction_failed: %s", e)
         return None
@@ -1462,16 +1465,13 @@ async def generate_response_async(
         # would stall every concurrent call's loop work for the request's
         # duration. (The booking-extraction call below is threaded for the same
         # reason.) A hung request is bounded by the client timeout in runtime.py.
-        ai_response = await asyncio.to_thread(
-            runtime.client.chat.completions.create,
+        ai_text = await asyncio.to_thread(
+            llm_provider.chat,
             model=VOICE_LLM_MODEL,
             messages=messages,
             temperature=0.8,
             max_tokens=200,
-            stream=False,
         )
-
-        ai_text = ai_response.choices[0].message.content
         voice_debug("gpt_reply", call_sid=call_sid, reply_preview=(ai_text or "")[:80])
         # Full AI reply (incl. any BOOKING marker) when OBS_TRACE_TRANSCRIPT=1 — pairs with the
         # caller_said lines so the whole conversation is reconstructable from the logs.
