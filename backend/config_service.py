@@ -457,10 +457,11 @@ def get_tts_speed() -> float:
         return 1.0
 
 
-# Default TTS model. gpt-4o-mini-tts is steerable (accepts `instructions`) and sounds
-# more human than tts-1-hd, at lower cost, while still taking `speed` and returning mp3.
-# The single rollback lever: set VOICE_TTS_MODEL=tts-1-hd to revert every pre-warmed clip.
-_DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
+# Default TTS model. tts-1-hd is stable and polished — on real calls it sounded more
+# natural, positive, and peppy than the steerable gpt-4o-mini-tts for short receptionist
+# lines (chosen by ear, not theory). Opt into the steerable model per-env with
+# VOICE_TTS_MODEL=gpt-4o-mini-tts (its `instructions` steering only applies to gpt-* models).
+_DEFAULT_TTS_MODEL = "tts-1-hd"
 
 
 def get_tts_model() -> str:
