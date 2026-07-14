@@ -1,8 +1,9 @@
 # Force Railway to rebuild - updated 2025-12-08 07:10
-# PINNED VERSIONS: OpenAI 1.40.0+ doesn't use proxies, httpx 0.27.0+ doesn't support it
+# PINNED VERSIONS: openai>=1.68.0 is required for gpt-4o-mini-tts steering (the `instructions`
+# kwarg on audio.speech.create; 1.40.0 raised TypeError). Still proxy-free, so httpx stays 0.27.0.
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-openai==1.40.0
+openai==1.68.0
 httpx==0.27.0
 python-dotenv==1.0.0
 pydantic==2.9.2

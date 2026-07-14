@@ -341,7 +341,18 @@ def _synthesize_tts_clip(
     if apply_instructions:
         kwargs["instructions"] = instructions
     _synth_start = time.perf_counter()
-    resp = runtime.client.audio.speech.create(**kwargs)
+    try:
+        resp = runtime.client.audio.speech.create(**kwargs)
+    except TypeError as e:
+        # Deployed openai SDK predates the `instructions` kwarg (needs >= 1.68.0). Degrade
+        # gracefully: drop steering and retry so the call never hard-fails or pages ops.
+        if apply_instructions and "instructions" in str(e):
+            voice_warning("tts_instructions_unsupported", model=model, error=str(e)[:120])
+            kwargs.pop("instructions", None)
+            apply_instructions = False
+            resp = runtime.client.audio.speech.create(**kwargs)
+        else:
+            raise
     data = resp.content
     # DEBUG: proves which TTS model + steering actually ran on this synth (Tier 1 verification).
     voice_info(
