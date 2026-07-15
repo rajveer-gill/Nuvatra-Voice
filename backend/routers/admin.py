@@ -731,7 +731,14 @@ def admin_tenant_billing_exempt(
             else:
                 base = now
             new_ends = base + timedelta(days=30 * req.extend_trial_months)
-            if database.db_tenant_extend_trial(tenant_id, new_ends):
+            # Extending a free trial must also restore `trialing` status, not just the date.
+            # get_plan_limits only grants full (pro-tier) trial access when
+            # subscription_status == "trialing"; if a tenant was charged (status "active")
+            # or canceled/refunded, pushing trial_ends_at alone leaves them gated to starter.
+            # Set both together so an admin-granted trial is always the full experience.
+            if database.db_tenant_update_subscription(
+                tenant_id, subscription_status="trialing", trial_ends_at=new_ends
+            ):
                 deps.audit_log(
                     "admin",
                     "billing_exempt",
@@ -743,10 +750,15 @@ def admin_tenant_billing_exempt(
                         "action": "extend_trial_months",
                         "months": req.extend_trial_months,
                         "trial_ends_at": new_ends.isoformat(),
+                        "subscription_status": "trialing",
                     },
                     request=request,
                 )
-                return {"success": True, "trial_ends_at": new_ends.isoformat()}
+                return {
+                    "success": True,
+                    "trial_ends_at": new_ends.isoformat(),
+                    "subscription_status": "trialing",
+                }
         except Exception as e:
             raise deps._server_error(
                 "trial extension failed",
