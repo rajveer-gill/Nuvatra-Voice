@@ -805,6 +805,28 @@ async def handle_incoming_call(request: Request):
             stt="deepgram" if use_deepgram_stt else "twilio",
         )
 
+        # Option C (env-gated): one persistent bidirectional stream for the whole call —
+        # the handler streams the greeting + AI replies as outbound audio over the socket.
+        # Falls through to the batch <Play> path if the TwiML can't be built.
+        if use_deepgram_stt and config_service.voice_streaming_enabled():
+            from voice.twiml_stt import bidirectional_stream_twiml, next_media_stream_generation
+
+            gen = next_media_stream_generation(call_sid, runtime.call_store.sessions[call_sid])
+            rec_cb = None
+            if voice_service._call_recording_enabled_for_tenant(tenant_for_access):
+                rec_cb = f"{base_url.rstrip('/')}/api/phone/recording-complete"
+            xml = bidirectional_stream_twiml(
+                call_sid=call_sid, base_url=base_url, stream_generation=gen, record_callback_url=rec_cb
+            )
+            if xml:
+                voice_call_phase(
+                    "incoming_greeting_streaming",
+                    call_sid=call_sid or "",
+                    client_id=client_id,
+                    stt="deepgram",
+                )
+                return Response(content=xml, media_type="application/xml")
+
         if use_deepgram_stt:
             from voice.twiml_stt import (
                 append_connect_stream,
@@ -1927,6 +1949,18 @@ async def phone_media_websocket(websocket: WebSocket):
     from voice.media_ws import handle_phone_media_websocket
 
     await handle_phone_media_websocket(websocket, runtime.twilio_client)
+
+
+@router.websocket("/api/phone/media-stream")
+async def phone_media_stream_websocket(websocket: WebSocket):
+    """Option C: persistent bidirectional Twilio Media Stream (STT in + streamed TTS out).
+    Only reached when the incoming call returns the bidirectional TwiML (VOICE_STREAMING_TTS)."""
+    if not TWILIO_AVAILABLE or not runtime.twilio_client:
+        await websocket.close(code=1011)
+        return
+    from voice.media_ws_stream import handle_bidirectional_media
+
+    await handle_bidirectional_media(websocket, runtime.twilio_client)
 
 
 @router.post("/api/phone/stream")

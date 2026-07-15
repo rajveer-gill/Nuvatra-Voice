@@ -469,6 +469,13 @@ def get_tts_model() -> str:
     return (os.getenv("VOICE_TTS_MODEL") or _DEFAULT_TTS_MODEL).strip() or _DEFAULT_TTS_MODEL
 
 
+def voice_streaming_enabled() -> bool:
+    """Option C: bidirectional media streaming (persistent stream, outbound audio over the
+    websocket, barge-in) instead of the batch <Play> path. Env-gated + default OFF so the
+    working <Play> path is untouched and rollback is instant (unset the env)."""
+    return (os.getenv("VOICE_STREAMING_TTS") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Delivery style passed to steerable TTS (gpt-4o-mini-tts). Keyed by business vertical so
 # each vertical can sound right; only salon_chair is live today (see ALLOWED_BUSINESS_VERTICALS
 # above), so this is one good default plus a hook for future verticals. Ignored by tts-1/hd.
