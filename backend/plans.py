@@ -81,10 +81,38 @@ def _is_trial_active(tenant: Optional[dict]) -> bool:
         return False
 
 
+def _is_billing_exempt_active(tenant: Optional[dict]) -> bool:
+    """Check if the tenant has an active admin billing exemption (a comped free window)."""
+    if not tenant:
+        return False
+    exempt_until = tenant.get("billing_exempt_until")
+    if not exempt_until:
+        return False
+    try:
+        from datetime import datetime, timezone
+        exempt_dt = (
+            datetime.fromisoformat(exempt_until.replace("Z", "+00:00"))
+            if isinstance(exempt_until, str)
+            else exempt_until
+        )
+        if exempt_dt.tzinfo is None:
+            exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) < exempt_dt
+    except Exception:
+        return False
+
+
 def get_plan_limits(tenant: Optional[dict]) -> dict:
-    """Return plan limits dict. Trial users get full pro-level access."""
+    """Return plan limits dict. Any free-access grant gets the FULL (pro-tier) experience.
+
+    Both an active trial (subscription_status="trialing") and an active admin billing
+    exemption (billing_exempt_until in the future) map to pro-tier features — so a comped
+    or extended tenant is never gated to starter. (Billing exemption is checked here rather
+    than forcing status="trialing", so a comped *paying* customer keeps their "active" status.)
+    """
     plan = _normalize_plan(tenant.get("plan") if tenant else None)
-    effective = "pro" if _is_trial_active(tenant) else plan
+    full_access = _is_trial_active(tenant) or _is_billing_exempt_active(tenant)
+    effective = "pro" if full_access else plan
     return {
         "plan": plan,
         "minutes_cap": PLAN_MINUTES.get(effective, 500),

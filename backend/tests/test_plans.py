@@ -117,6 +117,38 @@ def test_expired_trial_gets_plan_limits():
     assert limits["has_export"] is False
 
 
+def test_billing_exempt_gets_pro_limits():
+    """An active admin billing exemption grants the FULL pro-tier experience, even for a
+    non-trialing (e.g. charged/canceled) tenant — matches an admin-granted free window."""
+    future = (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()
+    tenant = {
+        "plan": "starter",
+        "subscription_status": "active",  # not trialing
+        "billing_exempt_until": future,
+    }
+    limits = get_plan_limits(tenant)
+    assert limits["plan"] == "starter"      # underlying plan unchanged
+    assert limits["is_trial"] is False      # not a trial — it's a comp
+    assert limits["minutes_cap"] == PLAN_MINUTES["pro"]
+    assert limits["has_messages"] is True
+    assert limits["has_lead_capture"] is True
+    assert limits["has_call_recording"] is True
+    assert limits["has_export"] is True
+
+
+def test_expired_billing_exempt_falls_back_to_plan():
+    """A billing exemption that has lapsed does NOT grant pro-tier."""
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    tenant = {
+        "plan": "starter",
+        "subscription_status": "active",
+        "billing_exempt_until": past,
+    }
+    limits = get_plan_limits(tenant)
+    assert limits["minutes_cap"] == PLAN_MINUTES["starter"]
+    assert limits["has_messages"] is False
+
+
 def test_plan_constants_have_all_plans():
     """All plan constant dicts have starter, growth, pro."""
     for name, d in [
