@@ -4,6 +4,9 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 openai==1.68.0
+# anthropic for the Claude voice-brain path (VOICE_LLM_MODEL=claude-*). Needs httpx>=0.25,<1
+# (satisfied by the pin below) and pydantic<3 (2.9.2 below). Dormant unless a claude model is set.
+anthropic==0.96.0
 httpx==0.27.0
 python-dotenv==1.0.0
 pydantic==2.9.2

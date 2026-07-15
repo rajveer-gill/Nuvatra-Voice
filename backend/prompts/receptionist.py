@@ -513,13 +513,19 @@ def build_system_prompt(
         header = (
             f"Friendly, professional AI receptionist for {name}, a {industry_desc}.{identity_line}{honesty_line} "
             "Use natural, conversational language and be warm and personable. "
-            "Keep responses brief (1-2 short sentences) and clear."
+            "Keep responses brief (1-2 short sentences) and clear. "
+            "Your reply is spoken aloud by a text-to-speech voice, so write plain spoken "
+            "words only — never use markdown, asterisks, bullet points, headings, emoji, "
+            "or other symbols."
         )
     else:
         header = (
             f"Friendly, professional AI receptionist for {name}.{identity_line}{honesty_line} "
             "Use natural, conversational language and be warm and personable. "
-            "Keep responses brief (1-2 short sentences) and clear."
+            "Keep responses brief (1-2 short sentences) and clear. "
+            "Your reply is spoken aloud by a text-to-speech voice, so write plain spoken "
+            "words only — never use markdown, asterisks, bullet points, headings, emoji, "
+            "or other symbols."
         )
 
     focus_block = appointment_focus_guidance(
@@ -573,12 +579,25 @@ def build_system_prompt(
     except Exception:
         closures_block = ""
 
+    # Anti-fabrication guard: the brain only knows the facts assembled above. Callers routinely
+    # ask about amenities/policies (parking, wifi, accessibility, products, directions) that are
+    # NOT in the config; without this, a confident model will invent a plausible answer.
+    unknown_facts_block = (
+        "\n\nUNKNOWN DETAILS: The only business facts you know are the ones stated above "
+        "(hours, location, services and prices, staff, and any policies listed). If a caller asks "
+        "about anything NOT covered above—for example parking, wifi, accessibility, products, "
+        "directions, or a specific policy—do NOT invent, guess, or assume an answer (not even a "
+        "plausible-sounding yes or no). Say you don't have that detail in front of you and offer to "
+        "take a message so the team can confirm. You may still answer freely about the facts that "
+        "ARE listed above."
+    )
+
     base_prompt = f"""{header}
 
 {focus_block}
 
 You can help with:
-{help_section}{staff_block}{memory_block}{slots_block}{closures_block}{message_block}"""
+{help_section}{staff_block}{memory_block}{slots_block}{closures_block}{message_block}{unknown_facts_block}"""
 
     if detected_language != "English":
         return (

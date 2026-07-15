@@ -17,6 +17,7 @@ import config_service
 import conversation_service
 import database
 import deps
+import llm_provider
 import runtime
 import sms_service
 from observability import email_hint_for_log, system_info
@@ -105,14 +106,12 @@ def handle_conversation(
             runtime.messages.extend(request.conversation_history)
         runtime.messages.append({"role": "user", "content": request.message})
 
-        response = runtime.client.chat.completions.create(
+        ai_response = llm_provider.chat(
             model=conversation_service.VOICE_LLM_MODEL,
             messages=runtime.messages,
             temperature=0.7,
             max_tokens=200,
         )
-
-        ai_response = response.choices[0].message.content
         action = None
         data = None
 
