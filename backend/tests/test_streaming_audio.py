@@ -1,14 +1,30 @@
 """Transcoding for outbound Twilio bidirectional media (pure-Python μ-law + 24k→8k)."""
+import math
 import struct
 
 import pytest
 
 from voice.streaming_audio import (
+    _LPF,
     MULAW_FRAME_BYTES,
     Pcm24kToMulaw8k,
     frame_mulaw,
     linear16_to_ulaw,
 )
+
+
+def _lpf_mag(freq_hz: float, fs_hz: float = 24000.0) -> float:
+    re = sum(t * math.cos(2 * math.pi * freq_hz * k / fs_hz) for k, t in enumerate(_LPF))
+    im = sum(t * math.sin(2 * math.pi * freq_hz * k / fs_hz) for k, t in enumerate(_LPF))
+    return math.hypot(re, im)
+
+
+def test_lowpass_preserves_speech_and_kills_aliasing():
+    """The anti-alias filter must pass the speech band (so audio isn't muffled) and strongly
+    attenuate content above the 4 kHz output Nyquist (so it doesn't alias)."""
+    assert _lpf_mag(300) > 0.95     # low speech preserved (near unity)
+    assert _lpf_mag(3000) > 0.6     # upper speech band kept -> consonant clarity
+    assert _lpf_mag(6000) < 0.15    # above Nyquist: strongly attenuated
 
 
 def test_ulaw_known_boundaries():
