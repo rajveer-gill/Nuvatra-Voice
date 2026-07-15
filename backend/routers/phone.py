@@ -1506,10 +1506,16 @@ async def respond_with_audio(request: Request):
                 status="ready",
                 stt_provider="deepgram" if voice_service._voice_stt_use_deepgram() else "twilio",
             )
-            # Audio is ready - play it
-            audio_url = status_data.get("audio_url")
-            if audio_url:
-                response.play(audio_url)
+            # Audio is ready - play it. Prefer the per-sentence chunk list (progressive
+            # playback: Twilio prefetches the next <Play> while the current plays, so first
+            # audio starts after only the first short chunk synthesizes). Fall back to the
+            # single full-reply URL if chunks are absent (e.g. the error/fallback path).
+            audio_urls = status_data.get("audio_urls") or []
+            if not audio_urls and status_data.get("audio_url"):
+                audio_urls = [status_data["audio_url"]]
+            if audio_urls:
+                for _chunk_url in audio_urls:
+                    response.play(_chunk_url)
                 try:
                     # After playing, set up next input gathering
                     detected_lang = call_data.get("detected_language") or "English"

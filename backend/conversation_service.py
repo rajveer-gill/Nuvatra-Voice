@@ -1745,14 +1745,34 @@ async def generate_response_async(
             # AI reply implied a transfer but there's no number — speak the honest line.
             ai_text = _NO_TRANSFER_FALLBACK_TEXT
 
-        # Generate TTS audio URL
-        ai_text_encoded = quote(ai_text)
-        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={config_service.get_tts_voice()}"
+        # Generate TTS audio URL(s). Split the reply into sentence chunks and emit one
+        # <Play> per chunk (see voice_service.split_tts_chunks): Twilio prefetches the next
+        # chunk while the current plays, so the caller hears the first (short) sentence after
+        # only that chunk is synthesized instead of waiting for the whole reply. A
+        # one-sentence reply yields a single chunk == today's behavior. audio_url keeps the
+        # full-reply URL as a single-<Play> fallback.
+        _tts_voice = config_service.get_tts_voice()
+        tts_audio_url = f"{base_url}/api/phone/tts-audio?text={quote(ai_text)}&voice={_tts_voice}"
+        _chunks = voice_service.split_tts_chunks(ai_text)
+        audio_urls = [
+            f"{base_url}/api/phone/tts-audio?text={quote(c)}&voice={_tts_voice}"
+            for c in _chunks
+        ] or [tts_audio_url]
+        # Measurement: chunk count + first-chunk length so we can read the first-audio win
+        # on staging (the first tts-audio call logs gen_ms for just this short chunk).
+        voice_info(
+            "tts_reply_chunked",
+            call_sid=call_sid,
+            chunks=len(audio_urls),
+            first_chunk_len=len(_chunks[0]) if _chunks else 0,
+            reply_len=len(ai_text or ""),
+        )
 
         # Mark as ready
         runtime.call_store.response_status[call_sid] = {
             "status": "ready",
             "audio_url": tts_audio_url,
+            "audio_urls": audio_urls,
             "ai_text": ai_text,
         }
         voice_call_phase(
