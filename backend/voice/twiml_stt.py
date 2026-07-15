@@ -84,6 +84,47 @@ def append_connect_stream(
     return True
 
 
+def bidirectional_stream_twiml(
+    *,
+    call_sid: str,
+    base_url: str,
+    stream_generation: int,
+    record_callback_url: Optional[str] = None,
+) -> Optional[str]:
+    """Full TwiML for an Option C call: one persistent bidirectional <Connect><Stream> that
+    stays open for the whole call (Connect blocks until the WS closes). The handler at
+    /api/phone/media-stream does greeting, listening, and streams the AI reply as outbound
+    audio over the same socket. Returns None if TwiML/token can't be built (caller falls back
+    to the <Play> path). Optional <Start><Recording> is emitted before Connect when configured.
+    """
+    if not _TWILIO_OK or VoiceResponse is None or Connect is None or Stream is None:
+        return None
+    sid = normalize_call_sid(call_sid)
+    if not sid or stream_generation < 1:
+        voice_warning("bidi_stream_skipped", call_sid=sid or str(call_sid)[:8], gen=stream_generation)
+        return None
+    token = mint_media_stream_token(sid, stream_generation=stream_generation)
+    if not token:
+        voice_warning("bidi_stream_skipped_no_token", call_sid=sid)
+        return None
+    bu = base_url.rstrip("/")
+    wss_base = http_to_ws_base(bu)
+    vr = VoiceResponse()
+    if record_callback_url:
+        start = vr.start()
+        start.recording(
+            channels="dual",
+            recording_status_callback=record_callback_url,
+            recording_status_callback_method="POST",
+        )
+    connect = Connect()
+    stream = Stream(url=f"{wss_base}/api/phone/media-stream")
+    stream.parameter(name="token", value=token)
+    connect.append(stream)
+    vr.append(connect)
+    return str(vr)
+
+
 def got_it_respond_twiml(call_sid: str, base_url: str) -> str:
     """TwiML after a successful utterance: filler audio then poll for AI response."""
     if not _TWILIO_OK or VoiceResponse is None:
