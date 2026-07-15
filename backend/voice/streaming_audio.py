@@ -12,6 +12,7 @@ any Python.
 """
 from __future__ import annotations
 
+import math
 from typing import List
 
 # Twilio telephony frame: 8000 Hz * 20 ms = 160 μ-law bytes per frame.
@@ -58,48 +59,72 @@ def linear16_to_ulaw(sample: int) -> int:
     return (uval ^ mask) & 0xFF
 
 
+def _design_lowpass(num_taps: int, fc_hz: float, fs_hz: float) -> List[float]:
+    """Windowed-sinc (Hamming) low-pass FIR, DC gain normalized to 1.0.
+
+    A proper anti-alias filter with a sharp cutoff just under the 4 kHz output Nyquist —
+    preserves the 2-4 kHz speech band (consonant clarity) that a crude box average smears,
+    which is what made the streamed audio sound muffled.
+    """
+    m = (num_taps - 1) / 2.0
+    taps: List[float] = []
+    for n in range(num_taps):
+        x = n - m
+        sinc = (2 * fc_hz / fs_hz) if x == 0 else math.sin(2 * math.pi * fc_hz / fs_hz * x) / (math.pi * x)
+        window = 0.54 - 0.46 * math.cos(2 * math.pi * n / (num_taps - 1))
+        taps.append(sinc * window)
+    total = sum(taps)
+    return [t / total for t in taps]
+
+
+# 23-tap low-pass at fc=3600 Hz for 24 kHz input. Computed only at decimated output positions
+# (polyphase), so cost is ~ (samples/3)*taps — cheap enough for real-time on one core.
+_LPF = _design_lowpass(23, 3600.0, 24000.0)
+_LPF_N = len(_LPF)
+
+
 class Pcm24kToMulaw8k:
     """Streaming transcoder: feed arbitrary 24 kHz/16-bit/mono PCM byte chunks, get back
-    μ-law/8000 bytes. Buffers partial sample-groups across chunks so chunk boundaries that
-    don't align to 3-sample (6-byte) groups don't drop or corrupt audio.
+    μ-law/8000 bytes. A windowed-sinc low-pass is applied before 3:1 decimation. State
+    (sample history, decimation phase, odd trailing byte) carries across chunks so output is
+    identical regardless of how the PCM stream is split.
     """
 
     def __init__(self) -> None:
-        self._buf = bytearray()
+        self._byte_rem = b""             # leftover odd byte across chunks
+        self._hist: List[int] = [0] * (_LPF_N - 1)  # last N-1 input samples (zero-primed)
+        self._pos = 0                    # absolute input-sample counter (for decimation phase)
 
     def feed(self, pcm: bytes) -> bytes:
-        """Transcode as much of the accumulated PCM as forms whole 3-sample groups."""
-        if pcm:
-            self._buf.extend(pcm)
-        n = len(self._buf)
-        group = 2 * _DECIMATION  # 6 bytes = 3 int16 samples
-        usable = (n // group) * group
-        if usable == 0:
+        data = self._byte_rem + pcm
+        ns = len(data) // 2
+        if ns == 0:
+            self._byte_rem = data
             return b""
-        out = bytearray(usable // group)
-        buf = self._buf
-        for oi, i in enumerate(range(0, usable, group)):
-            s0 = int.from_bytes(buf[i : i + 2], "little", signed=True)
-            s1 = int.from_bytes(buf[i + 2 : i + 4], "little", signed=True)
-            s2 = int.from_bytes(buf[i + 4 : i + 6], "little", signed=True)
-            # Average the 3 samples (crude low-pass) before decimating, to limit aliasing.
-            out[oi] = linear16_to_ulaw((s0 + s1 + s2) // _DECIMATION)
-        del self._buf[:usable]
+        new = [int.from_bytes(data[2 * i : 2 * i + 2], "little", signed=True) for i in range(ns)]
+        self._byte_rem = data[2 * ns :]
+        buf = self._hist + new           # buf index = hlen + i  ->  input sample `new[i]`
+        hlen = len(self._hist)
+        taps = _LPF
+        n = _LPF_N
+        out = bytearray()
+        base = self._pos
+        for i in range(ns):
+            if (base + i) % _DECIMATION == 0:
+                bi = hlen + i            # current sample's index in buf; window = buf[bi-n+1 .. bi]
+                acc = 0.0
+                w = buf[bi - n + 1 : bi + 1]
+                for k in range(n):
+                    acc += taps[k] * w[k]
+                out.append(linear16_to_ulaw(int(round(acc))))
+        self._pos = base + ns
+        self._hist = buf[-(n - 1) :]
         return bytes(out)
 
     def flush(self) -> bytes:
-        """Encode any trailing 1-2 leftover samples (pad the group by repeating the last)."""
-        if len(self._buf) < 2:
-            self._buf.clear()
-            return b""
-        samples = []
-        for i in range(0, len(self._buf) - 1, 2):
-            samples.append(int.from_bytes(self._buf[i : i + 2], "little", signed=True))
-        self._buf.clear()
-        if not samples:
-            return b""
-        avg = sum(samples) // len(samples)
-        return bytes([linear16_to_ulaw(avg)])
+        """Trailing ≤2 samples not landing on a decimation position are inaudible; drop them."""
+        self._byte_rem = b""
+        return b""
 
 
 def frame_mulaw(data: bytes, carry: bytearray, *, flush: bool = False) -> List[bytes]:
