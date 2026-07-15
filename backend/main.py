@@ -260,17 +260,20 @@ async def pre_warm_openai():
     if _openai_pre_warm_disabled:
         return
     try:
-        _ensure_openai_client()
-        print("[WARM] Pre-warming OpenAI client...")
+        _ensure_openai_client()  # also warms the OpenAI HTTP pool used for TTS/Whisper
+        print("[WARM] Pre-warming voice-brain client...")
+        import llm_provider
+
+        # Warm the model actually used for voice reasoning, via the provider shim — so a
+        # claude VOICE_LLM_MODEL warms Anthropic (pinging OpenAI with a claude model 404s).
         await asyncio.to_thread(
-            client.chat.completions.create,
-            # Warm the model actually used for voice reasoning (see conversation_service).
+            llm_provider.chat,
             model=os.getenv("VOICE_LLM_MODEL") or "gpt-4o-mini",
             messages=[{"role": "user", "content": "hi"}],
             max_tokens=5,
             temperature=0,
         )
-        print("[OK] OpenAI client pre-warmed successfully")
+        print("[OK] Voice-brain client pre-warmed successfully")
     except Exception as e:
         msg = str(e).lower()
         code = getattr(e, "status_code", None)

@@ -513,13 +513,19 @@ def build_system_prompt(
         header = (
             f"Friendly, professional AI receptionist for {name}, a {industry_desc}.{identity_line}{honesty_line} "
             "Use natural, conversational language and be warm and personable. "
-            "Keep responses brief (1-2 short sentences) and clear."
+            "Keep responses brief (1-2 short sentences) and clear. "
+            "Your reply is spoken aloud by a text-to-speech voice, so write plain spoken "
+            "words only — never use markdown, asterisks, bullet points, headings, emoji, "
+            "or other symbols."
         )
     else:
         header = (
             f"Friendly, professional AI receptionist for {name}.{identity_line}{honesty_line} "
             "Use natural, conversational language and be warm and personable. "
-            "Keep responses brief (1-2 short sentences) and clear."
+            "Keep responses brief (1-2 short sentences) and clear. "
+            "Your reply is spoken aloud by a text-to-speech voice, so write plain spoken "
+            "words only — never use markdown, asterisks, bullet points, headings, emoji, "
+            "or other symbols."
         )
 
     focus_block = appointment_focus_guidance(
