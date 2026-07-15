@@ -73,67 +73,6 @@ TTS_FALLBACK_TEXT = (
     "We're experiencing a brief technical issue. Please try again in a moment."
 )
 
-# Tokens that end in a period but do NOT end a sentence (so we don't split after them).
-_TTS_ABBREVIATIONS = frozenset({
-    "mr", "mrs", "ms", "dr", "st", "ave", "blvd", "rd", "no", "vs", "jr", "sr",
-    "am", "pm", "a.m", "p.m", "e.g", "i.e", "etc", "approx", "apt",
-})
-
-
-def split_tts_chunks(
-    text: str,
-    *,
-    max_chunks: int = 4,
-    min_chunk_chars: int = 10,
-) -> List[str]:
-    """Split a spoken reply into sentence-ish chunks for progressive <Play> playback.
-
-    Twilio plays consecutive <Play> verbs back-to-back and prefetches the next while the
-    current plays, so emitting one <Play> per sentence lets the caller hear the first
-    (short) sentence after only that sentence is synthesized — instead of waiting for the
-    whole reply. Returns 1+ chunks; a single-sentence reply returns [text] (no change from
-    today). Guards abbreviations ("Mr.", "2 p.m."), initials, and decimals ("$2.50") from
-    being treated as sentence ends, merges tiny fragments into the previous chunk, and caps
-    the total (the remainder collapses into the last chunk) so we don't fan out into many
-    tiny TTS calls.
-    """
-    s = re.sub(r"\s+", " ", (text or "").strip())
-    if not s:
-        return []
-    parts: List[str] = []
-    start = 0
-    for m in re.finditer(r"[.!?](\s+)", s):
-        punct_idx = m.start()
-        prev_word = s[start:punct_idx].rsplit(" ", 1)[-1].lower().strip(".")
-        char_before = s[punct_idx - 1] if punct_idx > 0 else ""
-        # Not a real sentence boundary if it follows an abbreviation, a single-letter
-        # initial, or a digit (decimal like 2.50).
-        if (
-            prev_word in _TTS_ABBREVIATIONS
-            or (len(prev_word) == 1 and prev_word.isalpha())
-            or char_before.isdigit()
-        ):
-            continue
-        parts.append(s[start:punct_idx + 1].strip())
-        start = m.end()
-    if start < len(s):
-        parts.append(s[start:].strip())
-    parts = [p for p in parts if p]
-    if not parts:
-        return [s]
-    # Merge fragments shorter than min_chunk_chars into the previous chunk (keeps a short
-    # opener as its own fast first chunk, but avoids a standalone "Yes." mid-reply).
-    merged: List[str] = []
-    for p in parts:
-        if merged and len(p) < min_chunk_chars:
-            merged[-1] = f"{merged[-1]} {p}"
-        else:
-            merged.append(p)
-    # Cap chunk count so a long reply doesn't fan out into many tiny TTS calls.
-    if len(merged) > max_chunks:
-        merged = merged[: max_chunks - 1] + [" ".join(merged[max_chunks - 1:])]
-    return merged
-
 
 def cleanup_call_runtime_state(call_sid: str) -> None:
     """Clear per-call runtime state deterministically."""
