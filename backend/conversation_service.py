@@ -333,9 +333,21 @@ def _caller_chose_to_leave_message(text: str) -> bool:
 
 
 def _voice_booking_nudge_message(
-    conversation_history: list, info: Optional[dict] = None
+    conversation_history: list,
+    info: Optional[dict] = None,
+    *,
+    appointment_created: bool = False,
 ) -> Optional[str]:
-    """Inject during booking if GPT has not emitted BOOKING: yet."""
+    """Inject during booking if GPT has not emitted BOOKING: yet.
+
+    Never nudges once an appointment exists for this call: the BOOKING: directive is stripped
+    from the spoken reply before it reaches conversation_history, so the nudge can't tell from
+    the transcript alone that a booking already landed. Without this guard a caller who keeps
+    talking after booking ("Okay, thanks!") gets nudged into a SECOND BOOKING: line — creating
+    a duplicate appointment AND a duplicate confirmation SMS.
+    """
+    if appointment_created:
+        return None
     biz = info or config_service.get_business_info()
     if not _conversation_suggests_booking(conversation_history):
         return None
@@ -1466,7 +1478,10 @@ async def generate_response_async(
         # the prompt (and token cost) unbounded turn over turn. The system prompt above
         # carries the durable context (business info, booked slots, caller memory).
         messages.extend(call_data["conversation_history"][-16:])
-        nudge = _voice_booking_nudge_message(call_data["conversation_history"])
+        nudge = _voice_booking_nudge_message(
+            call_data["conversation_history"],
+            appointment_created=bool(call_data.get("appointment_created")),
+        )
         if nudge:
             messages.append({"role": "system", "content": nudge})
             voice_info(
