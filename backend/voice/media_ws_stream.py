@@ -43,7 +43,11 @@ from voice.utterance import apply_caller_utterance
 
 _log = logging.getLogger("nuvatra")
 
-_FRAME_SEC = 0.02  # 20 ms per mulaw frame — paced real-time so barge-in stops within a frame.
+_FRAME_SEC = 0.02  # 20 ms of audio per mulaw frame.
+# Send frames this far AHEAD of their play time so Twilio always has a cushion buffered
+# (prevents underrun/choppiness from send jitter). Barge-in still stops instantly because a
+# `clear` flushes Twilio's buffer regardless of how far ahead we've sent.
+_SEND_LEAD_SEC = 0.6
 _REPLY_WAIT_SEC = 25.0  # max wait for the brain to produce ai_text before giving up the turn.
 _HANDSHAKE_SEC = 25.0
 
@@ -61,6 +65,7 @@ class _BidiSession:
         self.dg_ws: Any = None
         self.speaking = False
         self.interrupt = asyncio.Event()
+        self._reply_mark: Optional[asyncio.Event] = None
         self._barge_cleared = False
         self._closing = False
         self.utterance_q: "asyncio.Queue[tuple[str, float]]" = asyncio.Queue()
@@ -102,6 +107,7 @@ class _BidiSession:
         self.speaking = True
         self.interrupt.clear()
         self._barge_cleared = False
+        self._reply_mark = asyncio.Event()
         loop = asyncio.get_running_loop()
         frame_q: "asyncio.Queue[Optional[bytes]]" = asyncio.Queue()
 
@@ -117,21 +123,46 @@ class _BidiSession:
                 loop.call_soon_threadsafe(frame_q.put_nowait, None)
 
         threading.Thread(target=producer, daemon=True).start()
+        start = loop.time()
         sent = 0
+        interrupted = False
         while True:
             fr = await frame_q.get()
-            if fr is None or self.interrupt.is_set():
+            if fr is None:
+                break
+            if self.interrupt.is_set():
+                interrupted = True
                 break
             await self._send_media(fr)
             sent += 1
-            await asyncio.sleep(_FRAME_SEC)
-        interrupted = self.interrupt.is_set()
-        if interrupted and not self._barge_cleared:
+            # Pace against an absolute clock (not a per-frame sleep, which drifts slow): send
+            # frame `sent` up to _SEND_LEAD_SEC before its play time, so Twilio keeps a cushion
+            # and never underruns. If we've fallen behind (target<=now) we don't sleep — catch up.
+            target = start + sent * _FRAME_SEC - _SEND_LEAD_SEC
+            delay = target - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+        if interrupted:
+            if not self._barge_cleared:
+                await self._send_clear()
+            self.speaking = False
+            voice_info("bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=True)
+            return
+        # All frames sent, but Twilio may still be playing the buffered tail. Mark the end and
+        # keep `speaking` True (so barge-in still fires) until Twilio echoes the mark or the
+        # remaining audio would have finished.
+        await self._send_mark("reply_end")
+        remaining = max(0.0, sent * _FRAME_SEC - (loop.time() - start))
+        try:
+            await asyncio.wait_for(self._reply_mark.wait(), timeout=remaining + 2.0)
+        except asyncio.TimeoutError:
+            pass
+        if self.interrupt.is_set() and not self._barge_cleared:
             await self._send_clear()
-        elif not interrupted:
-            await self._send_mark("reply_end")
         self.speaking = False
-        voice_info("bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=interrupted)
+        voice_info(
+            "bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=self.interrupt.is_set()
+        )
 
     async def _barge_in(self) -> None:
         """Caller spoke while we were talking: flush Twilio's buffer and stop the stream."""
@@ -365,6 +396,10 @@ class _BidiSession:
                         await self.dg_ws.send(payload)
                     except Exception:
                         return
+            elif kind == "mark":
+                name = (ev.get("mark") or {}).get("name")
+                if name == "reply_end" and self._reply_mark is not None:
+                    self._reply_mark.set()
             elif kind == "stop":
                 voice_info("bidi_ws_close", reason="twilio_stop", call_sid=self.call_sid)
                 return
