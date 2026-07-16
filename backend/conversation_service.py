@@ -1173,9 +1173,20 @@ def reconcile_booking_at_call_end(
     backstop rejects it (e.g. a stylist on a day they don't work) — in which case the call
     correctly falls through to lead capture. Never books past the stylist/shop schedule."""
     history = call_data.get("conversation_history")
+    # DIAGNOSTIC: this backstop used to return False silently at every gate, so a call that
+    # ended with the AI verbally confirming ("I've got you down…") but no appointment gave no
+    # clue why the rescue declined. Log the reason at each exit.
+    _sid = call_sid or call_data.get("call_sid") or ""
     if not _conversation_suggests_booking(history):
+        system_info(
+            "reconcile_booking_skipped",
+            reason="no_booking_intent",
+            call_sid=_sid,
+            history_len=len(history or []),
+        )
         return False
     if not config_service.staff_roster_ready_for_booking(config_service.get_business_info()):
+        system_info("reconcile_booking_skipped", reason="roster_not_ready", call_sid=_sid)
         return False
     cid = (call_data.get("client_id") or "").strip() or None
     call_sid = call_sid or call_data.get("call_sid")
@@ -1186,6 +1197,7 @@ def reconcile_booking_at_call_end(
     # confirms it live (real-time handler: spoken + texted + dashboard together). If they hung up
     # before that, the original booking stands untouched.
     if call_data.get("appointment_created"):
+        system_info("reconcile_booking_skipped", reason="already_created", call_sid=_sid)
         return False
     try:
         booking = _extract_booking_line_from_conversation(
@@ -1193,8 +1205,23 @@ def reconcile_booking_at_call_end(
         )
     except Exception as e:
         logger.warning("reconcile_extract_failed: %s", e, exc_info=True)
+        system_info(
+            "reconcile_booking_skipped",
+            reason="extract_raised",
+            call_sid=_sid,
+            error_type=type(e).__name__,
+        )
         return False
     if not booking:
+        # The end-of-call extractor found no complete booking in the transcript. This is the
+        # gate that silently swallowed a call where the AI had verbally confirmed the booking.
+        system_info(
+            "reconcile_booking_skipped",
+            reason="extract_returned_nothing",
+            call_sid=_sid,
+            client_id=cid or "",
+            history_len=len(history or []),
+        )
         return False
     from_num = (call_data.get("from_number") or "").strip()
     if from_num:
