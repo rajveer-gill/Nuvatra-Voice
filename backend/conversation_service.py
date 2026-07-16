@@ -389,6 +389,22 @@ def _voice_booking_nudge_message(
     # Service chosen (or no menu) → now resolve the stylist if required.
     if _staff_choice_required(biz) and not _caller_indicated_stylist_choice(user_text, biz):
         if turns >= 2:
+            # Inject the EXACT eligible stylists for the chosen service (computed
+            # deterministically) so the model reads the list instead of reasoning about who
+            # qualifies — gpt-4o/Haiku both over-listed stylists (e.g. offering a stylist who
+            # doesn't do the service) when left to infer it.
+            chosen_service, _svc_req = booking_service._normalize_service_choice_for_booking(
+                user_text, biz
+            )
+            eligible = _stylists_offering_service(biz, chosen_service) if chosen_service else []
+            if chosen_service and eligible:
+                who = ", ".join(eligible[:6])
+                return (
+                    f"BOOKING REMINDER: Caller picked {chosen_service} ({turns} turns) but no "
+                    "stylist yet. Ask ONE short question: which stylist they'd prefer, or if anyone "
+                    f"is fine. ONLY these stylists provide {chosen_service}: {who}. Name ONLY these "
+                    "stylists — never mention any other stylist for this service."
+                )
             return (
                 f"BOOKING REMINDER: Caller picked a service ({turns} turns) but no stylist yet. "
                 "Ask ONE short question: which stylist they prefer (or anyone is fine), suggesting "
