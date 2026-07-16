@@ -309,6 +309,39 @@ def build_system_prompt(
                     "\n- Staff and which services they provide (only suggest these pairings when booking):\n"
                     + "\n".join(roster_lines)
                 )
+                # The same facts, pre-inverted. Callers ask "who can do a long cut?", which forces
+                # the model to invert the per-stylist list above and filter it — and it reliably
+                # over-lists when it does (naming a stylist who doesn't provide the service, then
+                # defending it when challenged). The booking nudge fixes this by handing over the
+                # computed list, but it only injects on a narrow trigger; this block states it
+                # unconditionally. Eligibility rule matches conversation_service.
+                # _stylists_offering_service: empty service_ids means the stylist does everything.
+                by_service: List[str] = []
+                for entry in service_catalog:
+                    svc_name = (entry.get("name") or "").strip()
+                    svc_id = (entry.get("id") or "").strip()
+                    if not svc_name:
+                        continue
+                    providers = [
+                        (s.get("name") or "").strip()
+                        for s in staff
+                        if (s.get("name") or "").strip()
+                        and (
+                            not (s.get("service_ids") or [])
+                            or (svc_id and svc_id in (s.get("service_ids") or []))
+                        )
+                    ]
+                    if providers:
+                        by_service.append(f"  • {svc_name}: {', '.join(providers)}")
+                if by_service:
+                    staff_block += (
+                        "\n- Which stylists provide each service. When a caller asks who can do a "
+                        "service, or you suggest stylists for one, name ONLY the stylists on that "
+                        "service's line—never another stylist, even one named elsewhere in this "
+                        "prompt. If the caller questions your list, re-read this block rather than "
+                        "agreeing:\n"
+                        + "\n".join(by_service)
+                    )
 
         # Per-stylist working days/hours + specific time off: if a caller asks for a
         # stylist on a day/time they don't work or are off, the AI must NOT book them then.
