@@ -50,6 +50,11 @@ _FRAME_SEC = 0.02  # 20 ms of audio per mulaw frame.
 _SEND_LEAD_SEC = 0.6
 _REPLY_WAIT_SEC = 25.0  # max wait for the brain to produce ai_text before giving up the turn.
 _HANDSHAKE_SEC = 25.0
+# Half-duplex: stop feeding caller audio to STT while the AI is speaking (+ this guard after
+# playback ends) so the AI's own voice — echoed back on speakerphone / the inbound track —
+# isn't transcribed as caller speech (which caused false "barge-in" self-interruptions).
+# True barge-in while speaking needs acoustic echo cancellation (future work).
+_LISTEN_GUARD_SEC = 0.5
 
 
 class _BidiSession:
@@ -67,6 +72,7 @@ class _BidiSession:
         self.interrupt = asyncio.Event()
         self._reply_mark: Optional[asyncio.Event] = None
         self._barge_cleared = False
+        self._resume_listen_at = 0.0  # monotonic time when STT may resume after speaking
         self._closing = False
         self.utterance_q: "asyncio.Queue[tuple[str, float]]" = asyncio.Queue()
         self.debounce_sec = utterance_finalize_debounce_ms() / 1000.0
@@ -108,6 +114,11 @@ class _BidiSession:
         self.interrupt.clear()
         self._barge_cleared = False
         self._reply_mark = asyncio.Event()
+        # Drop any half-accumulated transcript so echo captured at the edge of the last turn
+        # can't commit as a phantom utterance.
+        self._finals, self._interim, self._conf = [], "", 0.0
+        if self._commit_task and not self._commit_task.done():
+            self._commit_task.cancel()
         loop = asyncio.get_running_loop()
         frame_q: "asyncio.Queue[Optional[bytes]]" = asyncio.Queue()
 
@@ -146,23 +157,21 @@ class _BidiSession:
             if not self._barge_cleared:
                 await self._send_clear()
             self.speaking = False
+            self._resume_listen_at = loop.time() + _LISTEN_GUARD_SEC
             voice_info("bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=True)
             return
         # All frames sent, but Twilio may still be playing the buffered tail. Mark the end and
-        # keep `speaking` True (so barge-in still fires) until Twilio echoes the mark or the
-        # remaining audio would have finished.
+        # keep `speaking` True (STT stays gated) until Twilio echoes the mark or the remaining
+        # audio would have finished — so we don't transcribe the tail as caller speech.
         await self._send_mark("reply_end")
         remaining = max(0.0, sent * _FRAME_SEC - (loop.time() - start))
         try:
             await asyncio.wait_for(self._reply_mark.wait(), timeout=remaining + 2.0)
         except asyncio.TimeoutError:
             pass
-        if self.interrupt.is_set() and not self._barge_cleared:
-            await self._send_clear()
         self.speaking = False
-        voice_info(
-            "bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=self.interrupt.is_set()
-        )
+        self._resume_listen_at = loop.time() + _LISTEN_GUARD_SEC
+        voice_info("bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=False)
 
     async def _barge_in(self) -> None:
         """Caller spoke while we were talking: flush Twilio's buffer and stop the stream."""
@@ -174,14 +183,13 @@ class _BidiSession:
 
     # ---- utterance accumulation + debounced commit ----
     def _on_transcript(self, text: str, is_final: bool, conf: float) -> None:
+        # STT is gated while speaking (half-duplex), so transcripts here are caller speech,
+        # not the AI's own echo.
         t = (text or "").strip()
         if not t:
             if is_final and (self._finals or self._interim):
                 self._schedule_commit()
             return
-        # Any speech while we're talking is a barge-in.
-        if self.speaking:
-            asyncio.create_task(self._barge_in())
         if is_final:
             self._finals.append(t)
             self._conf = max(self._conf, conf)
@@ -390,6 +398,10 @@ class _BidiSession:
                 continue
             kind = ev.get("event")
             if kind == "media":
+                # Half-duplex gate: don't feed caller audio to STT while the AI is speaking
+                # (or during the brief guard after), so the AI's echoed voice isn't transcribed.
+                if self.speaking or asyncio.get_running_loop().time() < self._resume_listen_at:
+                    continue
                 payload = twilio_media_payload_bytes(ev)
                 if payload and self.dg_ws:
                     try:
