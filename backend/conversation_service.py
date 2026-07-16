@@ -458,6 +458,24 @@ def _ai_implies_committed_booking(ai_text: str) -> bool:
             "you're confirmed",
             "you are confirmed",
             "booking is confirmed",
+            # Claims of completeness / a confirmation text on the way. This check only runs when
+            # NO BOOKING: line was emitted, so any of these is a false promise by definition —
+            # the caller hangs up believing they're booked and nothing exists. These exact
+            # phrasings burned a live demo: "Perfect, I've got everything I need. We'll send a
+            # text to confirm your appointment for a long cut with Andrew on Tuesday..."
+            "i've got everything i need",
+            "i have everything i need",
+            "got everything i need",
+            "confirm your appointment for",
+            "confirm your appointment with",
+            "consider it booked",
+            "i've put you down",
+            "i have put you down",
+            "put you down for",
+            "you're set for",
+            "you are set for",
+            "i've got you in",
+            "i have got you in",
             "see you then",
             "see you tomorrow",
             "see you at",
