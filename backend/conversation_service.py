@@ -433,10 +433,44 @@ def _voice_booking_nudge_message(
     )
 
 
+# Structural patterns for "the model is claiming a booking exists". Regex (not literal
+# substrings) so paraphrases and tense changes can't slip through — a literal blocklist is
+# exactly how "Perfect, I've got everything I need." reached a live customer demo while
+# "you're all set" was caught. These only ever run when NO BOOKING: line was emitted, so any
+# match is a false promise by definition; the literal list below is kept as belt-and-braces.
+#
+# Deliberately NOT matched: "…will text you to confirm" on its own. The prompt explicitly
+# tells the model to say that WHILE still gathering details, so blocking it would break the
+# normal flow. Only a claim that the appointment itself exists/is complete counts.
+_COMMITTED_BOOKING_RE = re.compile(
+    "|".join(
+        (
+            # Completeness claims: "I've got everything I need", "that's all we need".
+            r"\b(?:everything|all)\s+(?:i|we)\s+need\b",
+            # Asserting the appointment exists as a thing to confirm//that is set.
+            r"\bconfirm\s+your\s+(?:appointment|booking|visit|spot)\b",
+            r"\byour\s+(?:appointment|booking)\s+(?:is|has\s+been)\s+(?:set|booked|scheduled|confirmed)\b",
+            # Completion: you're booked/scheduled/set/confirmed/all set.
+            r"\b(?:you'?re|you\s+are|your\s+all)\s+(?:all\s+set|booked|scheduled|confirmed)\b",
+            r"\b(?:you'?re|you\s+are)\s+set\s+for\b",
+            r"\ball\s+set\s+for\b",
+            # I/we booked|scheduled|got|put you ...
+            r"\b(?:i|we)\s*(?:'ve|'ll|\s+have|\s+will)?\s*(?:booked|scheduled)\s+you\b",
+            r"\b(?:i|we)\s*(?:'ve|\s+have)?\s*got\s+you\s+(?:down|in|scheduled|booked)\b",
+            r"\b(?:i|we)\s*(?:'ve|'ll|\s+have|\s+will)?\s*put\s+you\s+(?:down|in)\b",
+            r"\bconsider\s+it\s+(?:booked|scheduled|done)\b",
+        )
+    ),
+    re.IGNORECASE,
+)
+
+
 def _ai_implies_committed_booking(ai_text: str) -> bool:
     t = (ai_text or "").lower()
     if not t:
         return False
+    if _COMMITTED_BOOKING_RE.search(t):
+        return True
     return any(
         p in t
         for p in (

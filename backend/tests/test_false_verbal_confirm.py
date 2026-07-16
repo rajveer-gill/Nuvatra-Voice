@@ -43,6 +43,28 @@ def test_catches_claimed_bookings(reply):
 @pytest.mark.parametrize(
     "reply",
     [
+        # PARAPHRASES the model has never actually said — the guard must generalize, not
+        # memorize. A literal blocklist is what let the demo failure through.
+        "Awesome, we have everything we need — talk soon!",
+        "That's all I need, thanks!",
+        "I have scheduled you for Tuesday at 2 PM.",
+        "We've booked you in with Andrew.",
+        "I have got you down for a long cut.",
+        "We'll put you in for Friday.",
+        "Your appointment is set for Tuesday.",
+        "Your booking has been confirmed.",
+        "Let me confirm your appointment for Tuesday at 2.",
+        "You are booked with Jake.",
+        "Consider it scheduled!",
+    ],
+)
+def test_generalizes_to_unseen_paraphrases(reply):
+    assert _ai_implies_committed_booking(reply) is True
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
         # Legitimate mid-booking replies: gathering details, promising nothing yet. The prompt
         # explicitly tells the model to say it will text to confirm WHILE still collecting, so
         # these must NOT be rewritten or the normal flow breaks.
