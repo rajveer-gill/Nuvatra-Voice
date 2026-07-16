@@ -57,6 +57,14 @@ import { parseHoursToWeekly, summarizeSchedule } from '@/lib/businessHours'
 /** Set NEXT_PUBLIC_DEBUG_SETTINGS=1 in .env.local (or Vercel) to log per-endpoint load outcomes — no tokens. */
 const DEBUG_SETTINGS = process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1'
 
+/**
+ * SMS Automations is built (component + /api/sms-automations backend) but has NOT been tested
+ * end-to-end, so it's hidden from Settings — we don't want to show or sell a feature we can't
+ * stand behind yet. Hides both the live section and the locked upsell. Flip to true to restore;
+ * nothing else was removed.
+ */
+const SHOW_SMS_AUTOMATIONS = false
+
 function SettingsSection({
   children,
   className = '',
@@ -861,8 +869,9 @@ export default function Settings() {
         )}
       </SettingsSection>
 
-      {/* SMS Automations (Growth/Pro) — locked upsell on plans without it (e.g. Starter). */}
-      {smsAutomationsMax != null && smsAutomationsMax > 0 ? (
+      {/* SMS Automations (Growth/Pro) — locked upsell on plans without it (e.g. Starter).
+          Gated off entirely by SHOW_SMS_AUTOMATIONS until the feature is tested end-to-end. */}
+      {!SHOW_SMS_AUTOMATIONS ? null : smsAutomationsMax != null && smsAutomationsMax > 0 ? (
         <SmsAutomationsSection
           automations={automations}
           smsAutomationsMax={smsAutomationsMax}
