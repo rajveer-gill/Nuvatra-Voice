@@ -55,6 +55,11 @@ _HANDSHAKE_SEC = 25.0
 # isn't transcribed as caller speech (which caused false "barge-in" self-interruptions).
 # True barge-in while speaking needs acoustic echo cancellation (future work).
 _LISTEN_GUARD_SEC = 0.5
+# Deepgram closes a listen stream after ~10s with no audio. While the AI is speaking we gate
+# caller audio (half-duplex), so a reply longer than that window would let Deepgram idle out —
+# and the next caller frame would hit a dead socket. Send a KeepAlive on this cadence during
+# the gap so the stream stays open through long replies. See bidi_deepgram_keepalive.
+_DG_KEEPALIVE_SEC = 5.0
 
 
 class _BidiSession:
@@ -68,6 +73,8 @@ class _BidiSession:
         self.speed = 1.0
         self._call_data: dict = {}
         self.dg_ws: Any = None
+        self._dg_task: "Optional[asyncio.Task[None]]" = None
+        self._last_dg_activity = 0.0  # monotonic time of last send to Deepgram (audio or KeepAlive)
         self.speaking = False
         self.interrupt = asyncio.Event()
         self._reply_mark: Optional[asyncio.Event] = None
@@ -280,6 +287,39 @@ class _BidiSession:
         except Exception:
             _log.exception("bidi_pump_deepgram_failed call_sid=%s", self.call_sid)
 
+    async def _keepalive_deepgram(self) -> None:
+        """Keep the Deepgram stream alive while we're not sending caller audio (e.g. during a
+        long AI reply under the half-duplex gate), so it doesn't idle-close mid-call."""
+        loop = asyncio.get_running_loop()
+        if not self.dg_ws or loop.time() - self._last_dg_activity < _DG_KEEPALIVE_SEC:
+            return
+        self._last_dg_activity = loop.time()
+        try:
+            await self.dg_ws.send(json.dumps({"type": "KeepAlive"}))
+        except Exception:
+            # A failed KeepAlive means the socket is already gone; the audio-send path will
+            # log it and reconnect on the next caller frame.
+            pass
+
+    async def _reconnect_deepgram(self) -> bool:
+        """Deepgram send failed (usually an idle-closed socket). Reconnect and restart the pump
+        instead of silently dropping the call. Returns True if the stream is usable again."""
+        try:
+            await self.dg_ws.close()
+        except Exception:
+            pass
+        try:
+            self.dg_ws = await connect_deepgram_listen()
+        except Exception as e:
+            voice_warning("bidi_deepgram_reconnect_failed", call_sid=self.call_sid, detail=str(e)[:200])
+            return False
+        if self._dg_task is not None:
+            self._dg_task.cancel()
+        self._dg_task = asyncio.create_task(self._pump_deepgram())
+        self._last_dg_activity = asyncio.get_running_loop().time()
+        voice_info("bidi_deepgram_reconnected", call_sid=self.call_sid)
+        return True
+
     # ---- handshake, greeting, main loop ----
     async def run(self) -> None:
         await self.ws.accept()
@@ -300,7 +340,7 @@ class _BidiSession:
             await self._close()
             return
 
-        dg_task = asyncio.create_task(self._pump_deepgram())
+        self._dg_task = asyncio.create_task(self._pump_deepgram())
         turn_task = asyncio.create_task(self._drive_turns())
         # Greeting first (interruptible like any reply).
         try:
@@ -315,8 +355,9 @@ class _BidiSession:
             await self._inbound_loop()
         finally:
             self._closing = True
-            for tk in (dg_task, turn_task):
-                tk.cancel()
+            for tk in (self._dg_task, turn_task):
+                if tk is not None:
+                    tk.cancel()
             try:
                 await self.dg_ws.close()
             except Exception:
@@ -400,14 +441,21 @@ class _BidiSession:
             if kind == "media":
                 # Half-duplex gate: don't feed caller audio to STT while the AI is speaking
                 # (or during the brief guard after), so the AI's echoed voice isn't transcribed.
+                # While gated we send Deepgram a KeepAlive so a long reply can't idle-close it.
                 if self.speaking or asyncio.get_running_loop().time() < self._resume_listen_at:
+                    await self._keepalive_deepgram()
                     continue
                 payload = twilio_media_payload_bytes(ev)
                 if payload and self.dg_ws:
                     try:
                         await self.dg_ws.send(payload)
+                        self._last_dg_activity = asyncio.get_running_loop().time()
                     except Exception:
-                        return
+                        # Don't silently drop the call: log and try to reconnect Deepgram once.
+                        voice_warning("bidi_deepgram_send_failed", call_sid=self.call_sid)
+                        if not await self._reconnect_deepgram():
+                            voice_info("bidi_ws_close", reason="deepgram_lost", call_sid=self.call_sid)
+                            return
             elif kind == "mark":
                 name = (ev.get("mark") or {}).get("name")
                 if name == "reply_end" and self._reply_mark is not None:
