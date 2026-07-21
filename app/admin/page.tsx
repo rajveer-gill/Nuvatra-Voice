@@ -8,6 +8,7 @@ import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
+import { OrgsPanel } from '@/components/admin/OrgsPanel'
 import { ReferralsPanel } from '@/components/admin/ReferralsPanel'
 import { SystemHealthPanel } from '@/components/admin/SystemHealthPanel'
 import { AuditLog } from '@/components/admin/AuditLog'
@@ -768,6 +769,8 @@ export default function AdminPage() {
           <SystemHealthPanel />
 
           <ProvisioningPanel />
+
+          <OrgsPanel />
 
           <ReferralsPanel />
 

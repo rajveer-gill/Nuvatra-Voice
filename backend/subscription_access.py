@@ -21,6 +21,68 @@ def _use_database() -> bool:
         return False
 
 
+def _parse_dt(value: Any) -> Optional[datetime]:
+    """Parse a billing timestamp that may arrive as an ISO string or a datetime."""
+    if not value:
+        return None
+    try:
+        dt = (
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if isinstance(value, str)
+            else value
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def evaluate_billing(row: dict) -> dict[str, bool]:
+    """Is this billing row currently paying for service?
+
+    Works on a tenant or an org — both carry the same billing columns, and a franchise
+    org must be judged by exactly the rules a single store is, or the two drift.
+
+    Returns the three independent grounds for access plus their union as "active".
+    """
+    now = datetime.now(timezone.utc)
+    status = row.get("subscription_status") or "trialing"
+    exempt_dt = _parse_dt(row.get("billing_exempt_until"))
+    exempt_active = bool(exempt_dt and now < exempt_dt)
+    trial_active = False
+    if status == "trialing":
+        trial_ends_at = row.get("trial_ends_at")
+        if not trial_ends_at:
+            trial_active = True  # trialing with no end date = open-ended trial
+        else:
+            trial_dt = _parse_dt(trial_ends_at)
+            # Unparseable end date: fail OPEN, matching the long-standing behaviour
+            # here — never lock a trialing customer out over a bad timestamp.
+            trial_active = now < trial_dt if trial_dt else True
+    paid_active = status == "active"
+    return {
+        "exempt_active": exempt_active,
+        "trial_active": trial_active,
+        "paid_active": paid_active,
+        "active": exempt_active or trial_active or paid_active,
+    }
+
+
+def _load_org_billing(org_id: Optional[str]) -> Optional[dict]:
+    """Fetch an org's billing row. Imported lazily to keep this module importable
+    without the DB (unit tests construct tenant dicts directly)."""
+    if not org_id or not _use_database():
+        return None
+    try:
+        import database
+
+        return database.db_org_get_by_id(str(org_id))
+    except Exception as e:
+        _log.warning("org_billing_load_failed org_id=%s err=%s", org_id, type(e).__name__)
+        return None
+
+
 def get_tenant_subscription_state(tenant: Optional[dict]) -> dict[str, Any]:
     """
     Return subscription state for the tenant.
@@ -37,6 +99,7 @@ def get_tenant_subscription_state(tenant: Optional[dict]) -> dict[str, Any]:
                 "subscription_status": None,
                 "plan": "starter",
                 "billing_exempt_until": None,
+                "demo_mode": False,
             }
         return {
             "can_use_app": True,
@@ -44,46 +107,35 @@ def get_tenant_subscription_state(tenant: Optional[dict]) -> dict[str, Any]:
             "subscription_status": None,
             "plan": "starter",
             "billing_exempt_until": None,
+            "demo_mode": False,
         }
 
-    now = datetime.now(timezone.utc)
+    own = evaluate_billing(tenant)
     trial_ends_at = tenant.get("trial_ends_at")
     subscription_status = tenant.get("subscription_status") or "trialing"
     billing_exempt_until = tenant.get("billing_exempt_until")
     plan = tenant.get("plan") or "free"
-    exempt_active = False
-    if billing_exempt_until:
-        try:
-            exempt_dt = (
-                datetime.fromisoformat(billing_exempt_until.replace("Z", "+00:00"))
-                if isinstance(billing_exempt_until, str)
-                else billing_exempt_until
-            )
-            if exempt_dt.tzinfo is None:
-                exempt_dt = exempt_dt.replace(tzinfo=timezone.utc)
-            exempt_active = now < exempt_dt
-        except Exception:
-            pass
-    trial_active = False
-    if subscription_status == "trialing":
-        if not trial_ends_at:
-            trial_active = True
-        else:
-            try:
-                trial_dt = (
-                    datetime.fromisoformat(trial_ends_at.replace("Z", "+00:00"))
-                    if isinstance(trial_ends_at, str)
-                    else trial_ends_at
-                )
-                if trial_dt.tzinfo is None:
-                    trial_dt = trial_dt.replace(tzinfo=timezone.utc)
-                trial_active = now < trial_dt
-            except Exception:
-                trial_active = True
-    paid_active = subscription_status == "active"
     # Admin manual kill-switch overrides everything (even an active trial/subscription).
     paused = bool(tenant.get("account_paused"))
-    can_use_app = (exempt_active or trial_active or paid_active) and not paused
+    can_use_app = own["active"] and not paused
+    # Where the access came from — "org" means the group is paying for this store.
+    billing_source = "own" if can_use_app else None
+
+    # A store in an org is paid for by the org's single subscription, so it is live
+    # even though it never saw a card of its own (its own subscription_status stays
+    # 'incomplete' forever). Checked only when the store can't stand on its own, so a
+    # store that pays for itself costs no extra query — and never when paused, because
+    # the kill-switch must not be escapable by joining a group.
+    org_billing = None
+    if not can_use_app and not paused and tenant.get("org_id"):
+        org_billing = _load_org_billing(tenant.get("org_id"))
+        if org_billing and evaluate_billing(org_billing)["active"]:
+            can_use_app = True
+            billing_source = "org"
+            plan = org_billing.get("plan") or plan
+            trial_ends_at = org_billing.get("trial_ends_at")
+            subscription_status = org_billing.get("subscription_status") or subscription_status
+
     return {
         "can_use_app": can_use_app,
         "trial_ends_at": trial_ends_at,
@@ -91,6 +143,12 @@ def get_tenant_subscription_state(tenant: Optional[dict]) -> dict[str, Any]:
         "plan": plan,
         "billing_exempt_until": billing_exempt_until,
         "account_paused": paused,
+        # A card-free demo account exploring seeded sample data. Access here comes from
+        # the exemption above; this flag only tells the UI to say so (and to let the
+        # signup form through instead of bouncing it to the dashboard).
+        "demo_mode": bool(tenant.get("demo_mode")),
+        "org_id": tenant.get("org_id"),
+        "billing_source": billing_source,
     }
 
 
@@ -110,6 +168,13 @@ def webhook_access_denial_reason(tenant: Optional[dict]) -> Optional[str]:
     if tenant is None:
         return None
     state = get_tenant_subscription_state(tenant)
+    # A demo account must never serve a live call, even though its exemption makes
+    # can_use_app true. In practice a demo tenant has no number so no webhook can
+    # reach it — this is the backstop for the one path that could break that
+    # assumption (a number attached by hand from the admin console before the
+    # sample services have been cleared out).
+    if state.get("demo_mode"):
+        return "demo_account"
     if state.get("can_use_app"):
         return None
     if state.get("account_paused"):

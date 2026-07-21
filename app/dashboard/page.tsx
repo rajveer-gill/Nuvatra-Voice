@@ -6,11 +6,11 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
-import { useApiClient, sameOriginApiConfig } from '@/lib/api'
+import { useApiClient, sameOriginApiConfig, getSelectedStoreId, setSelectedStoreId } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { PlanPicker } from '@/components/PlanPicker'
 import { AppChrome } from '@/components/layout/AppChrome'
-import { AlertTriangle, Users } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, Eye, Users } from 'lucide-react'
 
 export const TEAM_ROSTER_SECTION_ID = 'team-roster-settings'
 export const STORE_PHONE_SECTION_ID = 'store-phone-settings'
@@ -49,6 +49,9 @@ export type SubscriptionState = {
   subscription_status: string | null
   plan: string
   billing_exempt_until: string | null
+  // Card-free demo account: everything on screen is sample data, and the account
+  // has no phone line yet. Cleared when they activate.
+  demo_mode?: boolean
   limits?: { has_lead_capture?: boolean; staff_max?: number; transfer_max?: number; minutes_cap?: number; sms_automations_max?: number; has_export?: boolean }
 }
 
@@ -76,6 +79,10 @@ export default function DashboardPage() {
   } | null>(null)
   const [subscription, setSubscription] = useState<SubscriptionState | null>(null)
   const [setupStatus, setSetupStatus] = useState<SetupStatusSnapshot | null>(null)
+  // Multi-store oversight: set only for a franchise/regional account. A normal store
+  // owner gets is_org_member=false and sees none of this.
+  const [org, setOrg] = useState<{ is_org_member: boolean; can_edit_any?: boolean } | null>(null)
+  const [viewingStore, setViewingStore] = useState<string | null>(null)
 
   const tabs = useMemo(() => {
     // Leads is always shown; when the plan doesn't include it (e.g. Starter after the
@@ -121,6 +128,31 @@ export default function DashboardPage() {
       .then((res) => setSetupStatus(res.data))
       .catch(() => setSetupStatus(null))
   }, [api])
+
+  // Is this an overseer, and which store are they looking at? Cheap and independent
+  // of the access gate, so it can run alongside the subscription check.
+  useEffect(() => {
+    setViewingStore(getSelectedStoreId())
+    api
+      .get<{ is_org_member: boolean; can_edit_any?: boolean }>('/api/org/me')
+      .then((r) => setOrg(r.data))
+      .catch(() => setOrg(null))
+  }, [api])
+
+  const backToAllStores = useCallback(() => {
+    setSelectedStoreId(null)
+    setViewingStore(null)
+    router.push('/dashboard/stores')
+  }, [router])
+
+  // An overseer owns no store of their own, so with no store picked require_tenant
+  // has nothing to resolve and denies them. That's correct but useless as a landing
+  // page — send them to the store list instead of a "no tenant" dead end.
+  useEffect(() => {
+    if (access === 'denied' && deniedKind === 'no_membership' && org?.is_org_member && !viewingStore) {
+      router.replace('/dashboard/stores')
+    }
+  }, [access, deniedKind, org, viewingStore, router])
 
   const goToTeamRoster = useCallback(() => {
     setActiveTab('settings')
@@ -403,6 +435,53 @@ export default function DashboardPage() {
             </div>
             <UserButton afterSignOutUrl="/" />
           </header>
+
+          {org?.is_org_member && viewingStore && (
+            <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-zinc-900/60 px-4 py-3">
+              <div className="flex items-center gap-2 text-sm text-zinc-300">
+                <Eye className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
+                <span>
+                  Viewing <span className="font-semibold text-white">{viewingStore}</span>
+                  {!org.can_edit_any && (
+                    <span className="text-zinc-500"> · view only</span>
+                  )}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={backToAllStores}
+                className="inline-flex items-center gap-1 rounded-full border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 motion-safe-transition hover:border-white/30 hover:text-white"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+                All stores
+              </button>
+            </div>
+          )}
+
+          {subscription?.demo_mode && (
+            <div className="mb-6 rounded-2xl border border-cyan-400/40 bg-gradient-to-br from-cyan-500/15 to-indigo-600/10 p-5">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h2 className="font-display text-lg font-semibold text-cyan-50">
+                    You&rsquo;re exploring a demo
+                  </h2>
+                  <p className="mt-1 max-w-2xl text-sm text-cyan-100/80">
+                    Every call, appointment and message below is sample data for a made-up
+                    shop, so you can click around freely — nothing here is real and no
+                    phone line is connected yet. Activate to get your number and start
+                    taking real calls; the sample data is cleared and you&rsquo;ll set up
+                    your own services and team.
+                  </p>
+                </div>
+                <Link
+                  href="/dashboard/create-business"
+                  className="shrink-0 rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-5 py-2.5 text-center text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 motion-safe-transition hover:brightness-110"
+                >
+                  Activate my line
+                </Link>
+              </div>
+            </div>
+          )}
 
           {subscription?.subscription_status === 'trialing' && subscription?.trial_ends_at && (
             <div className="mb-6 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-center text-sm text-amber-100">

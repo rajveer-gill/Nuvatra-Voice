@@ -278,6 +278,298 @@ def create_portal_session(tenant: Optional[dict] = Depends(deps.require_tenant))
         raise deps._server_error("Stripe portal session failed", e)
 
 
+# ---------- Org billing: one subscription, quantity = number of stores ----------
+
+
+def _org_subscription_item(sub_id: str):
+    """The subscription's first line item — the thing whose quantity is the store
+    count. Returns (item_id, quantity) or (None, None)."""
+    try:
+        sub = stripe.Subscription.retrieve(sub_id)
+        items = (getattr(sub, "items", None) or {}).get("data") or []
+        if items:
+            return items[0].get("id"), items[0].get("quantity")
+    except Exception as e:
+        logger.warning("org_sub_item_lookup_failed sub=%s err=%s", sub_id, type(e).__name__)
+    return None, None
+
+
+def sync_org_subscription_quantity(org_id: str) -> dict:
+    """Point the org's subscription quantity at its real store count.
+
+    Called whenever stores are added or removed. Best-effort: a failure here means
+    they're billed for the wrong number of stores, which is a money bug, so it's
+    logged and alerted rather than swallowed — but it never breaks the caller, since
+    refusing to create a store because Stripe hiccuped would be worse.
+    """
+    out = {"synced": False, "quantity": None}
+    if not (STRIPE_AVAILABLE and stripe) or not runtime.USE_DB:
+        return out
+    org = database.db_org_get_by_id(org_id)
+    if not org:
+        return out
+    sub_id = (org.get("stripe_subscription_id") or "").strip()
+    if not sub_id:
+        return out  # not paying yet — quantity is set at checkout
+    count = max(1, database.db_org_store_count(org_id))
+    try:
+        stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        item_id, current = _org_subscription_item(sub_id)
+        if not item_id:
+            return out
+        if current == count:
+            return {"synced": True, "quantity": count}
+        stripe.Subscription.modify(
+            sub_id,
+            items=[{"id": item_id, "quantity": count}],
+            # They pay the difference for the rest of the period rather than a full
+            # month for a store added on the 28th.
+            proration_behavior="create_prorations",
+        )
+        logger.info("org_quantity_synced org=%s from=%s to=%s", org_id, current, count)
+        return {"synced": True, "quantity": count}
+    except Exception as e:
+        logger.error("org_quantity_sync_failed org=%s err=%s", org_id, e)
+        try:
+            import alerts
+
+            alerts.notify_failure(
+                "billing", "org_quantity_sync_failed", org_id,
+                f"Org {org_id} is billed for the wrong number of stores (should be {count})",
+                payload={"error": str(e)},
+            )
+        except Exception:
+            pass
+        return out
+
+
+class CreateOrgCheckoutRequest(BaseModel):
+    plan: Literal["starter", "growth", "pro"] = "pro"
+    org_id: Optional[str] = None
+
+
+def _resolve_managed_org(user_id: str, org_id: Optional[str]) -> dict:
+    """The caller must manage the org they're trying to pay for."""
+    managed = [m for m in database.db_org_memberships(user_id) if m.get("role") == "manager"]
+    if not managed:
+        raise HTTPException(status_code=403, detail="Your account cannot manage billing.")
+    if org_id:
+        if not any(m["org_id"] == str(org_id) for m in managed):
+            raise HTTPException(status_code=403, detail="You do not manage that group.")
+        target = str(org_id)
+    elif len(managed) > 1:
+        raise HTTPException(status_code=400, detail="You manage several groups — specify which one.")
+    else:
+        target = managed[0]["org_id"]
+    org = database.db_org_get_by_id(target)
+    if not org:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return org
+
+
+@router.post("/api/org/create-checkout-session")
+def create_org_checkout_session(
+    req: CreateOrgCheckoutRequest, user_id: str = Depends(deps.require_user)
+):
+    """One subscription for the whole group, billed per store.
+
+    Quantity is the store count at checkout and is kept in step afterwards by
+    sync_org_subscription_quantity. Every store in the group inherits access from
+    this one subscription, so no store ever enters a card.
+    """
+    if not STRIPE_AVAILABLE or not stripe:
+        raise HTTPException(status_code=503, detail="Billing not configured")
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    stripe.api_key = secret
+    org = _resolve_managed_org(user_id, req.org_id)
+    price_id = _stripe_price_id(req.plan)
+    if not price_id:
+        raise HTTPException(status_code=503, detail=f"Price not configured for plan: {req.plan}")
+    customer_id = (org.get("stripe_customer_id") or "").strip()
+    if not customer_id:
+        try:
+            cust = stripe.Customer.create(
+                metadata={"org_id": org["id"], "org_name": org.get("name") or ""}, email=None
+            )
+            customer_id = cust.id
+            database.db_org_update_subscription(org["id"], stripe_customer_id=customer_id)
+        except Exception as e:
+            logger.error("Stripe customer create failed for org %s: %s", org["id"], e)
+            raise HTTPException(status_code=500, detail="Could not create billing customer")
+    quantity = max(1, database.db_org_store_count(org["id"]))
+    frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+    subscription_data: dict = {"metadata": {"org_id": org["id"], "plan": req.plan}}
+    # First subscription for the group gets the same 7-day trial a single store does.
+    if not (org.get("stripe_subscription_id") or "").strip():
+        subscription_data["trial_period_days"] = 7
+    try:
+        session = stripe.checkout.Session.create(
+            customer=customer_id,
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": quantity}],
+            allow_promotion_codes=True,
+            success_url=f"{frontend}/dashboard/stores?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{frontend}/dashboard/stores",
+            metadata={"org_id": org["id"], "plan": req.plan},
+            subscription_data=subscription_data,
+        )
+        return {"url": session.url, "quantity": quantity}
+    except Exception as e:
+        raise deps._server_error("Stripe checkout session failed", e)
+
+
+@router.post("/api/org/create-portal-session")
+def create_org_portal_session(
+    req: CreateOrgCheckoutRequest, user_id: str = Depends(deps.require_user)
+):
+    """Stripe Customer Portal for the group's subscription (card, invoices, cancel)."""
+    if not STRIPE_AVAILABLE or not stripe:
+        raise HTTPException(status_code=503, detail="Billing not configured")
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    stripe.api_key = secret
+    org = _resolve_managed_org(user_id, req.org_id)
+    customer_id = (org.get("stripe_customer_id") or "").strip()
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="This group has no billing set up yet.")
+    frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id, return_url=f"{frontend}/dashboard/stores"
+        )
+        return {"url": session.url}
+    except Exception as e:
+        raise deps._server_error("Stripe portal session failed", e)
+
+
+def _resolve_org_for_subscription(meta: dict, sub_id: Optional[str]) -> Optional[dict]:
+    """Is this Stripe subscription a group's rather than a single store's?
+
+    Checked before the tenant path on every subscription event, because an org
+    subscription has no tenant_id and would otherwise fall through to code that
+    looks one up and finds nothing. Portal-initiated events carry no metadata, so
+    the stored subscription id is the fallback — same shape as the tenant lookup.
+    """
+    if not runtime.USE_DB:
+        return None
+    org_id = (meta or {}).get("org_id")
+    if org_id:
+        return database.db_org_get_by_id(str(org_id))
+    if sub_id:
+        return database.db_org_get_by_stripe_subscription_id(sub_id)
+    return None
+
+
+def _handle_org_checkout_completed(obj: dict, meta: dict, request: Optional[Request]) -> None:
+    """The group paid: record the subscription and light up every store in it.
+
+    Stores don't need touching to gain access — subscription_access reads the org at
+    request time — but their plan column is stamped so plans.get_plan_limits (which
+    only ever looks at the tenant's own plan) gives them the tier they paid for.
+    """
+    org_id = meta.get("org_id")
+    plan = meta.get("plan") or "pro"
+    sub_id = obj.get("subscription")
+    customer_id = obj.get("customer")
+    if not org_id:
+        return
+    sub_status, trial_ends_at = _subscription_status_and_trial(sub_id)
+    database.db_org_update_subscription(
+        org_id,
+        stripe_customer_id=customer_id,
+        stripe_subscription_id=sub_id,
+        subscription_status=sub_status,
+        plan=plan,
+        trial_ends_at=trial_ends_at,
+    )
+    synced = database.db_org_sync_store_plans(org_id, plan)
+    deps.audit_log(
+        "stripe",
+        "org_checkout_completed",
+        resource_type="org",
+        resource_id=org_id,
+        details={"plan": plan, "subscription_id": sub_id, "stores_synced": synced},
+        request=request,
+    )
+    # Stores created before checkout aren't counted in the session's quantity.
+    sync_org_subscription_quantity(org_id)
+
+
+def _deactivate_demo_if_needed(tenant: dict, plan: str, request: Optional[Request] = None) -> None:
+    """A demo tenant that just paid becomes a real one: purge every seeded sample row
+    and reset the business config to a blank slate.
+
+    The config reset is the whole point. A demo is pre-filled with invented services
+    ("Haircut $28") and staff who don't exist; if any of that survived activation,
+    their live receptionist would quote sample prices to real callers and book them
+    with imaginary stylists. Handing the owner an empty Settings page is strictly
+    better than a plausible wrong one — the setup gate already walks them through
+    filling it in.
+
+    Their actual onboarding choice (number_mode / existing_business_number) is the one
+    thing carried across: it's a real answer they gave, not sample data.
+
+    Best-effort — never raises into the webhook handler.
+    """
+    if not tenant.get("demo_mode"):
+        return
+    try:
+        import config_service
+
+        cid = (tenant.get("client_id") or "").strip()
+        if not cid:
+            return
+        old = config_service._read_raw_client_config(cid) or {}
+        fresh = config_service._default_client_config_data(cid, plan)
+        fresh["business_name"] = tenant.get("name") or ""
+        fresh["name"] = tenant.get("name") or ""
+        fresh["number_mode"] = old.get("number_mode") or "new"
+        if fresh["number_mode"] == "existing":
+            fresh["existing_business_number"] = old.get("existing_business_number") or ""
+        res = database.db_tenant_deactivate_demo(tenant["id"], fresh)
+        if not res:
+            # Not a demo any more — a Stripe redelivery of the same event. Nothing to do.
+            return
+        # Keep the local config file in step with the DB (dev only; on Render the
+        # DB is authoritative and this is a no-op that may fail harmlessly).
+        try:
+            config_service.save_raw_client_config(cid, fresh)
+        except Exception:
+            pass
+        deps.audit_log(
+            "stripe",
+            "demo_converted_to_paid",
+            resource_type="tenant",
+            resource_id=tenant["id"],
+            client_id=cid,
+            details={"plan": plan, "purged": res.get("deleted")},
+            request=request,
+        )
+        logger.info("demo_converted cid=%s purged=%s", cid, res.get("deleted"))
+    except Exception as e:
+        # A tenant stuck in demo_mode still can't take calls until a number is
+        # provisioned below, but their dashboard would keep showing sample data —
+        # alert so it can be cleared by hand.
+        logger.error("demo_deactivate_failed tenant=%s err=%s", tenant.get("id"), e)
+        try:
+            import alerts
+
+            alerts.notify_failure(
+                "billing", "demo_deactivate_failed", tenant.get("id"),
+                f"Demo data purge failed for {tenant.get('client_id')} after payment",
+                payload={"error": str(e)},
+            )
+        except Exception:
+            pass
+
+
 def _provision_number_for_tenant(tenant: dict, area_code: Optional[str], request: Request) -> None:
     """Self-serve: buy and wire a Twilio number (+ A2P enroll) for a tenant that has
     none yet, after checkout succeeds. Non-fatal — logged + audited on failure so the
@@ -552,7 +844,10 @@ async def stripe_webhook(request: Request):
             plan = meta.get("plan") or "starter"
             sub_id = obj.get("subscription")
             customer_id = obj.get("customer")
-            if tenant_id and (sub_id or customer_id):
+            # A group's subscription covers many stores and has no tenant_id at all.
+            if meta.get("org_id"):
+                _handle_org_checkout_completed(obj, meta, request)
+            elif tenant_id and (sub_id or customer_id):
                 # Mirror Stripe's real subscription state: a fresh signup is on a
                 # 7-day trial ('trialing' + trial_end), which unlocks full Pro-tier
                 # features. Hardcoding 'active' here previously dropped trial users
@@ -576,6 +871,11 @@ async def stripe_webhook(request: Request):
                     details={"plan": plan, "subscription_id": sub_id},
                     request=request,
                 )
+                # Demo -> paid: clear the sample data BEFORE a number exists. Once the
+                # line is live, real calls can write real rows, and the purge deletes
+                # by client_id — so it has to run while the tenant is still unreachable.
+                if tenant:
+                    _deactivate_demo_if_needed(tenant, plan, request)
                 # Self-serve: provision the number now that payment is set up.
                 if tenant and not (tenant.get("twilio_phone_number") or "").strip():
                     _provision_number_for_tenant(
@@ -592,6 +892,28 @@ async def stripe_webhook(request: Request):
             meta = obj.get("metadata") or {}
             tenant_id = meta.get("tenant_id")
             status = obj.get("status")
+            org = _resolve_org_for_subscription(meta, sub_id)
+            if org:
+                org_plan = meta.get("plan") or _subscription_plan_from_obj(obj)
+                trial_ends_at = None
+                t_end = obj.get("trial_end")
+                if t_end:
+                    trial_ends_at = datetime.fromtimestamp(int(t_end), tz=timezone.utc)
+                database.db_org_update_subscription(
+                    org["id"],
+                    stripe_subscription_id=sub_id,
+                    subscription_status=status,
+                    plan=org_plan,
+                    trial_ends_at=trial_ends_at,
+                )
+                if org_plan:
+                    database.db_org_sync_store_plans(org["id"], org_plan)
+                deps.audit_log(
+                    "stripe", "org_subscription_updated", resource_type="org",
+                    resource_id=org["id"], details={"status": status, "plan": org_plan},
+                    request=request,
+                )
+                return {"received": True}
             # Customer-Portal-initiated events often carry no tenant_id metadata;
             # resolve by the stored subscription id instead (mirrors payment_failed).
             if not tenant_id and sub_id:
@@ -630,6 +952,19 @@ async def stripe_webhook(request: Request):
         elif etype == "customer.subscription.deleted":
             sub_id = obj.get("id")
             tenant_id = (obj.get("metadata") or {}).get("tenant_id")
+            org = _resolve_org_for_subscription(obj.get("metadata") or {}, sub_id)
+            if org:
+                # Cancelling the group's subscription stops every store in it: each one
+                # was only live by inheriting this. No numbers are released here — that
+                # would be irreversible on a billing blip, and the stores go dark anyway.
+                database.db_org_update_subscription(org["id"], subscription_status="canceled")
+                deps.audit_log(
+                    "stripe", "org_subscription_deleted", resource_type="org",
+                    resource_id=org["id"],
+                    details={"stores": database.db_org_store_count(org["id"])},
+                    request=request,
+                )
+                return {"received": True}
             # Portal/Stripe-initiated cancellations may lack metadata; resolve by sub id.
             if not tenant_id and sub_id:
                 t = database.db_tenant_get_by_stripe_subscription_id(sub_id)

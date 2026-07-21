@@ -17,6 +17,35 @@ const API_TIMEOUT_MS =
 export { API_URL }
 
 /**
+ * Multi-store oversight: which store the dashboard is currently showing.
+ *
+ * Only meaningful for an org overseer (a franchise/regional account). It rides along
+ * as the X-Store-Id header and the backend validates it against org membership on
+ * every request — the value here is a request for a store, never a grant of one.
+ * A normal store owner never sets it, and the backend ignores it if they somehow do.
+ */
+const STORE_KEY = 'nuvatra.selectedStoreId'
+
+export function getSelectedStoreId(): string | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.localStorage.getItem(STORE_KEY)
+  } catch {
+    return null // private mode / storage disabled
+  }
+}
+
+export function setSelectedStoreId(storeId: string | null): void {
+  if (typeof window === 'undefined') return
+  try {
+    if (storeId) window.localStorage.setItem(STORE_KEY, storeId)
+    else window.localStorage.removeItem(STORE_KEY)
+  } catch {
+    // Non-fatal: without persistence they just re-pick the store.
+  }
+}
+
+/**
  * Axios config for Next.js API routes that proxy to the backend (same origin as the app).
  * Use with paths like `/api/admin/session` so requests hit this deployment, not the wrong host.
  */
@@ -51,6 +80,12 @@ export function useApiClient(): AxiosInstance {
         }
       } catch (_) {
         // Ignore if getToken fails (e.g. signed out)
+      }
+      // Read at request time, not instance-creation time, so switching stores takes
+      // effect immediately without rebuilding the (deliberately stable) client.
+      const storeId = getSelectedStoreId()
+      if (storeId) {
+        config.headers['X-Store-Id'] = storeId
       }
       return config
     })

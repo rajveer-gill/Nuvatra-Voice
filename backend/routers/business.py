@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Literal, Optional
 from uuid import uuid4
 
@@ -553,6 +553,29 @@ def api_create_business(
     if existing_ids:
         existing = database.db_tenant_get_by_id(existing_ids[0])
         if existing:
+            # A demo tenant coming back through the form to activate. Record the
+            # number choice on the tenant they already have, so checkout provisions
+            # the right thing — this is the one answer that survives the sample-data
+            # purge (see billing._deactivate_demo_if_needed).
+            if existing.get("demo_mode"):
+                cid = (existing.get("client_id") or "").strip()
+                database.set_request_client_id(cid)
+                # They can correct the business name on the way out of the demo;
+                # ignoring it here would silently drop what they typed.
+                new_name = req.name.strip()
+                if new_name and new_name != (existing.get("name") or "").strip():
+                    if database.db_tenant_set_name(existing["id"], new_name):
+                        existing["name"] = new_name
+                raw = config_service._read_raw_client_config(cid) or (
+                    config_service._default_client_config_data(cid, req.plan)
+                )
+                raw["number_mode"] = req.number_mode
+                raw["existing_business_number"] = (
+                    existing_number if req.number_mode == "existing" else ""
+                )
+                raw["business_name"] = existing.get("name") or raw.get("business_name") or ""
+                raw["name"] = raw["business_name"]
+                config_service.save_raw_client_config(cid, raw)
             return {"tenant": existing, "already_existed": True}
     name = req.name.strip()
     client_id = _unique_client_id(name)
@@ -578,6 +601,82 @@ def api_create_business(
         request=request,
     )
     return {"tenant": tenant, "already_existed": False}
+
+
+class StartDemoRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    business_vertical: str = "salon_chair"
+
+
+# How long a prospect can explore the seeded dashboard before the demo lapses.
+DEMO_WINDOW_DAYS = 14
+
+
+@router.post("/api/onboarding/start-demo")
+def api_start_demo(
+    req: StartDemoRequest,
+    request: Request,
+    user_id: str = Depends(deps.require_user),
+):
+    """Card-free demo: create a tenant seeded with sample data so a prospect can see
+    the product working before paying.
+
+    The tenant deliberately gets NO phone number. That's what makes this safe — the
+    voice/SMS webhooks resolve a tenant by the dialed Twilio number, so a tenant
+    without one is unreachable and can't burn call minutes. It also means the normal
+    7-day trial still applies on activation, since create-checkout-session decides
+    `needs_trial` by the absence of a number.
+
+    Access comes from a short billing exemption rather than a fake 'trialing' status,
+    so the trial clock only ever starts when a real card does. The exemption also
+    grants pro-tier features (see plans.get_plan_limits), which is what we want: the
+    demo should show everything.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    bv = (req.business_vertical or "salon_chair").strip()
+    if bv not in config_service.ALLOWED_BUSINESS_VERTICALS:
+        raise HTTPException(status_code=400, detail="Invalid business type")
+    # One tenant per user — a returning demo user lands back on their own demo.
+    existing_ids = database.db_tenant_membership_tenant_ids(user_id)
+    if existing_ids:
+        existing = database.db_tenant_get_by_id(existing_ids[0])
+        if existing:
+            return {"tenant": existing, "already_existed": True}
+    name = req.name.strip()
+    client_id = _unique_client_id(name)
+    tenant = database.db_tenant_create_pending(client_id, name, "pro", bv)
+    if not tenant:
+        raise HTTPException(status_code=409, detail="Could not start demo; please try again")
+    database.set_request_client_id(client_id)
+    # Flag first, then grant access: if seeding dies halfway, the tenant is still
+    # marked demo_mode and its partial data is still purged on activation.
+    database.db_tenant_set_demo_mode(tenant["id"], True)
+    database.db_tenant_set_billing_exempt(
+        tenant["id"], datetime.now(timezone.utc) + timedelta(days=DEMO_WINDOW_DAYS)
+    )
+    try:
+        import demo_seed
+
+        counts = demo_seed.seed_demo_tenant(client_id, name, plan="pro")
+    except Exception as e:
+        logger.exception("demo_seed_failed client_id=%s", client_id)
+        raise deps._server_error("Could not build the demo dashboard", e)
+    database.db_tenant_member_set_single(user_id, tenant["id"])
+    deps._clerk_patch_user_tenant_metadata(user_id, tenant["id"])
+    deps.audit_log(
+        "user",
+        "demo_started",
+        actor_id=user_id,
+        resource_type="tenant",
+        resource_id=tenant["id"],
+        client_id=client_id,
+        details={"name": name, "vertical": bv, "seeded": counts},
+        request=request,
+    )
+    # Re-read so the response carries demo_mode / billing_exempt_until.
+    fresh = database.db_tenant_get_by_id(tenant["id"]) or tenant
+    return {"tenant": fresh, "already_existed": False, "seeded": counts}
 
 
 @router.post("/api/onboarding/complete")

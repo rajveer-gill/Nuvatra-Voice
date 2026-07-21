@@ -1,0 +1,335 @@
+"""Multi-store oversight API — one login watching several stores.
+
+A franchise or multi-shop owner gets an org containing their stores and an
+org_members row saying they may oversee it. These routes answer "who am I" and
+"how are my stores doing"; drilling into a single store reuses every existing
+dashboard endpoint, with the store named by the X-Store-Id header (see
+deps.require_tenant).
+
+Auth here is require_user, NOT require_tenant. An overseer generally owns no store
+themselves, so they have no tenant_members row and require_tenant would 403 them.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Optional
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, EmailStr, Field
+
+import clerk_service
+import config_service
+import database
+import deps
+import runtime
+from subscription_access import evaluate_billing, get_tenant_subscription_state
+
+logger = logging.getLogger("nuvatra")
+router = APIRouter()
+
+
+def _require_org_manager(user_id: str, org_id: Optional[str] = None) -> dict:
+    """The caller must manage an org before they can change anything in it.
+
+    A viewer oversees stores read-only; only a manager provisions. When org_id is
+    omitted and they manage exactly one org, that's the one — the common case, since
+    a regional manager has a single group.
+    """
+    memberships = [m for m in database.db_org_memberships(user_id) if m.get("role") == "manager"]
+    if not memberships:
+        raise HTTPException(
+            status_code=403, detail="Your account cannot add or change stores in this group."
+        )
+    if org_id:
+        for m in memberships:
+            if m["org_id"] == str(org_id):
+                return m
+        raise HTTPException(status_code=403, detail="You do not manage that group.")
+    if len(memberships) > 1:
+        raise HTTPException(
+            status_code=400, detail="You manage several groups — specify which one."
+        )
+    return memberships[0]
+
+
+def _consume_pending_org_invites(user_id: str) -> list:
+    """Materialize any org invites waiting on this user's verified emails.
+
+    Reuses the Clerk user lookup deps already uses for tenant-invite consumption, so
+    the email list is authoritative (a user can only claim an invite for an address
+    Clerk has verified as theirs). Best-effort — a Clerk hiccup just means they'll be
+    picked up on the next load. Returns the orgs joined.
+    """
+    try:
+        link = deps._clerk_fetch_user_link(user_id)
+        emails = (link or {}).get("emails") or []
+        if not emails:
+            return []
+        return database.db_org_invites_consume_for_emails(user_id, emails)
+    except Exception as e:
+        logger.warning("org_invite_consume_failed user=%s err=%s", user_id, type(e).__name__)
+        return []
+
+
+def _unique_client_id(name: str) -> str:
+    """Slugify a store name into a stable, unique client_id. Mirrors the self-serve
+    signup slug so org-created stores look identical to any other tenant."""
+    base = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:40] or "store"
+    candidate, n = base, 2
+    while database.db_tenant_get_by_client_id(candidate) is not None:
+        candidate = f"{base}-{n}"
+        n += 1
+        if n > 200:
+            candidate = f"{base}-{uuid4().hex[:6]}"
+            break
+    return candidate
+
+
+@router.get("/api/org/me")
+def get_org_me(user_id: str = Depends(deps.require_user)):
+    """Whether this user oversees any stores, and at what role.
+
+    The dashboard calls this to decide whether to show the store switcher. A normal
+    store owner gets is_org_member=false and nothing changes for them.
+    """
+    if not runtime.USE_DB:
+        return {"is_org_member": False, "orgs": [], "store_count": 0}
+    orgs = database.db_org_memberships(user_id)
+    if not orgs:
+        # Not a member yet — this may be an invited user's first sign-in. Consuming
+        # pending invites here (rather than on every request) means the one Clerk
+        # email lookup happens only for users who aren't members of anything: an
+        # invited overseer pays it once, then this branch is skipped forever after.
+        if _consume_pending_org_invites(user_id):
+            orgs = database.db_org_memberships(user_id)
+        if not orgs:
+            return {"is_org_member": False, "orgs": [], "store_count": 0}
+    stores = database.db_org_stores_for_user(user_id)
+    # Attach billing state per org so the UI can prompt a manager to set up payment
+    # before their stores can take calls. Only a manager needs (or is shown) this.
+    for o in orgs:
+        billing = database.db_org_get_by_id(o["org_id"]) or {}
+        o["subscription_status"] = billing.get("subscription_status")
+        o["billing_active"] = evaluate_billing(billing)["active"] if billing else False
+        o["store_count"] = database.db_org_store_count(o["org_id"])
+    return {
+        "is_org_member": True,
+        "orgs": orgs,
+        "store_count": len(stores),
+        # Convenience for the UI: the weakest role wins for hiding write controls.
+        "can_edit_any": any((o.get("role") or "") == "manager" for o in orgs),
+    }
+
+
+@router.get("/api/org/stores")
+def get_org_stores(
+    user_id: str = Depends(deps.require_user),
+    days: int = Query(7, ge=1, le=90),
+):
+    """Every store this user oversees, with headline numbers for the last N days.
+
+    This is the rollup: one row per shop, so a regional manager can see at a glance
+    which store is missing calls. Metrics are aggregated across all stores in three
+    queries rather than per-store loops.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    stores = database.db_org_stores_for_user(user_id)
+    if not stores:
+        return {"stores": [], "totals": {}, "days": days}
+    metrics = database.db_org_store_metrics([s["client_id"] for s in stores], days=days)
+    out = []
+    for s in stores:
+        cid = s["client_id"]
+        m = metrics.get(cid) or {}
+        state = get_tenant_subscription_state(s)
+        out.append(
+            {
+                "client_id": cid,
+                "tenant_id": s.get("id"),
+                "name": s.get("name"),
+                "org_id": s.get("org_id"),
+                "org_name": s.get("org_name"),
+                "role": s.get("org_role"),
+                "phone": s.get("twilio_phone_number"),
+                "plan": state.get("plan"),
+                # Surfaced so a lapsed store is obvious in the list rather than only
+                # discovered when someone drills in and finds it dead.
+                "can_use_app": state.get("can_use_app"),
+                "subscription_status": state.get("subscription_status"),
+                "demo_mode": state.get("demo_mode"),
+                "calls": m.get("calls", 0),
+                "missed": m.get("missed", 0),
+                "bookings": m.get("bookings", 0),
+                "upcoming": m.get("upcoming", 0),
+                "unread_messages": m.get("unread_messages", 0),
+            }
+        )
+    totals = {
+        k: sum(int(s.get(k) or 0) for s in out)
+        for k in ("calls", "missed", "bookings", "upcoming", "unread_messages")
+    }
+    totals["stores"] = len(out)
+    return {"stores": out, "totals": totals, "days": days}
+
+
+class CreateOrgStoreRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    org_id: Optional[str] = None
+    business_vertical: str = "salon_chair"
+    # "new" = we give this store a number to publish; "existing" = it keeps its own
+    # published number and forwards to the (hidden) AI line.
+    number_mode: str = Field(default="new")
+    existing_number: Optional[str] = None
+    # Optional: invite the store's manager in the same step.
+    manager_email: Optional[EmailStr] = None
+
+
+@router.post("/api/org/stores")
+def create_org_store(
+    req: CreateOrgStoreRequest, request: Request, user_id: str = Depends(deps.require_user)
+):
+    """Add a store to the group you manage.
+
+    This exists because the self-serve signup path cannot do it: it makes the creator
+    a tenant_member, and one-user-one-tenant means her second store would silently
+    hand back her first (business.py's already_existed guard). Here she is never a
+    member of the stores she creates — her access comes from the org — so she can
+    create as many as she likes without touching her own account.
+
+    The store is created with no number; the number arrives when the group's
+    subscription covers it. Access comes from the org's subscription, so the store
+    never needs a card of its own.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    membership = _require_org_manager(user_id, req.org_id)
+    org_id = membership["org_id"]
+    bv = (req.business_vertical or "salon_chair").strip()
+    if bv not in config_service.ALLOWED_BUSINESS_VERTICALS:
+        raise HTTPException(status_code=400, detail="Invalid business type")
+    if req.number_mode not in ("new", "existing"):
+        raise HTTPException(status_code=400, detail="Invalid number mode")
+    existing_number = ""
+    if req.number_mode == "existing":
+        digits = re.sub(r"\D", "", req.existing_number or "")
+        if len(digits) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Enter this store's current phone number to forward calls from.",
+            )
+        existing_number = f"+1{digits}" if len(digits) == 10 else f"+{digits}"
+
+    org = database.db_org_get_by_id(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Group not found")
+    name = req.name.strip()
+    client_id = _unique_client_id(name)
+    # plan mirrors the org's, because plans.get_plan_limits reads the tenant's own
+    # plan — a store in a Pro group must literally carry plan='pro'.
+    tenant = database.db_tenant_create_pending(client_id, name, org.get("plan") or "pro", bv)
+    if not tenant:
+        raise HTTPException(status_code=409, detail="Could not create store; please try again")
+    if not database.db_org_attach_tenant(tenant["id"], org_id):
+        # An orphaned store would be invisible to her and billed to nobody.
+        database.db_tenant_delete(tenant["id"])
+        raise HTTPException(status_code=500, detail="Could not add the store to your group")
+    database.set_request_client_id(client_id)
+    cfg = config_service._default_client_config_data(client_id, org.get("plan") or "pro")
+    cfg["business_name"] = name
+    cfg["name"] = name
+    cfg["number_mode"] = req.number_mode
+    if req.number_mode == "existing":
+        cfg["existing_business_number"] = existing_number
+    config_service.save_raw_client_config(client_id, cfg)
+
+    # The group is billed per store, so a new store must move the quantity. Imported
+    # here rather than at module scope to keep org <-> billing from importing circularly.
+    quantity = {}
+    try:
+        from routers import billing as billing_router
+
+        quantity = billing_router.sync_org_subscription_quantity(org_id)
+    except Exception as e:
+        logger.error("org_quantity_sync_failed_on_create org=%s err=%s", org_id, e)
+
+    invite: dict = {}
+    if req.manager_email:
+        invite = clerk_service._clerk_link_email_to_tenant(str(req.manager_email), tenant["id"])
+    deps.audit_log(
+        "user",
+        "org_store_created",
+        actor_id=user_id,
+        resource_type="tenant",
+        resource_id=tenant["id"],
+        client_id=client_id,
+        details={"org_id": org_id, "name": name, "invited": bool(req.manager_email)},
+        request=request,
+    )
+    fresh = database.db_tenant_get_by_id(tenant["id"]) or tenant
+    return {
+        "store": fresh,
+        "invite_sent": bool(invite.get("invite_sent")),
+        "clerk_error": invite.get("clerk_error"),
+        "store_count": database.db_org_store_count(org_id),
+        # False when the group has no subscription yet (they pay once, after adding
+        # stores) or when Stripe rejected the change — the UI should say which.
+        "billing_synced": bool(quantity.get("synced")),
+    }
+
+
+class InviteStoreManagerRequest(BaseModel):
+    email: EmailStr
+
+
+@router.post("/api/org/stores/{store_ref}/invite")
+def invite_store_manager(
+    store_ref: str,
+    req: InviteStoreManagerRequest,
+    request: Request,
+    user_id: str = Depends(deps.require_user),
+):
+    """Invite the person who runs this store.
+
+    They get a Clerk invite and, on sign-up, land in this store only — require_tenant
+    consumes the pending invite and links them (db_tenant_invite_consume). They never
+    see the group's other stores, and they can't see the rollup.
+
+    Note there is at most one pending invite per store, so re-inviting replaces the
+    previous address rather than adding a second manager.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    # Resolve the store through org membership — same join that guards every other
+    # org read, so she cannot invite someone into a store she doesn't manage.
+    scoped = database.db_org_store_for_user(user_id, store_ref)
+    if not scoped:
+        raise HTTPException(status_code=403, detail="You do not have access to that store.")
+    if (scoped.get("role") or "viewer") != "manager":
+        raise HTTPException(
+            status_code=403, detail="Your account can view this store but not change it."
+        )
+    tenant = scoped["tenant"]
+    link = clerk_service._clerk_link_email_to_tenant(str(req.email), tenant["id"])
+    deps.audit_log(
+        "user",
+        "org_store_manager_invited",
+        actor_id=user_id,
+        resource_type="tenant",
+        resource_id=tenant["id"],
+        client_id=tenant.get("client_id"),
+        details={"email": str(req.email), **{k: v for k, v in link.items() if k != "email"}},
+        request=request,
+    )
+    if link.get("clerk_error") and not link.get("invite_sent"):
+        # The pending invite row is still stored, so they'd be linked if they sign up
+        # anyway — but say so plainly rather than reporting a success that isn't one.
+        raise HTTPException(status_code=502, detail=str(link.get("clerk_error")))
+    return {
+        "ok": True,
+        "invite_sent": bool(link.get("invite_sent")),
+        "user_relinked": bool(link.get("user_relinked")),
+    }

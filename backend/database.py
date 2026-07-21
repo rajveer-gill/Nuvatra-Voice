@@ -9,7 +9,7 @@ import uuid
 import contextvars
 import logging
 import threading
-from datetime import datetime, date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, List, Tuple
 from pathlib import Path
 
@@ -337,6 +337,7 @@ def init_db() -> bool:
             ("business_config", "JSONB"),
             ("account_paused", "BOOLEAN NOT NULL DEFAULT FALSE"),
             ("twilio_number_sid", "TEXT"),
+            ("demo_mode", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {typ}")
@@ -370,6 +371,66 @@ def init_db() -> bool:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Multi-store oversight: an org groups stores, org_members says who may watch
+        # them. Deliberately separate from tenant_members — an org member is not a
+        # member of any store, so the one-user-one-tenant rules below stay intact.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orgs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS org_members (
+                clerk_user_id TEXT NOT NULL,
+                org_id UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (clerk_user_id, org_id)
+            )
+        """)
+        # Invite an org overseer/manager by email before they have an account. Mirrors
+        # tenant_invites; consumed at first matching sign-in (routers/org.get_org_me).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS org_invites (
+                email TEXT NOT NULL,
+                org_id UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (email, org_id)
+            )
+        """)
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_org_invites_email ON org_invites(email)")
+        except Exception:
+            pass
+        # Org-level billing: one subscription covering N stores. Mirrors the tenant
+        # billing columns so subscription_access can judge an org with the same rules.
+        for col, typ in [
+            ("plan", "TEXT NOT NULL DEFAULT 'pro'"),
+            ("subscription_status", "TEXT"),
+            ("stripe_customer_id", "TEXT"),
+            ("stripe_subscription_id", "TEXT"),
+            ("trial_ends_at", "TIMESTAMPTZ"),
+            ("billing_exempt_until", "TIMESTAMPTZ"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE orgs ADD COLUMN IF NOT EXISTS {col} {typ}")
+            except Exception:
+                pass
+        try:
+            # NULL org_id = an independent store (every tenant, until grouped).
+            cur.execute(
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS org_id UUID "
+                "REFERENCES orgs(id) ON DELETE SET NULL"
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tenants_org ON tenants(org_id)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(clerk_user_id)"
+            )
+        except Exception:
+            pass
         try:
             cur.execute(
                 """
@@ -878,14 +939,30 @@ def _row_to_tenant(row) -> dict:
         base["billing_period_anchor_at"] = base.get("created_at")
     base["account_paused"] = bool(row[13]) if len(row) >= 14 else False
     base["twilio_number_sid"] = row[14] if len(row) >= 15 else None
+    base["demo_mode"] = bool(row[15]) if len(row) >= 16 else False
+    # NULL for an independent store. When set, subscription_access lets the store
+    # inherit access from the org's single subscription.
+    base["org_id"] = str(row[16]) if len(row) >= 17 and row[16] else None
     return base
 
-def _tenant_select_cols():
-    return (
-        "id, client_id, name, twilio_phone_number, plan, created_at, trial_ends_at, "
-        "subscription_status, stripe_customer_id, stripe_subscription_id, billing_exempt_until, "
-        "business_vertical, billing_period_anchor_at, account_paused, twilio_number_sid"
-    )
+# Order is load-bearing: _row_to_tenant reads this row positionally.
+_TENANT_COLS = (
+    "id", "client_id", "name", "twilio_phone_number", "plan", "created_at",
+    "trial_ends_at", "subscription_status", "stripe_customer_id",
+    "stripe_subscription_id", "billing_exempt_until", "business_vertical",
+    "billing_period_anchor_at", "account_paused", "twilio_number_sid", "demo_mode",
+    "org_id",
+)
+
+
+def _tenant_select_cols(prefix: str = "") -> str:
+    """Tenant column list for a SELECT, ordered as _row_to_tenant expects.
+
+    Pass a table alias when joining anything that shares a column name — both
+    tenants and org_members have created_at, so an unqualified list is ambiguous.
+    """
+    p = f"{prefix}." if prefix else ""
+    return ", ".join(p + c for c in _TENANT_COLS)
 
 def db_tenant_get_by_phone(twilio_phone_number: str) -> Optional[dict]:
     """Look up tenant by Twilio phone number (E.164). Returns tenant or None."""
@@ -1123,6 +1200,568 @@ def db_tenant_get_for_user(
         )
         db_tenant_member_assign_owner(clerk_user_id, chosen)
     return db_tenant_get_by_id(chosen)
+
+# --- Orgs (multi-store oversight) ---------------------------------------------
+# An org groups stores under one login. Org membership is separate from
+# tenant_members on purpose: a regional manager overseeing 12 shops is not an
+# owner of any of them, so none of the one-user-one-tenant collapsing above
+# applies to them, and store owners are unaffected.
+
+# viewer = read-only oversight (what a franchise asked for); manager = may also
+# change store settings. Enforced at the auth seam in deps.require_tenant.
+ORG_ROLES = ("viewer", "manager")
+
+
+def db_org_create(name: str) -> Optional[dict]:
+    """Create an org (a group of stores). Returns {id, name} or None."""
+    clean = (name or "").strip()
+    if not clean:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"INSERT INTO orgs (name) VALUES (%s) RETURNING {', '.join(_ORG_BILLING_COLS)}",
+            (clean[:200],),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return _row_to_org(row) if row else None
+    except Exception as e:
+        print(f"[DB] Failed to create org: {e}")
+        return None
+
+
+# The org's billing columns, deliberately the same shape as a tenant's so
+# subscription_access can evaluate either with one code path.
+_ORG_BILLING_COLS = (
+    "id", "name", "plan", "subscription_status", "stripe_customer_id",
+    "stripe_subscription_id", "trial_ends_at", "billing_exempt_until",
+)
+
+
+def _row_to_org(row) -> dict:
+    return {
+        "id": str(row[0]),
+        "name": row[1],
+        "plan": row[2] or "pro",
+        "subscription_status": row[3],
+        "stripe_customer_id": row[4],
+        "stripe_subscription_id": row[5],
+        "trial_ends_at": row[6].isoformat() if row[6] else None,
+        "billing_exempt_until": row[7].isoformat() if row[7] else None,
+    }
+
+
+def db_org_get_by_id(org_id: str) -> Optional[dict]:
+    conn = _get_conn()
+    if not conn or not org_id:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT {', '.join(_ORG_BILLING_COLS)} FROM orgs WHERE id = %s::uuid", (org_id,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return _row_to_org(row) if row else None
+    except Exception as e:
+        print(f"[DB] Failed to get org: {e}")
+        return None
+
+
+def db_org_get_by_stripe_subscription_id(sub_id: str) -> Optional[dict]:
+    """Resolve an org from a Stripe subscription — Customer-Portal events often carry
+    no metadata, same problem the tenant path already solves this way."""
+    conn = _get_conn()
+    if not conn or not (sub_id or "").strip():
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT {', '.join(_ORG_BILLING_COLS)} FROM orgs WHERE stripe_subscription_id = %s",
+            (sub_id.strip(),),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return _row_to_org(row) if row else None
+    except Exception as e:
+        print(f"[DB] Failed to get org by subscription: {e}")
+        return None
+
+
+def db_org_store_count(org_id: str) -> int:
+    """Stores in this org — the quantity the org's subscription is billed on."""
+    conn = _get_conn()
+    if not conn or not org_id:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM tenants WHERE org_id = %s::uuid", (org_id,))
+        row = cur.fetchone()
+        cur.close()
+        return int(row[0]) if row else 0
+    except Exception as e:
+        print(f"[DB] Failed to count org stores: {e}")
+        return 0
+
+
+def db_org_update_subscription(
+    org_id: str,
+    *,
+    plan: Optional[str] = None,
+    subscription_status: Optional[str] = None,
+    stripe_customer_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] = None,
+    trial_ends_at: Optional[datetime] = None,
+    billing_exempt_until: Optional[datetime] = None,
+    clear_trial: bool = False,
+) -> bool:
+    """Update an org's billing. Only non-None fields are written, so a partial update
+    can't blank the rest. clear_trial explicitly nulls trial_ends_at (None can't, since
+    None means 'leave alone')."""
+    sets, vals = [], []
+    for col, val in (
+        ("plan", plan),
+        ("subscription_status", subscription_status),
+        ("stripe_customer_id", stripe_customer_id),
+        ("stripe_subscription_id", stripe_subscription_id),
+        ("trial_ends_at", trial_ends_at),
+        ("billing_exempt_until", billing_exempt_until),
+    ):
+        if val is not None:
+            sets.append(f"{col} = %s")
+            vals.append(val)
+    if clear_trial:
+        sets.append("trial_ends_at = NULL")
+    if not sets:
+        return True
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        vals.append(org_id)
+        cur.execute(f"UPDATE orgs SET {', '.join(sets)} WHERE id = %s::uuid", tuple(vals))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to update org subscription: {e}")
+        return False
+
+
+def db_org_sync_store_plans(org_id: str, plan: str) -> int:
+    """Stamp the org's plan onto every store in it.
+
+    Keeps plans.get_plan_limits working untouched: it reads the tenant's own plan, so
+    a store in a Pro org must literally carry plan='pro'. Returns rows updated.
+    """
+    p = (plan or "").strip()
+    if not p or not org_id:
+        return 0
+    conn = _get_conn()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE tenants SET plan = %s WHERE org_id = %s::uuid", (p, org_id))
+        n = cur.rowcount
+        conn.commit()
+        cur.close()
+        return n
+    except Exception as e:
+        print(f"[DB] Failed to sync org store plans: {e}")
+        return 0
+
+
+def db_org_member_add(clerk_user_id: str, org_id: str, role: str = "viewer") -> bool:
+    """Add (or re-role) a user in an org. Unknown roles fall back to viewer — the
+    least-privileged option, so a typo can never grant write access."""
+    uid = (clerk_user_id or "").strip()
+    if not uid or not org_id:
+        return False
+    r = (role or "viewer").strip().lower()
+    if r not in ORG_ROLES:
+        r = "viewer"
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO org_members (clerk_user_id, org_id, role) VALUES (%s, %s::uuid, %s) "
+            "ON CONFLICT (clerk_user_id, org_id) DO UPDATE SET role = EXCLUDED.role",
+            (uid, org_id, r),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to add org member: {e}")
+        return False
+
+
+def db_org_member_remove(clerk_user_id: str, org_id: str) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM org_members WHERE clerk_user_id = %s AND org_id = %s::uuid",
+            ((clerk_user_id or "").strip(), org_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to remove org member: {e}")
+        return False
+
+
+def db_org_memberships(clerk_user_id: str) -> List[dict]:
+    """Orgs this user oversees: [{org_id, name, role}]. Empty for a normal owner."""
+    uid = (clerk_user_id or "").strip()
+    if not uid:
+        return []
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT o.id, o.name, om.role FROM org_members om "
+            "JOIN orgs o ON o.id = om.org_id WHERE om.clerk_user_id = %s ORDER BY o.name",
+            (uid,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [{"org_id": str(r[0]), "name": r[1], "role": r[2]} for r in rows]
+    except Exception as e:
+        print(f"[DB] Failed to load org memberships: {e}")
+        return []
+
+
+def db_org_invite_upsert(email: str, org_id: str, role: str = "viewer") -> bool:
+    """Queue (or re-role) a pending org invite by email. Unknown roles -> viewer."""
+    em = _normalize_invite_email(email)
+    if not em or not org_id:
+        return False
+    r = (role or "viewer").strip().lower()
+    if r not in ORG_ROLES:
+        r = "viewer"
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO org_invites (email, org_id, role) VALUES (%s, %s::uuid, %s) "
+            "ON CONFLICT (email, org_id) DO UPDATE SET role = EXCLUDED.role",
+            (em, org_id, r),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to upsert org invite: {e}")
+        return False
+
+
+def db_org_invite_delete(email: str, org_id: str) -> bool:
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM org_invites WHERE email = %s AND org_id = %s::uuid",
+            (_normalize_invite_email(email), org_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to delete org invite: {e}")
+        return False
+
+
+def db_org_invites_for_org(org_id: str) -> List[dict]:
+    """Pending (not-yet-accepted) invites for an org — admin display."""
+    conn = _get_conn()
+    if not conn or not org_id:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT email, role FROM org_invites WHERE org_id = %s::uuid ORDER BY email",
+            (org_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [{"email": r[0], "role": r[1]} for r in rows]
+    except Exception as e:
+        print(f"[DB] Failed to list org invites: {e}")
+        return []
+
+
+def db_org_invites_consume_for_emails(clerk_user_id: str, emails: List[str]) -> List[dict]:
+    """Turn any pending org invites for these verified emails into memberships.
+
+    Called the first time an invited person signs in. Each match becomes an
+    org_members row and the invite is deleted, in one transaction, so a redelivery
+    (or a second concurrent request on first login) can't double-add or leave a
+    dangling invite. Returns the orgs the user just joined: [{org_id, role}].
+
+    If they're already a member the invite is still cleared, but their existing role
+    is left alone — a stray leftover invite must never silently demote a manager.
+    """
+    uid = (clerk_user_id or "").strip()
+    ems = [_normalize_invite_email(e) for e in (emails or []) if _normalize_invite_email(e)]
+    if not uid or not ems:
+        return []
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        # Claim the matching invites by deleting them and returning what was pending.
+        # Doing the DELETE first makes the claim atomic: a concurrent call finds no
+        # rows and does nothing.
+        cur.execute(
+            "DELETE FROM org_invites WHERE email = ANY(%s) RETURNING org_id, role",
+            (ems,),
+        )
+        claimed = cur.fetchall()
+        joined = []
+        for org_id, role in claimed:
+            cur.execute(
+                "INSERT INTO org_members (clerk_user_id, org_id, role) VALUES (%s, %s, %s) "
+                "ON CONFLICT (clerk_user_id, org_id) DO NOTHING",
+                (uid, str(org_id), role),
+            )
+            joined.append({"org_id": str(org_id), "role": role})
+        conn.commit()
+        cur.close()
+        return joined
+    except Exception as e:
+        print(f"[DB] Failed to consume org invites: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return []
+
+
+def db_org_attach_tenant(tenant_id: str, org_id: Optional[str]) -> bool:
+    """Put a store in an org, or pass org_id=None to make it independent again."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        if org_id:
+            cur.execute(
+                "UPDATE tenants SET org_id = %s::uuid WHERE id = %s::uuid", (org_id, tenant_id)
+            )
+        else:
+            cur.execute("UPDATE tenants SET org_id = NULL WHERE id = %s::uuid", (tenant_id,))
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to attach tenant to org: {e}")
+        return False
+
+
+def db_org_stores_for_user(clerk_user_id: str) -> List[dict]:
+    """Every store this user oversees, across all their orgs. Each dict is a tenant
+    plus the org name and the user's role in that org."""
+    uid = (clerk_user_id or "").strip()
+    if not uid:
+        return []
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT {_tenant_select_cols('t')}, o.name, om.role
+            FROM tenants t
+            JOIN org_members om ON om.org_id = t.org_id
+            JOIN orgs o ON o.id = t.org_id
+            WHERE om.clerk_user_id = %s
+            ORDER BY t.name
+            """,
+            (uid,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        n = len(_TENANT_COLS)
+        out = []
+        for r in rows:
+            tenant = _row_to_tenant(r[:n])  # org_id comes through here
+            tenant["org_name"] = r[n]
+            tenant["org_role"] = r[n + 1]
+            out.append(tenant)
+        return out
+    except Exception as e:
+        print(f"[DB] Failed to load org stores: {e}")
+        return []
+
+
+def db_org_store_for_user(clerk_user_id: str, store_ref: str) -> Optional[dict]:
+    """Resolve one store a user may oversee, by client_id or tenant UUID.
+
+    Returns {"tenant": {...}, "role": "viewer"|"manager"} or None when the user has
+    no org membership covering that store.
+
+    The membership check IS the join — there is no path that fetches the store first
+    and authorizes second, so a caller cannot read a store outside their org by
+    guessing an id. Every caller must treat None as 403.
+    """
+    uid = (clerk_user_id or "").strip()
+    ref = (store_ref or "").strip()
+    if not uid or not ref:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        # id is cast to text (not the parameter) so a non-UUID ref can't raise.
+        cur.execute(
+            f"""
+            SELECT {_tenant_select_cols('t')}, om.role
+            FROM tenants t
+            JOIN org_members om ON om.org_id = t.org_id
+            WHERE om.clerk_user_id = %s AND (t.client_id = %s OR t.id::text = %s)
+            LIMIT 1
+            """,
+            (uid, ref, ref),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        n = len(_TENANT_COLS)
+        return {"tenant": _row_to_tenant(row[:n]), "role": row[n]}
+    except Exception as e:
+        print(f"[DB] Failed to resolve org store: {e}")
+        return None
+
+
+def db_org_list_all() -> List[dict]:
+    """Every org with its stores and overseers — the admin console view."""
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, created_at FROM orgs ORDER BY name")
+        orgs = [
+            {
+                "id": str(r[0]),
+                "name": r[1],
+                "created_at": r[2].isoformat() if r[2] else None,
+                "stores": [],
+                "members": [],
+                "pending_invites": [],
+            }
+            for r in cur.fetchall()
+        ]
+        if not orgs:
+            cur.close()
+            return []
+        by_id = {o["id"]: o for o in orgs}
+        cur.execute("SELECT org_id, id, client_id, name FROM tenants WHERE org_id IS NOT NULL")
+        for org_id, tid, cid, name in cur.fetchall():
+            org = by_id.get(str(org_id))
+            if org:
+                org["stores"].append({"tenant_id": str(tid), "client_id": cid, "name": name})
+        cur.execute("SELECT org_id, clerk_user_id, role FROM org_members")
+        for org_id, uid, role in cur.fetchall():
+            org = by_id.get(str(org_id))
+            if org:
+                org["members"].append({"clerk_user_id": uid, "role": role})
+        cur.execute("SELECT org_id, email, role FROM org_invites")
+        for org_id, email, role in cur.fetchall():
+            org = by_id.get(str(org_id))
+            if org:
+                org["pending_invites"].append({"email": email, "role": role})
+        cur.close()
+        return orgs
+    except Exception as e:
+        print(f"[DB] Failed to list orgs: {e}")
+        return []
+
+
+def db_org_store_metrics(client_ids: List[str], days: int = 7) -> dict:
+    """Headline metrics per store for the oversight rollup, keyed by client_id.
+
+    Aggregated in SQL across all stores at once rather than looping per store, so a
+    franchise with 50 shops is still three queries. Filters use the real created_at
+    timestamp, not call_log.start_iso — that column is TEXT and would be a string
+    comparison. appointments.date is also TEXT, but it's a zero-padded YYYY-MM-DD, so
+    lexicographic order matches date order there.
+    """
+    cids = [c for c in (client_ids or []) if c]
+    if not cids:
+        return {}
+    conn = _get_conn()
+    if not conn:
+        return {}
+    out = {c: {"calls": 0, "missed": 0, "bookings": 0, "upcoming": 0, "unread_messages": 0} for c in cids}
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT client_id,
+                   COUNT(*) FILTER (WHERE created_at >= %s) AS calls,
+                   COUNT(*) FILTER (WHERE created_at >= %s AND outcome IN ('missed', 'no_answer')) AS missed
+            FROM call_log WHERE client_id = ANY(%s) GROUP BY client_id
+            """,
+            (since, since, cids),
+        )
+        for cid, calls, missed in cur.fetchall():
+            out[cid]["calls"] = calls or 0
+            out[cid]["missed"] = missed or 0
+        cur.execute(
+            """
+            SELECT client_id,
+                   COUNT(*) FILTER (WHERE created_at >= %s AND source = 'receptionist') AS bookings,
+                   COUNT(*) FILTER (WHERE date >= %s AND status NOT IN ('cancelled', 'completed')) AS upcoming
+            FROM appointments WHERE client_id = ANY(%s) GROUP BY client_id
+            """,
+            (since, today, cids),
+        )
+        for cid, bookings, upcoming in cur.fetchall():
+            out[cid]["bookings"] = bookings or 0
+            out[cid]["upcoming"] = upcoming or 0
+        cur.execute(
+            """
+            SELECT client_id, COUNT(*) FILTER (WHERE status = 'unread') AS unread
+            FROM messages WHERE client_id = ANY(%s) GROUP BY client_id
+            """,
+            (cids,),
+        )
+        for cid, unread in cur.fetchall():
+            out[cid]["unread_messages"] = unread or 0
+        cur.close()
+    except Exception as e:
+        print(f"[DB] Failed to load org store metrics: {e}")
+    return out
+
 
 def db_tenant_get_members(tenant_id: str) -> List[str]:
     """Get all clerk_user_ids for a tenant."""
@@ -1614,6 +2253,126 @@ def db_tenant_set_billing_exempt(tenant_id: str, exempt_until: Optional[datetime
     except Exception as e:
         print(f"[DB] Failed to set billing exempt: {e}")
         return False
+
+def db_tenant_set_name(tenant_id: str, name: str) -> bool:
+    """Rename a tenant (the business name callers hear in the greeting). Returns True
+    on success; a blank name is rejected rather than wiping the column."""
+    clean = (name or "").strip()
+    if not clean:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE tenants SET name = %s WHERE id = %s", (clean[:120], tenant_id))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to set tenant name: {e}")
+        return False
+
+
+def db_tenant_set_demo_mode(tenant_id: str, enabled: bool) -> bool:
+    """Flag a tenant as a card-free demo account. Returns True on success."""
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE tenants SET demo_mode = %s WHERE id = %s", (bool(enabled), tenant_id))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to set demo mode: {e}")
+        return False
+
+
+# Tables holding the sample data a demo tenant is seeded with. Deliberately
+# EXCLUDES audit_events (the record that the demo existed and was purged must
+# survive), legal_holds, and sms_opt_out (an opt-out is a compliance record and
+# is never deleted, even a sample one).
+_DEMO_SEEDED_TABLES = (
+    "booked_slots",
+    "appointments",
+    "messages",
+    "call_log",
+    "caller_memory",
+    "leads",
+    "sms_sessions",
+    "sms_automations",
+    "tenant_usage",
+    "conversational_sms_period_usage",
+    "conversational_sms_session_keys",
+)
+
+
+def db_tenant_deactivate_demo(
+    tenant_id: str, replacement_config: Optional[dict] = None
+) -> Optional[dict]:
+    """Atomically convert a demo tenant to a real one: clear the demo flag and the
+    comped exemption, replace the sample business config, and purge every row of
+    seeded sample data.
+
+    Returns {"client_id": ..., "deleted": {table: n}} if this call did the
+    conversion, or None if the tenant was not in demo mode (already converted, or
+    never a demo). Stripe redelivers webhooks, so the demo_mode flag is *claimed*
+    by the same UPDATE that clears it — a redelivery finds demo_mode already false
+    and purges nothing. That claim is what makes it impossible for this to delete a
+    paying tenant's real data.
+
+    replacement_config is written in the same statement that clears the flag, so
+    the sample services can never outlive demo mode and end up read out to a real
+    caller. The caller builds it (config defaults are a config_service concern).
+
+    Everything runs in one transaction: either all of it happens, or none of it.
+    """
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        # Claim: only a row that is *currently* demo_mode yields a client_id here.
+        if replacement_config is not None:
+            cur.execute(
+                "UPDATE tenants SET demo_mode = FALSE, billing_exempt_until = NULL, "
+                "business_config = %s::jsonb "
+                "WHERE id = %s AND demo_mode = TRUE RETURNING client_id",
+                (json.dumps(replacement_config), tenant_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE tenants SET demo_mode = FALSE, billing_exempt_until = NULL "
+                "WHERE id = %s AND demo_mode = TRUE RETURNING client_id",
+                (tenant_id,),
+            )
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            cur.close()
+            return None
+        cid = row[0]
+        deleted: dict = {}
+        for table in _DEMO_SEEDED_TABLES:
+            try:
+                cur.execute(f"DELETE FROM {table} WHERE client_id = %s", (cid,))
+                deleted[table] = cur.rowcount
+            except Exception as e:
+                # A missing optional table must not strand the tenant in demo mode.
+                print(f"[DB] demo purge skipped {table}: {e}")
+        conn.commit()
+        cur.close()
+        return {"client_id": cid, "deleted": deleted}
+    except Exception as e:
+        print(f"[DB] Failed to deactivate demo tenant: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+
 
 def db_tenant_set_twilio_phone(tenant_id: str, twilio_phone_number: str) -> bool:
     """Update tenant inbound Twilio number (E.164). Used when the live Twilio number was not stored at create time."""

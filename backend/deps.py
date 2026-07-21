@@ -322,6 +322,64 @@ def _clerk_patch_user_tenant_metadata(clerk_user_id: str, tenant_id: str) -> boo
         return False
 
 
+# Header a multi-store overseer sends to say which store this request is about.
+STORE_HEADER = "X-Store-Id"
+# Methods a read-only org viewer may use. Anything else is a write.
+_READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _resolve_org_store(request: Request, user_id: str):
+    """Resolve the store an org overseer is asking for, or None if they aren't one.
+
+    Returns the tenant dict. Raises 403 if they asked for a store they don't oversee,
+    or if a read-only viewer tried to write.
+
+    This is the only place org access is granted, which is what makes it auditable:
+    db_org_store_for_user validates membership inside the fetch query, so there is no
+    window where an unauthorized store is loaded and then checked.
+    """
+    store_ref = (request.headers.get(STORE_HEADER) or "").strip()
+    if not store_ref or not runtime.USE_DB or not user_id:
+        return None
+    scoped = database.db_org_store_for_user(user_id, store_ref)
+    if not scoped:
+        # Miss. Distinguish the two reasons, because they deserve opposite answers:
+        # an overseer reaching for a store outside their org is a real 403, but a
+        # normal owner whose browser kept a stale header from some other session is
+        # not — 403ing them would lock them out of their own dashboard. Only the
+        # former has any org membership at all.
+        if database.db_org_memberships(user_id):
+            audit_log(
+                "user",
+                "auth_failure",
+                actor_id=user_id,
+                details={"reason": "store_not_in_org", "store_ref": store_ref[:64]},
+                request=request,
+            )
+            raise HTTPException(
+                status_code=403, detail="You do not have access to that store."
+            )
+        return None  # not an overseer — ignore the header, resolve them normally
+    role = (scoped.get("role") or "viewer").strip().lower()
+    if role != "manager" and request.method.upper() not in _READ_ONLY_METHODS:
+        audit_log(
+            "user",
+            "auth_failure",
+            actor_id=user_id,
+            details={
+                "reason": "org_viewer_write_blocked",
+                "method": request.method,
+                "client_id": (scoped.get("tenant") or {}).get("client_id"),
+            },
+            request=request,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Your account can view this store but not change it.",
+        )
+    return scoped.get("tenant")
+
+
 def require_tenant(request: Request):
     """
     Dependency: multi-tenant mode requires Bearer token; single-tenant uses CLIENT_ID env.
@@ -338,6 +396,13 @@ def require_tenant(request: Request):
         raise HTTPException(status_code=401, detail="Authorization required")
     user_id, tenant_id_from_meta = verify_clerk_token(token)
     _ensure_db_ready()
+    # Multi-store overseer picking a store. Checked first and returned early: their
+    # access comes from org membership, so none of the tenant_members resolution
+    # (or its one-tenant-per-user collapsing) below should run for them.
+    org_store = _resolve_org_store(request, user_id)
+    if org_store:
+        database.set_request_client_id(org_store["client_id"])
+        return org_store
     tenant = None
     preferred_tid = str(tenant_id_from_meta or "").strip() or None
     link = None

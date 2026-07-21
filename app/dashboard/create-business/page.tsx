@@ -73,8 +73,11 @@ export default function CreateBusinessPage() {
   const [existingNumber, setExistingNumber] = useState('')
   const [areaCode, setAreaCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [demoSubmitting, setDemoSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [checking, setChecking] = useState(true)
+  // They already have a seeded demo tenant and are here to turn it into a real one.
+  const [isDemo, setIsDemo] = useState(false)
   const [playingVoice, setPlayingVoice] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [referralCode, setReferralCode] = useState('')
@@ -126,20 +129,57 @@ export default function CreateBusinessPage() {
     return () => clearTimeout(handle)
   }, [referralCode, api])
 
-  // If they already have a live business, skip this and go to the dashboard.
+  // If they already have a live business, skip this and go to the dashboard. A demo
+  // tenant also has can_use_app (its access comes from a billing exemption), but it
+  // must still reach this form — this is the only way to activate.
   useEffect(() => {
     api
       .get('/api/subscription')
       .then((r) => {
-        if (r?.data?.can_use_app) router.replace('/dashboard')
-        else setChecking(false) // no tenant yet, or pending payment — show the form
+        if (r?.data?.can_use_app && !r?.data?.demo_mode) {
+          router.replace('/dashboard')
+          return
+        }
+        setIsDemo(Boolean(r?.data?.demo_mode))
+        setChecking(false) // no tenant yet, pending payment, or activating a demo
       })
       .catch(() => setChecking(false))
   }, [api, router])
 
+  // Prefill the business name for a demo tenant activating, so they aren't retyping
+  // it — and so an untouched field can't silently rename their shop.
+  useEffect(() => {
+    if (!isDemo) return
+    api
+      .get('/api/business-info')
+      .then((r) => {
+        const existing = (r?.data?.name || '').trim()
+        if (existing) setName((cur) => cur || existing)
+      })
+      .catch(() => {})
+  }, [isDemo, api])
+
   // 10 US digits (ignoring a leading country 1) before we let them forward an existing line.
   const existingDigits = existingNumber.replace(/\D/g, '').replace(/^1/, '')
   const existingValid = numberMode === 'new' || existingDigits.length === 10
+
+  // Card-free path: build a seeded demo tenant and drop them straight into it.
+  const startDemo = async () => {
+    if (!name.trim()) {
+      setError('Enter your business name first — the demo is set up under it.')
+      return
+    }
+    setDemoSubmitting(true)
+    setError(null)
+    try {
+      await api.post('/api/onboarding/start-demo', { name: name.trim() })
+      router.push('/dashboard')
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(typeof detail === 'string' ? detail : 'Could not start the demo. Please try again.')
+      setDemoSubmitting(false)
+    }
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -190,10 +230,22 @@ export default function CreateBusinessPage() {
     <AppChrome>
       <main className="min-h-screen px-4 py-10 md:px-6">
         <div className="mx-auto max-w-lg">
-          <h1 className="font-display text-2xl font-semibold text-white">Set up your business</h1>
+          <h1 className="font-display text-2xl font-semibold text-white">
+            {isDemo ? 'Activate your line' : 'Set up your business'}
+          </h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Tell us about your business and pick a plan. You&rsquo;ll add a card to start a 7-day free
-            trial — then we set up your AI phone line automatically.
+            {isDemo ? (
+              <>
+                Pick your plan and number, then add a card to start your 7-day free trial. Your
+                demo&rsquo;s sample calls, appointments and services are cleared when you activate,
+                so you&rsquo;ll set up your own services and team on a clean slate.
+              </>
+            ) : (
+              <>
+                Tell us about your business and pick a plan. You&rsquo;ll add a card to start a 7-day
+                free trial — then we set up your AI phone line automatically.
+              </>
+            )}
           </p>
 
           {error && (
@@ -414,7 +466,7 @@ export default function CreateBusinessPage() {
 
             <button
               type="submit"
-              disabled={submitting || !name.trim() || !existingValid}
+              disabled={submitting || demoSubmitting || !name.trim() || !existingValid}
               className="w-full rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 hover:brightness-110 disabled:opacity-50"
             >
               {submitting ? 'Starting checkout…' : 'Continue to payment'}
@@ -422,6 +474,23 @@ export default function CreateBusinessPage() {
             <p className="text-center text-xs text-zinc-500">
               {referralState === 'valid' ? 'First month free · cancel anytime' : 'Free for 7 days · cancel anytime'}
             </p>
+
+            {!isDemo && (
+              <div className="border-t border-white/10 pt-5">
+                <button
+                  type="button"
+                  onClick={startDemo}
+                  disabled={submitting || demoSubmitting || !name.trim()}
+                  className="w-full rounded-full border border-white/15 bg-zinc-950/40 px-6 py-3 text-sm font-semibold text-zinc-200 motion-safe-transition hover:border-white/30 hover:text-white disabled:opacity-50"
+                >
+                  {demoSubmitting ? 'Building your demo…' : 'Explore a demo dashboard first'}
+                </button>
+                <p className="mt-2 text-center text-xs text-zinc-500">
+                  No card needed. We&rsquo;ll fill a dashboard with sample calls and bookings so you
+                  can see how it works. Your trial doesn&rsquo;t start until you activate.
+                </p>
+              </div>
+            )}
           </form>
         </div>
       </main>

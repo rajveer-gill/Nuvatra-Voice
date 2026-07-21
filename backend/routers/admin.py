@@ -389,6 +389,167 @@ def admin_list_tenants(_: str = Depends(deps.require_admin)):
     return {"tenants": enriched, "db_enabled": True}
 
 
+# --- Orgs (multi-store oversight) ---------------------------------------------
+
+
+class AdminOrgCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class AdminOrgMemberAdd(BaseModel):
+    # Supply one of the two. clerk_user_id is exact; email is resolved via Clerk.
+    clerk_user_id: Optional[str] = None
+    email: Optional[str] = None
+    # viewer = read-only oversight (the default, and what a franchise usually wants).
+    role: str = Field(default="viewer")
+
+
+class AdminOrgAttach(BaseModel):
+    tenant_ids: List[str] = Field(default_factory=list)
+
+
+@router.get("/api/admin/orgs")
+def admin_list_orgs(_: str = Depends(deps.require_admin)):
+    """Every org with its stores and overseers."""
+    if not runtime.USE_DB:
+        return {"orgs": [], "db_enabled": False}
+    return {"orgs": database.db_org_list_all(), "db_enabled": True}
+
+
+@router.post("/api/admin/orgs")
+def admin_create_org(req: AdminOrgCreate, request: Request, admin: str = Depends(deps.require_admin)):
+    """Create an org — the group a multi-store account oversees."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    org = database.db_org_create(req.name)
+    if not org:
+        raise HTTPException(status_code=500, detail="Could not create org")
+    deps.audit_log(
+        "admin", "org_created", actor_id=admin, resource_type="org",
+        resource_id=org["id"], details={"name": org["name"]}, request=request,
+    )
+    return org
+
+
+@router.post("/api/admin/orgs/{org_id}/stores")
+def admin_attach_stores(
+    org_id: str, req: AdminOrgAttach, request: Request, admin: str = Depends(deps.require_admin)
+):
+    """Put existing stores into an org. Idempotent; re-attaching is a no-op."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    if not database.db_org_get_by_id(org_id):
+        raise HTTPException(status_code=404, detail="Org not found")
+    attached, failed = [], []
+    for tid in req.tenant_ids:
+        (attached if database.db_org_attach_tenant(tid, org_id) else failed).append(tid)
+    deps.audit_log(
+        "admin", "org_stores_attached", actor_id=admin, resource_type="org",
+        resource_id=org_id, details={"attached": attached, "failed": failed}, request=request,
+    )
+    return {"attached": attached, "failed": failed}
+
+
+@router.delete("/api/admin/orgs/{org_id}/stores/{tenant_id}")
+def admin_detach_store(
+    org_id: str, tenant_id: str, request: Request, admin: str = Depends(deps.require_admin)
+):
+    """Make a store independent again. Its own data and owner are untouched."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    ok = database.db_org_attach_tenant(tenant_id, None)
+    deps.audit_log(
+        "admin", "org_store_detached", actor_id=admin, resource_type="org",
+        resource_id=org_id, details={"tenant_id": tenant_id, "ok": ok}, request=request,
+    )
+    return {"ok": ok}
+
+
+@router.post("/api/admin/orgs/{org_id}/members")
+def admin_add_org_member(
+    org_id: str, req: AdminOrgMemberAdd, request: Request, admin: str = Depends(deps.require_admin)
+):
+    """Grant a user oversight of an org's stores.
+
+    Pass clerk_user_id to add an exact account immediately. Pass an email and they're
+    added now if they already have an account, or emailed an invite and added the
+    first time they sign in with that address.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    if not database.db_org_get_by_id(org_id):
+        raise HTTPException(status_code=404, detail="Org not found")
+    uid = (req.clerk_user_id or "").strip()
+    if uid:
+        if not database.db_org_member_add(uid, org_id, req.role):
+            raise HTTPException(status_code=500, detail="Could not add org member")
+        deps.audit_log(
+            "admin", "org_member_added", actor_id=admin, resource_type="org",
+            resource_id=org_id, details={"clerk_user_id": uid, "role": req.role}, request=request,
+        )
+        return {"ok": True, "added": True, "clerk_user_id": uid, "org_id": org_id, "role": req.role}
+    email = (req.email or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Provide clerk_user_id or email")
+    link = clerk_service._clerk_invite_email_to_org(email, org_id, req.role)
+    deps.audit_log(
+        "admin", "org_member_invited", actor_id=admin, resource_type="org",
+        resource_id=org_id,
+        details={"email": email, "role": req.role,
+                 "user_added": bool(link.get("user_added")),
+                 "invite_sent": bool(link.get("invite_sent"))},
+        request=request,
+    )
+    # Only a hard failure with nothing queued is an error; a stored-but-unsent invite
+    # (e.g. Clerk key missing) still links them if they sign up, so report it, don't 500.
+    if link.get("clerk_error") and not link.get("invite_sent") and not link.get("user_added") \
+            and not link.get("pending_invite_stored"):
+        raise HTTPException(status_code=502, detail=str(link.get("clerk_error")))
+    return {
+        "ok": True,
+        "added": bool(link.get("user_added")),
+        "invite_sent": bool(link.get("invite_sent")),
+        "pending": bool(link.get("pending_invite_stored")) and not link.get("user_added"),
+        "clerk_error": link.get("clerk_error"),
+        "org_id": org_id,
+        "role": req.role,
+    }
+
+
+class AdminOrgInviteRevoke(BaseModel):
+    email: str
+
+
+@router.delete("/api/admin/orgs/{org_id}/invites")
+def admin_revoke_org_invite(
+    org_id: str, req: AdminOrgInviteRevoke, request: Request, admin: str = Depends(deps.require_admin)
+):
+    """Cancel a pending (not-yet-accepted) org invite."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    ok = database.db_org_invite_delete(req.email, org_id)
+    deps.audit_log(
+        "admin", "org_invite_revoked", actor_id=admin, resource_type="org",
+        resource_id=org_id, details={"email": req.email, "ok": ok}, request=request,
+    )
+    return {"ok": ok}
+
+
+@router.delete("/api/admin/orgs/{org_id}/members/{clerk_user_id}")
+def admin_remove_org_member(
+    org_id: str, clerk_user_id: str, request: Request, admin: str = Depends(deps.require_admin)
+):
+    """Revoke a user's oversight of an org."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    ok = database.db_org_member_remove(clerk_user_id, org_id)
+    deps.audit_log(
+        "admin", "org_member_removed", actor_id=admin, resource_type="org",
+        resource_id=org_id, details={"clerk_user_id": clerk_user_id, "ok": ok}, request=request,
+    )
+    return {"ok": ok}
+
+
 @router.post("/api/admin/tenants/bulk", deprecated=True)
 def admin_bulk_create_tenants(_admin: str = Depends(deps.require_admin)):
     """Deprecated. The synchronous bulk-create timed out and left tenants

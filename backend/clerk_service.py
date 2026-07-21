@@ -209,6 +209,113 @@ def _clerk_relink_user_to_tenant(
     return displaced
 
 
+def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") -> dict:
+    """Invite someone to oversee/manage a group by email.
+
+    If they already have a Clerk account, add them to org_members right now — no email
+    needed. Otherwise store a pending org invite and send a Clerk invitation; the
+    invite is turned into membership the first time they sign in with this email
+    (routers/org.get_org_me -> database.db_org_invites_consume_for_emails).
+
+    Returns {invite_sent, user_added, pending_invite_stored, clerk_error}.
+    """
+    email = (email or "").strip()
+    role = (role or "viewer").strip().lower()
+    if not email or "@" not in email:
+        return {
+            "invite_sent": False,
+            "user_added": False,
+            "pending_invite_stored": False,
+            "clerk_error": "Valid email required",
+        }
+    lowered = email.lower()
+    if lowered.endswith(("@example.com", "@example.org", "@test.com")):
+        # Still store the pending invite (a test may sign up later) but be honest that
+        # no mail can go to a placeholder address.
+        database.db_org_invite_upsert(email, org_id, role)
+        return {
+            "invite_sent": False,
+            "user_added": False,
+            "pending_invite_stored": True,
+            "clerk_error": f"{email} is a placeholder address and cannot receive mail.",
+        }
+    clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if not clerk_secret:
+        database.db_org_invite_upsert(email, org_id, role)
+        return {
+            "invite_sent": False,
+            "user_added": False,
+            "pending_invite_stored": True,
+            "clerk_error": "CLERK_SECRET_KEY is not set on the backend. Invite email not sent.",
+        }
+    import httpx
+
+    headers = {"Authorization": f"Bearer {clerk_secret}", "Content-Type": "application/json"}
+    # Already have an account? Add them directly — no invite email, immediate access.
+    existing = _clerk_user_ids_for_email(email, headers)
+    if existing:
+        if len(existing) > 1:
+            print(f"[Admin] {email!r} matches {len(existing)} Clerk users; adding the first to org.")
+        database.db_org_member_add(existing[0], org_id, role)
+        deps._admin_access_log("invite_email_to_org", tenant_id=org_id, email=email, user_added=True)
+        return {
+            "invite_sent": False,
+            "user_added": True,
+            "pending_invite_stored": False,
+            "clerk_error": None,
+            "clerk_user_id": existing[0],
+        }
+    # No account yet: queue the invite and email them.
+    database.db_org_invite_upsert(email, org_id, role)
+    invite_sent = False
+    clerk_error: Optional[str] = None
+    try:
+        resp = httpx.post(
+            "https://api.clerk.com/v1/invitations",
+            headers=headers,
+            json={
+                "email_address": email,
+                # Carried for reference only — membership is materialized by matching
+                # the verified email at login, not by trusting this metadata.
+                "public_metadata": {"org_id": org_id, "org_role": role},
+                "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/dashboard/stores",
+            },
+            timeout=10.0,
+        )
+        if resp.status_code < 400:
+            invite_sent = True
+        else:
+            body = resp.text or ""
+            # A race: the account was created between the lookup and here. Add directly.
+            if resp.status_code == 422 and "form_identifier_exists" in body:
+                retry = _clerk_user_ids_for_email(email, headers)[:1]
+                if retry:
+                    database.db_org_member_add(retry[0], org_id, role)
+                    database.db_org_invite_delete(email, org_id)
+                    return {
+                        "invite_sent": False,
+                        "user_added": True,
+                        "pending_invite_stored": False,
+                        "clerk_error": None,
+                        "clerk_user_id": retry[0],
+                    }
+            clerk_error = _clerk_invite_error_message(resp.status_code, body)
+            print(f"[Admin] Clerk org invite failed: {resp.status_code} {body[:200]}")
+    except Exception as e:
+        clerk_error = str(e)[:240]
+        print(f"[Admin] Clerk org invite error: {e}")
+    deps._admin_access_log(
+        "invite_email_to_org", tenant_id=org_id, email=email, invite_sent=invite_sent,
+        clerk_error=(clerk_error or "")[:120] if clerk_error else None,
+    )
+    return {
+        "invite_sent": invite_sent,
+        "user_added": False,
+        "pending_invite_stored": True,
+        "clerk_error": clerk_error,
+    }
+
+
 def _clerk_link_email_to_tenant(email: str, tenant_id: str) -> dict:
     """
     Queue pending invite by email and either re-link an existing Clerk user or send a new invitation.

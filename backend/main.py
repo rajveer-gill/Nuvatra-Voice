@@ -608,6 +608,7 @@ from routers import phone as phone_router
 from routers import business as business_router
 from routers import core as core_router
 from routers import feedback as feedback_router
+from routers import org as org_router
 
 app.include_router(health_router.router)
 app.include_router(leads_router.router)
@@ -624,6 +625,7 @@ app.include_router(phone_router.router)
 app.include_router(business_router.router)
 app.include_router(core_router.router)
 app.include_router(feedback_router.router)
+app.include_router(org_router.router)
 
 # The inbound-SMS handler + its SMS-only helpers now live in routers/sms; re-export so
 # tests that inspect main.handle_incoming_sms or import _is_sms_confirmation keep working.
