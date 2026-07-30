@@ -305,7 +305,11 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (access !== 'granted' || !setupStatus) return
+    // A demo has no phone line by design, so webhooks_configured is always false for
+    // one — without this guard the demo bounces straight to the setup checklist and
+    // the prospect never sees the dashboard they came to look at.
     const needsOnboarding =
+      !subscription?.demo_mode &&
       !setupStatus.onboarding_completed_at &&
       (setupStatus.voice_ready === false || setupStatus.webhooks_configured === false)
     if (needsOnboarding && typeof window !== 'undefined') {
@@ -314,7 +318,7 @@ export default function DashboardPage() {
         router.replace('/dashboard/onboarding')
       }
     }
-  }, [access, setupStatus, router])
+  }, [access, setupStatus, subscription, router])
 
   const showVoiceSetupWarning = access === 'granted' && setupStatus?.voice_ready === false
   const rosterOnlyGap =
