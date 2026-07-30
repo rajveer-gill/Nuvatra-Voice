@@ -16,6 +16,9 @@ export type SetupWizardStatus = {
   number_mode?: 'new' | 'existing'
   existing_business_number?: string | null
   ai_phone_number?: string | null
+  // Demo accounts never get a phone line — the go-live step says so instead of
+  // claiming a number is being provisioned.
+  demo_mode?: boolean
   onboarding_completed_at?: string | null
 }
 
@@ -65,13 +68,17 @@ function buildSteps(status: SetupWizardStatus | null): Step[] {
   const existingNumber = (status?.existing_business_number || '').trim()
   const aiLine = (status?.ai_phone_number || '').trim()
   // Concrete provisioning status + ETA instead of an open-ended "we'll let you know".
-  const goLiveDescription = goLiveDone
-    ? bringYourOwn
-      ? 'Your AI line is ready — forward your existing number to it (steps below) and you’re live.'
-      : 'Your dedicated phone line is active and answering calls.'
-    : status?.twilio_number_set
-      ? 'Your number is assigned — we’re finishing the connection. This page updates automatically, usually within a few minutes.'
-      : 'We’re provisioning your dedicated phone number. This usually takes just a few minutes — nothing needed from you, and it’ll appear here the moment it’s ready.'
+  // A demo account is the exception: it deliberately never gets a line, so promising
+  // one is a lie the user will eventually catch.
+  const goLiveDescription = status?.demo_mode
+    ? 'Demo accounts don’t get a phone line — this is a preview of the dashboard. Activate to get your number and start taking real calls.'
+    : goLiveDone
+      ? bringYourOwn
+        ? 'Your AI line is ready — forward your existing number to it (steps below) and you’re live.'
+        : 'Your dedicated phone line is active and answering calls.'
+      : status?.twilio_number_set
+        ? 'Your number is assigned — we’re finishing the connection. This page updates automatically, usually within a few minutes.'
+        : 'We’re provisioning your dedicated phone number. This usually takes just a few minutes — nothing needed from you, and it’ll appear here the moment it’s ready.'
   // Once the AI line is live and they chose to bring their own number, the forwarding
   // setup is the owner's last step — surface it inline.
   const goLiveExtra =

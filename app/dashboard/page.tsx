@@ -5,7 +5,7 @@ import { UserButton } from '@clerk/nextjs'
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig, getSelectedStoreId, setSelectedStoreId } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { PlanPicker } from '@/components/PlanPicker'
@@ -618,22 +618,25 @@ export default function DashboardPage() {
             ))}
           </div>
 
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeTab}
-              role="tabpanel"
-              initial={reduceMotion ? false : { opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={reduceMotion ? undefined : { opacity: 0, y: -8 }}
-              transition={panelTransition}
-            >
-              {activeTab === 'appointments' && <Appointments />}
-              {activeTab === 'leads' && <Leads locked={!subscription?.limits?.has_lead_capture} />}
-              {activeTab === 'messages' && <Messages />}
-              {activeTab === 'dashboard' && <Dashboard />}
-              {activeTab === 'settings' && <Settings />}
-            </motion.div>
-          </AnimatePresence>
+          {/* No AnimatePresence here on purpose. It was wrapping this panel with
+              mode="wait", which holds the incoming child until the outgoing one has
+              finished exiting — and every panel below is a lazy dynamic() chunk that
+              suspends while it loads. The result was a permanently blank panel for
+              every tab except the default one (which mounts without a wait cycle).
+              Keying the div on activeTab still remounts + fades each panel in. */}
+          <motion.div
+            key={activeTab}
+            role="tabpanel"
+            initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={panelTransition}
+          >
+            {activeTab === 'appointments' && <Appointments />}
+            {activeTab === 'leads' && <Leads locked={!subscription?.limits?.has_lead_capture} />}
+            {activeTab === 'messages' && <Messages />}
+            {activeTab === 'dashboard' && <Dashboard />}
+            {activeTab === 'settings' && <Settings />}
+          </motion.div>
 
           <footer className="mt-12 border-t border-white/10 pt-6 text-center text-sm text-zinc-500">
             <Link href="/terms" className="motion-safe-transition hover:text-zinc-300">

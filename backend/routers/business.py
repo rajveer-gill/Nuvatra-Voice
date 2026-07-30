@@ -219,9 +219,16 @@ def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) ->
 
 
 def get_setup_status(
-    info_override: Optional[dict] = None, *, twilio_phone: Optional[str] = None
+    info_override: Optional[dict] = None,
+    *,
+    twilio_phone: Optional[str] = None,
+    is_demo: bool = False,
 ) -> dict:
-    """Return setup completeness. Uses info_override if provided (e.g. with tenant phone merged), else config_service.get_business_info()."""
+    """Return setup completeness. Uses info_override if provided (e.g. with tenant phone merged), else config_service.get_business_info().
+
+    is_demo suppresses the "your number is on its way" messaging — a demo account
+    deliberately never gets a phone line, so promising one is a lie.
+    """
     info = info_override if info_override is not None else config_service.get_business_info()
     missing: List[str] = []
     warnings: List[str] = []
@@ -319,6 +326,9 @@ def get_setup_status(
         # The provisioned Twilio line — surfaced so the onboarding wizard can show the
         # "forward <existing> → <ai line>" instruction once the number is assigned.
         "ai_phone_number": (twilio_phone or "").strip() or None,
+        # A demo account never gets a phone line, so the wizard must not claim one is
+        # on its way — see SetupWizard's go-live step.
+        "demo_mode": bool(is_demo),
         "onboarding_completed_at": (info.get("onboarding_completed_at") or "").strip()
         or None,
     }
@@ -476,7 +486,11 @@ def api_setup_status(
     """Return which required/recommended business info fields are missing. Used for setup checklist."""
     info = config_service.business_info_for_dashboard(tenant)
     twilio_phone = (tenant or {}).get("twilio_phone_number") if tenant else None
-    body = get_setup_status(info_override=info, twilio_phone=twilio_phone)
+    body = get_setup_status(
+        info_override=info,
+        twilio_phone=twilio_phone,
+        is_demo=bool((tenant or {}).get("demo_mode")),
+    )
     if deps._settings_load_debug_enabled():
         cid = (tenant or {}).get("client_id") if tenant else None
         prefix = (str(cid)[:10] + "…") if cid else "none"
@@ -730,7 +744,11 @@ def api_onboarding_complete(
     config_service.save_raw_client_config(cid, raw)
     info = config_service.business_info_for_dashboard(tenant)
     twilio_phone = tenant.get("twilio_phone_number")
-    return get_setup_status(info_override=info, twilio_phone=twilio_phone)
+    return get_setup_status(
+        info_override=info,
+        twilio_phone=twilio_phone,
+        is_demo=bool(tenant.get("demo_mode")),
+    )
 
 
 @router.patch("/api/business-info")
