@@ -36,6 +36,169 @@ class AppointmentRequest(BaseModel):
     staff_id: Optional[str] = None  # stylist UUID from Settings staff list
 
 
+# ---------- Import from an external booking system (paste-in) ----------
+
+
+class ImportPreviewRequest(BaseModel):
+    # Raw text copied out of the external system's queue/day view.
+    text: str = Field(..., max_length=40000)
+    # The day the paste covers; queue views usually omit the date.
+    date: Optional[str] = None
+
+
+class ImportedAppointment(BaseModel):
+    customer_name: str
+    service: str = ""
+    stylist: str = ""
+    date: str
+    time: str
+    is_request: bool = False
+    notes: str = ""
+
+
+class ImportCommitRequest(BaseModel):
+    appointments: list[ImportedAppointment] = Field(default_factory=list)
+
+
+def _require_external_booking(tenant: Optional[dict]) -> str:
+    """Import only makes sense when someone else owns the calendar. For an internal
+    store, pasting appointments in would create rows that compete with the real
+    booking flow, so it's refused rather than quietly allowed."""
+    cid = deps._bind_tenant_db_context(tenant)
+    if not config_service.is_external_booking():
+        raise HTTPException(
+            status_code=400,
+            detail="Appointment import is only available for stores whose calendar lives in another system.",
+        )
+    return cid
+
+
+@router.post("/api/appointments/import/preview")
+def import_appointments_preview(
+    req: ImportPreviewRequest,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Analyze pasted text and return what we found. Writes NOTHING.
+
+    The preview exists so a misread time is caught by a human before it reaches the
+    calendar — the paste is parsed by an LLM, and this is the checkpoint on that.
+    Rows already imported are flagged so re-pasting a day is obvious and safe.
+    """
+    import appointment_import
+
+    cid = _require_external_booking(tenant)
+    result = appointment_import.parse_pasted_appointments(req.text, default_date=req.date)
+    rows = result.get("appointments") or []
+    existing = {
+        appointment_import.import_key(
+            {"date": a.get("date"), "time": a.get("time"), "customer_name": a.get("name")}
+        )
+        for a in (database.db_appointments_get_all(client_id=cid) if runtime.USE_DB else [])
+    }
+    new_count = 0
+    for r in rows:
+        r["already_imported"] = appointment_import.import_key(r) in existing
+        if not r["already_imported"]:
+            new_count += 1
+    system_info(
+        "appointment_import_preview",
+        client_id=cid,
+        found=len(rows),
+        new=new_count,
+        chars=len(req.text or ""),
+    )
+    return {
+        "appointments": rows,
+        "warnings": result.get("warnings") or [],
+        "found": len(rows),
+        "new": new_count,
+        "already_imported": len(rows) - new_count,
+        # Stamp so the UI can show "as of ..." — a paste is a snapshot, never live.
+        "analyzed_at": datetime.now().isoformat(),
+    }
+
+
+@router.post("/api/appointments/import/commit")
+def import_appointments_commit(
+    req: ImportCommitRequest,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Persist reviewed rows from a preview.
+
+    Imported rows are recorded as already-confirmed appointments (they exist in the
+    other system — that's the source of truth), and no calendar slot is reserved here.
+    Idempotent on date+time+name, so re-pasting the same day updates rather than
+    duplicating.
+    """
+    import appointment_import
+
+    cid = _require_external_booking(tenant)
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    existing = {}
+    for a in database.db_appointments_get_all(client_id=cid):
+        key = appointment_import.import_key(
+            {"date": a.get("date"), "time": a.get("time"), "customer_name": a.get("name")}
+        )
+        existing[key] = a
+    created, updated, skipped, invalid = 0, 0, 0, 0
+    for row in req.appointments:
+        data = row.model_dump()
+        # Re-validate here, not just in preview: these rows are hand-editable in the UI
+        # and this endpoint accepts arbitrary client JSON, so a bad date/time must never
+        # reach the calendar on the strength of the client having sent it.
+        data["time"] = appointment_import._normalize_time(data.get("time"))
+        data["date"] = appointment_import._normalize_date(data.get("date"))
+        data["customer_name"] = (data.get("customer_name") or "").strip()[:200]
+        if not (data["time"] and data["date"] and data["customer_name"]):
+            invalid += 1
+            continue
+        key = appointment_import.import_key(data)
+        # Service name carries the stylist/notes context that our schema has no column
+        # for, so it's folded into `reason` — the field the dashboard already displays.
+        reason_bits = [b for b in (data.get("service"), data.get("notes")) if b]
+        reason = " — ".join(reason_bits) or "Imported appointment"
+        if key in existing:
+            prior = existing[key]
+            try:
+                database.db_appointments_update(
+                    prior["id"], client_id=cid, reason=reason, status="confirmed"
+                )
+                updated += 1
+            except Exception as e:
+                system_info("appointment_import_update_failed", apt_id=prior.get("id"), error=str(e))
+                skipped += 1
+            continue
+        try:
+            database.db_appointments_insert(
+                {
+                    "client_id": cid,
+                    "name": data["customer_name"],
+                    "email": "",
+                    "phone": "",
+                    "date": data["date"],
+                    "time": data["time"],
+                    "reason": reason,
+                    # Already booked in the other system — not awaiting anyone here.
+                    "status": "confirmed",
+                    "source": "imported",
+                    "staff_id": None,
+                }
+            )
+            created += 1
+        except Exception:
+            skipped += 1
+    system_info(
+        "appointment_import_commit",
+        client_id=cid,
+        created=created,
+        updated=updated,
+        skipped=skipped,
+        invalid=invalid,
+    )
+    return {"created": created, "updated": updated, "skipped": skipped, "invalid": invalid}
+
+
 class AppointmentUpdate(BaseModel):
     status: Optional[str] = None
     date: Optional[str] = None

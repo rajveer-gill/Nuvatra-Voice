@@ -1002,7 +1002,13 @@ def _create_appointment_from_booking(
     is only reserved after the customer SMS-confirms (see handle_incoming_sms)."""
     date = (booking.get("date") or "").strip()
     time_raw = (booking.get("time") or "").strip()
-    ctx = booking_context_from_business(config_service.get_business_info())
+    _business_info = config_service.get_business_info()
+    ctx = booking_context_from_business(_business_info)
+    # External-booking stores (e.g. Zenoti) keep their real calendar elsewhere, so we
+    # never check or reserve a slot here — we just capture the request for staff to
+    # enter on their side. Internal stores (the default, every other customer) keep
+    # the full slot-checking + reserve flow below unchanged.
+    external = config_service.is_external_booking(_business_info)
     time = normalize_booking_time(time_raw) or ""
     if not is_valid_booking_date(date) or not looks_like_booking_time(time, ctx):
         return None
@@ -1017,28 +1023,56 @@ def _create_appointment_from_booking(
     canonical_service, _ = booking_service._normalize_service_choice_for_booking(booking.get("reason"))
     if canonical_service:
         booking["reason"] = canonical_service
-    duration_min = booking_service._booking_duration_minutes(booking)
-    _supersede_pending_customer_drafts_for_slot(
-        date,
-        time,
-        staff_key,
-        client_id=cid_for_slot,
-        phone=(booking.get("phone") or "").strip(),
-    )
-    if not booking_service.is_slot_available(date, time, duration_min, staff_key):
-        booking_service._invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
-        blockers = booking_service._slot_blocking_details(
-            date, time, duration_min, staff_key
-        )
+
+    # --- Structural booking guards -------------------------------------------
+    # These are enforced in code, not just asked for in the prompt, because a model
+    # having an off day must not be able to book them anyway (same reasoning as the
+    # false-booking-confirm guard). Both are no-ops unless the store configured them,
+    # so every other customer is unaffected.
+    requested_service = (booking.get("reason") or "").strip()
+    if config_service.service_requires_consult(requested_service, _business_info):
+        # e.g. corrective color: nobody knows the scope, price, or who's qualified
+        # until a stylist speaks to the guest.
         system_info(
-            "booking_create_failed_slot_taken",
-            name=name,
-            date=date,
-            time=time,
+            "booking_blocked_consult_required",
+            service=requested_service,
             client_id=cid_for_slot,
-            blocking=blockers,
+            name=name,
         )
         return None
+    if config_service.is_addon_service(requested_service, _business_info):
+        # An add-on (conditioner, hot tools, length/master-stylist charge) rides along
+        # with a real service — it can never be the whole appointment.
+        system_info(
+            "booking_blocked_addon_only",
+            service=requested_service,
+            client_id=cid_for_slot,
+            name=name,
+        )
+        return None
+    duration_min = booking_service._booking_duration_minutes(booking)
+    if not external:
+        _supersede_pending_customer_drafts_for_slot(
+            date,
+            time,
+            staff_key,
+            client_id=cid_for_slot,
+            phone=(booking.get("phone") or "").strip(),
+        )
+        if not booking_service.is_slot_available(date, time, duration_min, staff_key):
+            booking_service._invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
+            blockers = booking_service._slot_blocking_details(
+                date, time, duration_min, staff_key
+            )
+            system_info(
+                "booking_create_failed_slot_taken",
+                name=name,
+                date=date,
+                time=time,
+                client_id=cid_for_slot,
+                blocking=blockers,
+            )
+            return None
     appointment_data = {
         "name": name,
         "email": (booking.get("email") or "").strip(),
@@ -1047,7 +1081,10 @@ def _create_appointment_from_booking(
         "time": time,
         "reason": (booking.get("reason") or "").strip() or "—",
         "source": "receptionist",
-        "status": "pending_customer",
+        # External: land straight in the store's approval queue (pending_review) — the
+        # request goes to staff, not through an SMS-confirm gate the (older) caller may
+        # never complete. Internal: unchanged (pending_customer -> SMS confirm).
+        "status": "pending_review" if external else "pending_customer",
         "staff_id": staff_key,
     }
     if client_id_override:
@@ -1060,7 +1097,7 @@ def _create_appointment_from_booking(
         appointment_data["id"] = apt_id
         appointment_data["created_at"] = datetime.now().isoformat()
         runtime.appointments.append(appointment_data)
-    if reserve_slot_immediately:
+    if reserve_slot_immediately and not external:
         if not booking_service.reserve_slot(date, time, apt_id, duration_min, staff_key):
             # Concurrent booking won the slot between our availability check and reserve.
             if runtime.USE_DB:
@@ -1077,7 +1114,7 @@ def _create_appointment_from_booking(
     appointment_data["id"] = apt_id
     appointment_data.setdefault("created_at", datetime.now().isoformat())
     system_info(
-        "booking_created_pending_customer",
+        "booking_created_request" if external else "booking_created_pending_customer",
         apt_id=apt_id,
         client_id=appointment_data.get("client_id") or "(request_context)",
         name=name,

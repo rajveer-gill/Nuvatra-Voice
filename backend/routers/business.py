@@ -512,6 +512,28 @@ def _normalize_us_phone_display(raw: Optional[str]) -> str:
     return (raw or "").strip()
 
 
+def _create_account_org(user_id: str, name: str, tenant: dict, plan: str) -> Optional[str]:
+    """Wrap a brand-new store in an org and make the signer-up its manager.
+
+    Every account is an org, whether it holds one store or thirty-four. That means
+    there's a single shape in the system — billing and identity live on the org, a
+    store is just a phone line and a calendar under it — so opening a second location
+    later is "add a store", not a migration onto a different kind of account.
+
+    Returns the org id, or None if the org couldn't be created (the store is still
+    usable on its own, so this never blocks signup).
+    """
+    org = database.db_org_create(name)
+    if not org:
+        logger.error("signup_org_create_failed user=%s name=%r", user_id, name)
+        return None
+    database.db_org_update_subscription(org["id"], plan=plan)
+    database.db_org_attach_tenant(tenant["id"], org["id"])
+    # "manager" (not viewer): it's their own account — they provision and edit it.
+    database.db_org_member_add(user_id, org["id"], "manager")
+    return org["id"]
+
+
 def _unique_client_id(name: str) -> str:
     """Slugify the business name into a stable, unique client_id (lowercase a-z0-9-)."""
     base = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:40] or "business"
@@ -588,6 +610,9 @@ def api_create_business(
     if req.number_mode == "existing":
         cfg["existing_business_number"] = existing_number
     config_service.save_raw_client_config(client_id, cfg)
+    org_id = _create_account_org(user_id, name, tenant, req.plan)
+    # Still a member of their first store, so logging in lands them straight in it
+    # rather than on a one-row store list.
     database.db_tenant_member_set_single(user_id, tenant["id"])
     deps._clerk_patch_user_tenant_metadata(user_id, tenant["id"])
     deps.audit_log(
@@ -597,10 +622,10 @@ def api_create_business(
         resource_type="tenant",
         resource_id=tenant["id"],
         client_id=client_id,
-        details={"name": name, "plan": req.plan, "vertical": bv},
+        details={"name": name, "plan": req.plan, "vertical": bv, "org_id": org_id},
         request=request,
     )
-    return {"tenant": tenant, "already_existed": False}
+    return {"tenant": tenant, "org_id": org_id, "already_existed": False}
 
 
 class StartDemoRequest(BaseModel):
@@ -662,6 +687,9 @@ def api_start_demo(
     except Exception as e:
         logger.exception("demo_seed_failed client_id=%s", client_id)
         raise deps._server_error("Could not build the demo dashboard", e)
+    # A demo is an account too, so it has the same shape as a paid one — nothing has
+    # to be restructured when they activate.
+    org_id = _create_account_org(user_id, name, tenant, "pro")
     database.db_tenant_member_set_single(user_id, tenant["id"])
     deps._clerk_patch_user_tenant_metadata(user_id, tenant["id"])
     deps.audit_log(
@@ -671,12 +699,12 @@ def api_start_demo(
         resource_type="tenant",
         resource_id=tenant["id"],
         client_id=client_id,
-        details={"name": name, "vertical": bv, "seeded": counts},
+        details={"name": name, "vertical": bv, "seeded": counts, "org_id": org_id},
         request=request,
     )
-    # Re-read so the response carries demo_mode / billing_exempt_until.
+    # Re-read so the response carries demo_mode / billing_exempt_until / org_id.
     fresh = database.db_tenant_get_by_id(tenant["id"]) or tenant
-    return {"tenant": fresh, "already_existed": False, "seeded": counts}
+    return {"tenant": fresh, "org_id": org_id, "already_existed": False, "seeded": counts}
 
 
 @router.post("/api/onboarding/complete")

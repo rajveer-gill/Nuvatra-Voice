@@ -134,6 +134,9 @@ def format_service_catalog_for_prompt(catalog: List[dict]) -> str:
             meta.append(price)
         if duration:
             meta.append(duration)
+        # Add-ons attach to a real service; they are never the appointment on their own.
+        if entry.get("is_addon"):
+            meta.append("ADD-ON only")
         suffix = f" — {', '.join(meta)}" if meta else ""
         lines.append(f'  • "{name}"{suffix}')
     if not lines:
@@ -197,6 +200,7 @@ def build_system_prompt(
                     "name": nm,
                     "price": s.get("price", 0),
                     "duration_minutes": s.get("duration_minutes", ""),
+                    "is_addon": bool(s.get("is_addon", False)),
                 }
             )
     else:
@@ -235,10 +239,35 @@ def build_system_prompt(
         help_lines.append(f"- Location: {address}")
     if services_prompt_block:
         help_lines.append(services_prompt_block)
-        if any(_format_price_for_prompt(e.get("price")) for e in service_catalog):
-            help_lines.append(
-                "- Pricing: When callers ask how much a service costs, answer from the prices in the Services menu above."
-            )
+    # Per-store booking policy. Both lists are empty for every store that hasn't
+    # configured them, so nothing below is added to the prompt by default.
+    addon_names = [e["name"] for e in service_catalog if e.get("is_addon")]
+    if addon_names:
+        help_lines.append(
+            "- ADD-ONS: these are extras that attach to a real service and can NEVER be "
+            "the whole appointment: "
+            + ", ".join(f'"{n}"' for n in addon_names)
+            + ". If the caller asks for one on its own, ask which main service it goes with."
+        )
+    consult_only = business_info.get("consult_only_services") or []
+    if consult_only:
+        help_lines.append(
+            "- NEVER BOOK these services — they need to be discussed with the salon first: "
+            + ", ".join(f'"{str(s).strip()}"' for s in consult_only if str(s).strip())
+            + ". If the caller asks for one, do NOT offer a time and do NOT book. Explain that "
+            "this service needs a quick conversation with a stylist first, take their name, "
+            "number and what they're after, and tell them the salon will call them back."
+        )
+    booking_rules = business_info.get("booking_rules") or []
+    if booking_rules:
+        help_lines.append(
+            "- BOOKING POLICIES (follow exactly):\n"
+            + "\n".join(f"  • {str(r).strip()}" for r in booking_rules if str(r).strip())
+        )
+    if any(_format_price_for_prompt(e.get("price")) for e in service_catalog):
+        help_lines.append(
+            "- Pricing: When callers ask how much a service costs, answer from the prices in the Services menu above."
+        )
     if specials_list:
         help_lines.append(f"- Specials / promotions: {specials_list}")
     if reservation_info:

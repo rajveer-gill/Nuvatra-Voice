@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -56,6 +57,10 @@ def _normalize_service_entries(raw) -> List[dict]:
                     "name": str(s.get("name") or "")[:200],
                     "price": max(0.0, min(price, 999999.0)),
                     "duration_minutes": max(5, min(dm, 480)),
+                    # An add-on rides along with a real service and can never be the
+                    # whole appointment (conditioners, hot tools, length/master-stylist
+                    # charges). Defaults False, so every existing service is unchanged.
+                    "is_addon": bool(s.get("is_addon", False)),
                 }
             )
         return out[:100]
@@ -68,6 +73,7 @@ def _normalize_service_entries(raw) -> List[dict]:
                     "name": t[:200],
                     "price": 0.0,
                     "duration_minutes": 30,
+                    "is_addon": False,  # legacy string services are always bookable
                 }
             )
     return out[:100]
@@ -119,6 +125,76 @@ def _normalize_rule_entries(raw) -> List[dict]:
     return out[:100]
 
 
+# Appointment-calendar ownership. "internal" is the default and the historical
+# behavior; a value we don't recognize floors to internal so a typo can never flip a
+# store into request-mode and silently stop it booking.
+BOOKING_MODES = ("internal", "external")
+
+
+def _normalize_booking_mode(raw) -> str:
+    m = (str(raw or "").strip().lower())
+    return m if m in BOOKING_MODES else "internal"
+
+
+def _normalize_str_list(raw, cap: int) -> List[str]:
+    """Trimmed, de-duplicated, capped list of non-empty strings."""
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    seen = set()
+    for item in raw:
+        s = str(item or "").strip()[:300]
+        key = s.lower()
+        if s and key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out[:cap]
+
+
+def _service_key(name: str) -> str:
+    """Loose comparison key: lowercase, alphanumerics only. Lets 'Corrective Color
+    (charged by the hour)*' match a caller saying 'corrective color'."""
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+
+
+def service_requires_consult(service_name: str, info: Optional[dict] = None) -> bool:
+    """True when this service must not be booked over the phone and needs a human.
+
+    Substring match in both directions so the configured entry ("Corrective Color")
+    catches the fuller catalog name and a caller's shorter phrasing alike. Always
+    False when the store configured nothing, which is every store by default.
+    """
+    key = _service_key(service_name)
+    if not key:
+        return False
+    data = info if info is not None else get_business_info()
+    for entry in data.get("consult_only_services") or []:
+        ek = _service_key(entry)
+        if ek and (ek in key or key in ek):
+            return True
+    return False
+
+
+def is_addon_service(service_name: str, info: Optional[dict] = None) -> bool:
+    """True when the named service is flagged as an add-on (can't stand alone)."""
+    key = _service_key(service_name)
+    if not key:
+        return False
+    data = info if info is not None else get_business_info()
+    for s in _normalize_service_entries(data.get("services") or []):
+        if s.get("is_addon") and _service_key(s.get("name")) == key:
+            return True
+    return False
+
+
+def is_external_booking(info: Optional[dict] = None) -> bool:
+    """True when this store's real calendar lives in another system (e.g. Zenoti), so
+    the AI produces requests instead of booking. False (internal) for everyone by
+    default — this is the gate that keeps request-mode off for every other customer."""
+    data = info if info is not None else get_business_info()
+    return _normalize_booking_mode(data.get("booking_mode")) == "external"
+
+
 def _config_data_to_business_info(data: dict) -> dict:
     """Normalize raw config.json / DB business_config dict to get_business_info() shape."""
     forwarding = data.get("forwarding_phone") or ""
@@ -164,6 +240,25 @@ def _config_data_to_business_info(data: dict) -> dict:
         # the AI takes a message so the team can call back. This is one of two ways to
         # satisfy human_handoff_configured (the other is a real forwarding_phone).
         "transfer_takes_message": bool(data.get("transfer_takes_message", False)),
+        # Who owns the appointment calendar.
+        #   "internal" (default) — WE are the calendar; the AI books directly into it.
+        #     Every existing customer is this, because it's the default.
+        #   "external" — the real calendar lives in another system (e.g. Zenoti) that we
+        #     can't write to. The AI takes a *request* the staff approve and enter on
+        #     their side; it never claims or reserves a slot here. See
+        #     _create_appointment_from_booking and the receptionist prompt.
+        "booking_mode": _normalize_booking_mode(data.get("booking_mode")),
+        # Display name of that external system ("Zenoti"), for prompt/UI copy only.
+        "booking_provider_name": (data.get("booking_provider_name") or "").strip(),
+        # Services this business will not let anyone book over the phone — they need a
+        # human consult first (e.g. corrective color, where nobody knows the scope or
+        # who's qualified until a stylist talks to the guest). Matched loosely by name.
+        # EMPTY by default: no store gets this behavior unless it's configured.
+        "consult_only_services": _normalize_str_list(data.get("consult_only_services"), 60),
+        # Free-text booking policies injected into the receptionist prompt, e.g.
+        # "Fashion colors (blue, pink, purple) must be booked as Vivid color."
+        # EMPTY by default.
+        "booking_rules": _normalize_str_list(data.get("booking_rules"), 40),
     }
 
 

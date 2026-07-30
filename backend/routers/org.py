@@ -55,6 +55,47 @@ def _require_org_manager(user_id: str, org_id: Optional[str] = None) -> dict:
     return memberships[0]
 
 
+def _store_setup_state(store: dict) -> dict:
+    """What a store still needs before it can answer calls.
+
+    Three gates, in the order a manager hits them:
+      1. an AI line to forward to (provisioned automatically once the group pays)
+      2. the receptionist's own setup — team, services, a way to reach a human
+      3. call forwarding actually switched on at the carrier
+
+    Forwarding is *confirmed*, not merely claimed: config_service stamps
+    forwarding_verified_at the first time a real forwarded call arrives carrying
+    Twilio's ForwardedFrom. Until that happens we say "waiting for the first call"
+    rather than pretending it's done.
+    """
+    cid = (store.get("client_id") or "").strip()
+    has_number = bool((store.get("twilio_phone_number") or "").strip())
+    try:
+        cfg = config_service._read_raw_client_config(cid) or {}
+    except Exception:
+        cfg = {}
+    info = config_service._config_data_to_business_info(cfg) if cfg else {}
+    byon = (cfg.get("number_mode") or "new") == "existing"
+    verified = bool((cfg.get("forwarding_verified_at") or "").strip())
+    ready = bool(info) and config_service.voice_receptionist_ready(info)
+    if not has_number:
+        step = "needs_number"
+    elif not ready:
+        step = "needs_setup"          # team roster / services / human handoff
+    elif byon and not verified:
+        step = "needs_forwarding"     # the carrier switch is the last mile
+    else:
+        step = "live"
+    return {
+        "setup_step": step,
+        "has_number": has_number,
+        "receptionist_ready": ready,
+        "forwarding_required": byon,
+        "forwarding_verified": verified,
+        "existing_business_number": (cfg.get("existing_business_number") or "").strip(),
+    }
+
+
 def _consume_pending_org_invites(user_id: str) -> list:
     """Materialize any org invites waiting on this user's verified emails.
 
@@ -146,6 +187,7 @@ def get_org_stores(
         cid = s["client_id"]
         m = metrics.get(cid) or {}
         state = get_tenant_subscription_state(s)
+        setup = _store_setup_state(s)
         out.append(
             {
                 "client_id": cid,
@@ -161,19 +203,45 @@ def get_org_stores(
                 "can_use_app": state.get("can_use_app"),
                 "subscription_status": state.get("subscription_status"),
                 "demo_mode": state.get("demo_mode"),
+                # Self-serve setup checklist: what this store still needs before it can
+                # answer a call. Lets a manager work through their locations without
+                # anyone hand-holding them.
+                **setup,
                 "calls": m.get("calls", 0),
                 "missed": m.get("missed", 0),
+                "answered": m.get("answered", 0),
                 "bookings": m.get("bookings", 0),
                 "upcoming": m.get("upcoming", 0),
                 "unread_messages": m.get("unread_messages", 0),
+                "prev_calls": m.get("prev_calls", 0),
+                "prev_bookings": m.get("prev_bookings", 0),
             }
         )
     totals = {
         k: sum(int(s.get(k) or 0) for s in out)
-        for k in ("calls", "missed", "bookings", "upcoming", "unread_messages")
+        for k in (
+            "calls", "missed", "answered", "bookings", "upcoming",
+            "unread_messages", "prev_calls", "prev_bookings",
+        )
     }
     totals["stores"] = len(out)
+    # Stores that can't take a call yet — the owner's actual to-do list.
+    totals["needs_attention"] = sum(
+        1 for s in out if s.get("setup_step") and s["setup_step"] != "live"
+    )
+    totals["inactive"] = sum(1 for s in out if not s.get("can_use_app"))
+    # Percentage change vs the immediately preceding window of the same length.
+    totals["calls_change_pct"] = _pct_change(totals["calls"], totals["prev_calls"])
+    totals["bookings_change_pct"] = _pct_change(totals["bookings"], totals["prev_bookings"])
     return {"stores": out, "totals": totals, "days": days}
+
+
+def _pct_change(now: int, before: int) -> Optional[int]:
+    """Whole-percent change, or None when there's no prior period to compare against
+    (showing "+100%" against a zero baseline would be noise, not signal)."""
+    if not before:
+        return None
+    return round(((now - before) / before) * 100)
 
 
 class CreateOrgStoreRequest(BaseModel):
@@ -248,13 +316,17 @@ def create_org_store(
 
     # The group is billed per store, so a new store must move the quantity. Imported
     # here rather than at module scope to keep org <-> billing from importing circularly.
-    quantity = {}
+    quantity, provisioned = {}, {}
     try:
         from routers import billing as billing_router
 
         quantity = billing_router.sync_org_subscription_quantity(org_id)
+        # Give the new store its AI line straight away when the group is already
+        # paying, so the manager can set up forwarding without waiting on anyone.
+        # No-op for an unpaid group — the numbers arrive when they check out.
+        provisioned = billing_router.provision_missing_org_store_numbers(org_id, request)
     except Exception as e:
-        logger.error("org_quantity_sync_failed_on_create org=%s err=%s", org_id, e)
+        logger.error("org_store_post_create_failed org=%s err=%s", org_id, e)
 
     invite: dict = {}
     if req.manager_email:
@@ -269,6 +341,7 @@ def create_org_store(
         details={"org_id": org_id, "name": name, "invited": bool(req.manager_email)},
         request=request,
     )
+    # Re-read AFTER provisioning so the response carries the new number.
     fresh = database.db_tenant_get_by_id(tenant["id"]) or tenant
     return {
         "store": fresh,
@@ -278,6 +351,9 @@ def create_org_store(
         # False when the group has no subscription yet (they pay once, after adding
         # stores) or when Stripe rejected the change — the UI should say which.
         "billing_synced": bool(quantity.get("synced")),
+        # True once the store has its own AI line to forward calls to.
+        "number_provisioned": bool((fresh or {}).get("twilio_phone_number")),
+        "provisioning": provisioned,
     }
 
 

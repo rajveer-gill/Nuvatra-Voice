@@ -35,7 +35,27 @@ const CARRIERS: Carrier[] = [
     label: 'Verizon',
     steps: (ai) => (
       <>
-        Dial <Code>*72</Code> then <Code>{digits(ai)}</Code> and press call. To turn it off, dial <Code>*73</Code>.
+        <strong>All calls:</strong> dial <Code>*72</Code> then <Code>{digits(ai)}</Code> and press call
+        (<Code>*73</Code> to turn off).
+        <br />
+        <strong>Only when you don&rsquo;t answer</strong> (your phone rings first): dial{' '}
+        <Code>*92</Code> then <Code>{digits(ai)}</Code>.
+      </>
+    ),
+  },
+  {
+    id: 'onetalk',
+    label: 'Verizon One Talk',
+    steps: (ai) => (
+      <>
+        One Talk is set up by your administrator, not with star codes:
+        <br />
+        Sign in to the <strong>One Talk Admin Portal</strong> → pick the line →{' '}
+        <strong>Call Forwarding</strong> → <strong>When No Answer</strong> → enter{' '}
+        <strong>{ai}</strong> → Save.
+        <br />
+        Leave the ring count at <strong>5</strong>. Below that, Verizon may forward the call
+        before the phone actually rings in the store.
       </>
     ),
   },
@@ -55,7 +75,9 @@ const CARRIERS: Carrier[] = [
     steps: (ai) => (
       <>
         Most landlines: dial <Code>*72</Code>, then <Code>{digits(ai)}</Code>, then call (<Code>*73</Code> to cancel).
-        If that doesn&rsquo;t work, search &ldquo;[your carrier] call forwarding&rdquo; or ask them to forward all
+        To have your phone ring first and only forward when nobody answers, use{' '}
+        <Code>*92</Code> instead of <Code>*72</Code>.
+        If that doesn&rsquo;t work, search &ldquo;[your carrier] call forwarding&rdquo; or ask them to forward
         calls to {ai}.
       </>
     ),

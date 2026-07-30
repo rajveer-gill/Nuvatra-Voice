@@ -5,7 +5,10 @@ import { useRouter } from 'next/navigation'
 import type { AxiosInstance } from 'axios'
 import { AlertTriangle, ArrowRight, CreditCard, Mail, PhoneMissed, Plus, X } from 'lucide-react'
 import { AppChrome } from '@/components/layout/AppChrome'
+import { CarrierForwardingInstructions } from '@/components/CarrierForwardingInstructions'
 import { useApiClient, setSelectedStoreId } from '@/lib/api'
+
+type SetupStep = 'needs_number' | 'needs_setup' | 'needs_forwarding' | 'live'
 
 type Store = {
   client_id: string
@@ -15,9 +18,16 @@ type Store = {
   org_name: string | null
   role: string
   plan: string
+  phone?: string | null
   can_use_app: boolean
   subscription_status: string | null
   demo_mode?: boolean
+  setup_step?: SetupStep
+  has_number?: boolean
+  receptionist_ready?: boolean
+  forwarding_required?: boolean
+  forwarding_verified?: boolean
+  existing_business_number?: string
   calls: number
   missed: number
   bookings: number
@@ -29,9 +39,14 @@ type Totals = {
   stores: number
   calls: number
   missed: number
+  answered: number
   bookings: number
   upcoming: number
   unread_messages: number
+  needs_attention: number
+  inactive: number
+  calls_change_pct: number | null
+  bookings_change_pct: number | null
 }
 
 type OrgInfo = {
@@ -60,6 +75,17 @@ function missedRate(calls: number, missed: number): number | null {
   return Math.round((missed / calls) * 100)
 }
 
+/** What a store still needs before it can answer a call, in plain language. */
+const SETUP_LABEL: Record<SetupStep, { text: string; tone: string } | null> = {
+  needs_number: { text: 'Getting phone line', tone: 'border-zinc-500/40 bg-zinc-500/10 text-zinc-300' },
+  needs_setup: { text: 'Finish setup', tone: 'border-amber-500/40 bg-amber-500/10 text-amber-200' },
+  needs_forwarding: {
+    text: 'Turn on forwarding',
+    tone: 'border-cyan-400/40 bg-cyan-500/10 text-cyan-200',
+  },
+  live: null, // nothing to show — a working store shouldn't shout about it
+}
+
 export default function StoresPage() {
   const api = useApiClient()
   const router = useRouter()
@@ -70,6 +96,8 @@ export default function StoresPage() {
   const [error, setError] = useState<string | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [inviteFor, setInviteFor] = useState<Store | null>(null)
+  // client_id of the store whose setup instructions are expanded.
+  const [setupFor, setSetupFor] = useState<string | null>(null)
 
   // Orgs this account manages (not just views) — only a manager can add stores or
   // set up billing. A viewer sees the rollup and nothing else.
@@ -212,22 +240,54 @@ export default function StoresPage() {
           )}
 
           {totals && totals.stores > 0 && (
-            <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {[
-                { label: 'Calls', value: totals.calls },
-                { label: 'Missed', value: totals.missed },
-                { label: 'Booked', value: totals.bookings },
-                { label: 'Upcoming', value: totals.upcoming },
-              ].map((s) => (
-                <div
-                  key={s.label}
-                  className="rounded-2xl border border-white/10 bg-zinc-900/60 px-4 py-3"
-                >
-                  <div className="text-xs text-zinc-500">{s.label}</div>
-                  <div className="mt-0.5 text-2xl font-semibold text-white">{s.value}</div>
+            <>
+              <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <StatTile
+                  label="Calls answered"
+                  value={totals.answered}
+                  change={totals.calls_change_pct}
+                  hint="Calls your team didn't pick up"
+                  accent
+                />
+                <StatTile
+                  label="Appointments booked"
+                  value={totals.bookings}
+                  change={totals.bookings_change_pct}
+                  hint="Booked by the receptionist"
+                />
+                <StatTile
+                  label="Messages to return"
+                  value={totals.unread_messages}
+                  hint="Callers waiting on a call back"
+                />
+                <StatTile
+                  label="Upcoming"
+                  value={totals.upcoming}
+                  hint="Appointments still to come"
+                />
+              </div>
+
+              {(totals.needs_attention > 0 || totals.inactive > 0) && (
+                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-100">
+                  <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
+                  <span>
+                    {totals.needs_attention > 0 && (
+                      <>
+                        <strong>{totals.needs_attention}</strong>{' '}
+                        {totals.needs_attention === 1 ? 'store needs' : 'stores need'} setup
+                        finished before they can take calls
+                      </>
+                    )}
+                    {totals.needs_attention > 0 && totals.inactive > 0 && ' · '}
+                    {totals.inactive > 0 && (
+                      <>
+                        <strong>{totals.inactive}</strong> inactive
+                      </>
+                    )}
+                  </span>
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
 
           {sorted === null && (
@@ -275,8 +335,8 @@ export default function StoresPage() {
                   const concerning = rate !== null && rate >= 20
                   const canManage = s.role === 'manager'
                   return (
+                    <div key={s.client_id}>
                     <div
-                      key={s.client_id}
                       className="grid grid-cols-12 items-center gap-3 rounded-2xl border border-white/10 bg-zinc-900/60 px-4 py-3 motion-safe-transition hover:border-white/25"
                     >
                       <button
@@ -296,6 +356,20 @@ export default function StoresPage() {
                             <span className="shrink-0 rounded-full border border-cyan-400/40 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-200">
                               Demo
                             </span>
+                          )}
+                          {s.can_use_app && s.setup_step && SETUP_LABEL[s.setup_step] && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setSetupFor(setupFor === s.client_id ? null : s.client_id)
+                              }}
+                              className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold motion-safe-transition hover:brightness-125 ${
+                                SETUP_LABEL[s.setup_step]!.tone
+                              }`}
+                            >
+                              {SETUP_LABEL[s.setup_step]!.text}
+                            </button>
                           )}
                         </div>
                         <div className="truncate text-xs text-zinc-500">
@@ -365,6 +439,8 @@ export default function StoresPage() {
                         </button>
                       </div>
                     </div>
+                    {setupFor === s.client_id && <StoreSetupPanel store={s} />}
+                    </div>
                   )
                 })}
               </div>
@@ -389,6 +465,113 @@ export default function StoresPage() {
         )}
       </main>
     </AppChrome>
+  )
+}
+
+/** One headline number, with its change vs the previous period of the same length. */
+function StatTile({
+  label,
+  value,
+  change,
+  hint,
+  accent,
+}: {
+  label: string
+  value: number
+  change?: number | null
+  hint?: string
+  accent?: boolean
+}) {
+  return (
+    <div
+      className={`rounded-2xl border px-4 py-3 ${
+        accent
+          ? 'border-cyan-400/30 bg-gradient-to-br from-cyan-500/10 to-indigo-600/10'
+          : 'border-white/10 bg-zinc-900/60'
+      }`}
+    >
+      <div className="text-xs text-zinc-500">{label}</div>
+      <div className="mt-0.5 flex items-baseline gap-2">
+        <span className="text-2xl font-semibold text-white">{value}</span>
+        {typeof change === 'number' && (
+          <span
+            className={`text-xs font-medium ${
+              change > 0 ? 'text-emerald-400' : change < 0 ? 'text-amber-400' : 'text-zinc-500'
+            }`}
+          >
+            {change > 0 ? '+' : ''}
+            {change}%
+          </span>
+        )}
+      </div>
+      {hint && <div className="mt-0.5 text-[11px] text-zinc-600">{hint}</div>}
+    </div>
+  )
+}
+
+/** What this store still needs, and how to do it — inline, so a manager can work
+ *  through their locations without asking anyone. */
+function StoreSetupPanel({ store }: { store: Store }) {
+  const step = store.setup_step
+  return (
+    <div className="mx-2 mb-2 rounded-b-2xl border border-t-0 border-white/10 bg-zinc-950/50 px-4 py-4">
+      {step === 'needs_number' && (
+        <p className="text-sm text-zinc-300">
+          We&rsquo;re setting up this store&rsquo;s phone line. It usually takes a moment — refresh
+          shortly. If it doesn&rsquo;t appear, check that the group&rsquo;s billing is active.
+        </p>
+      )}
+
+      {step === 'needs_setup' && (
+        <div className="text-sm text-zinc-300">
+          <p className="mb-2">
+            Before this store can answer calls, it needs a few things filled in:
+          </p>
+          <ul className="mb-3 ml-4 list-disc space-y-1 text-zinc-400">
+            <li>At least one team member</li>
+            <li>At least one service</li>
+            <li>A way to reach a real person (a phone number, or turn on “take a message”)</li>
+          </ul>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedStoreId(store.client_id)
+              window.location.href = '/dashboard'
+            }}
+            className="rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-4 py-2 text-xs font-semibold text-white motion-safe-transition hover:brightness-110"
+          >
+            Open this store&rsquo;s settings
+          </button>
+        </div>
+      )}
+
+      {step === 'needs_forwarding' && (
+        <div>
+          <p className="mb-1 text-sm text-zinc-300">
+            Last step — point this store&rsquo;s phone at its AI line.
+          </p>
+          <p className="mb-3 text-xs text-zinc-500">
+            Customers keep calling{' '}
+            <span className="text-zinc-300">
+              {store.existing_business_number || 'your published number'}
+            </span>
+            . Set it to forward <strong>when nobody answers</strong>, so the store rings first and
+            the AI only picks up the calls you&rsquo;d otherwise miss.
+          </p>
+          <div className="mb-3 rounded-lg border border-white/10 bg-zinc-900/60 px-3 py-2">
+            <span className="text-[11px] uppercase tracking-wide text-zinc-500">
+              This store&rsquo;s AI line
+            </span>
+            <div className="font-mono text-sm text-white">{store.phone || '—'}</div>
+          </div>
+          {store.phone && <CarrierForwardingInstructions aiLine={store.phone} />}
+          <p className="mt-3 text-xs text-zinc-500">
+            We&rsquo;ll mark this store as done automatically the first time a forwarded call comes
+            through — no need to tell us.
+          </p>
+        </div>
+      )}
+    </div>
   )
 }
 

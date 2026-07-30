@@ -15,7 +15,7 @@ import database
 import deps
 import runtime
 from security.webhooks import verify_stripe_event
-from subscription_access import get_tenant_subscription_state
+from subscription_access import evaluate_billing, get_tenant_subscription_state
 
 try:
     from plans import get_plan_limits
@@ -150,6 +150,16 @@ def create_checkout_session(
     if not secret:
         raise HTTPException(status_code=503, detail="Stripe not configured")
     stripe.api_key = secret
+    # Every account is an org, so billing belongs to the org: one subscription priced
+    # per store, whether they have one location or thirty-four. Adding a location later
+    # just moves the quantity — no migration onto a different kind of account. The
+    # tenant-level path below remains for any store that isn't in an org.
+    org_id = (tenant.get("org_id") or "").strip()
+    if org_id:
+        org = database.db_org_get_by_id(org_id)
+        if org:
+            return _build_org_checkout(org, req.plan)
+        logger.warning("checkout_org_missing tenant=%s org=%s", tenant.get("id"), org_id)
     price_id = _stripe_price_id(req.plan)
     if not price_id:
         raise HTTPException(
@@ -386,9 +396,15 @@ def create_org_checkout_session(
         raise HTTPException(status_code=503, detail="Stripe not configured")
     stripe.api_key = secret
     org = _resolve_managed_org(user_id, req.org_id)
-    price_id = _stripe_price_id(req.plan)
+    return _build_org_checkout(org, req.plan)
+
+
+def _build_org_checkout(org: dict, plan: str) -> dict:
+    """Create the group's Stripe Checkout session. Shared by the org endpoint and by
+    ordinary signup, since every account is an org — one billing path, not two."""
+    price_id = _stripe_price_id(plan)
     if not price_id:
-        raise HTTPException(status_code=503, detail=f"Price not configured for plan: {req.plan}")
+        raise HTTPException(status_code=503, detail=f"Price not configured for plan: {plan}")
     customer_id = (org.get("stripe_customer_id") or "").strip()
     if not customer_id:
         try:
@@ -402,7 +418,10 @@ def create_org_checkout_session(
             raise HTTPException(status_code=500, detail="Could not create billing customer")
     quantity = max(1, database.db_org_store_count(org["id"]))
     frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").strip().rstrip("/")
-    subscription_data: dict = {"metadata": {"org_id": org["id"], "plan": req.plan}}
+    # A one-location account goes straight into its store; a multi-store group lands on
+    # the rollup. Sending a solo owner to a list of one would be a strange first sight.
+    landing = "/dashboard" if quantity <= 1 else "/dashboard/stores"
+    subscription_data: dict = {"metadata": {"org_id": org["id"], "plan": plan}}
     # First subscription for the group gets the same 7-day trial a single store does.
     if not (org.get("stripe_subscription_id") or "").strip():
         subscription_data["trial_period_days"] = 7
@@ -412,9 +431,9 @@ def create_org_checkout_session(
             mode="subscription",
             line_items=[{"price": price_id, "quantity": quantity}],
             allow_promotion_codes=True,
-            success_url=f"{frontend}/dashboard/stores?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{frontend}/dashboard/stores",
-            metadata={"org_id": org["id"], "plan": req.plan},
+            success_url=f"{frontend}{landing}?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{frontend}{landing}",
+            metadata={"org_id": org["id"], "plan": plan},
             subscription_data=subscription_data,
         )
         return {"url": session.url, "quantity": quantity}
@@ -490,6 +509,12 @@ def _handle_org_checkout_completed(obj: dict, meta: dict, request: Optional[Requ
         trial_ends_at=trial_ends_at,
     )
     synced = database.db_org_sync_store_plans(org_id, plan)
+    # A demo account paying for the first time: clear its sample data before any store
+    # gets a phone number, exactly as the single-store path does. Without this, a demo
+    # that signs up through the org path would go live with invented services.
+    for store in database.db_tenants_for_org(org_id):
+        if store.get("demo_mode"):
+            _deactivate_demo_if_needed(store, plan, request)
     deps.audit_log(
         "stripe",
         "org_checkout_completed",
@@ -500,6 +525,8 @@ def _handle_org_checkout_completed(obj: dict, meta: dict, request: Optional[Requ
     )
     # Stores created before checkout aren't counted in the session's quantity.
     sync_org_subscription_quantity(org_id)
+    # The group is paid now, so every store it already holds gets its AI line.
+    provision_missing_org_store_numbers(org_id, request)
 
 
 def _deactivate_demo_if_needed(tenant: dict, plan: str, request: Optional[Request] = None) -> None:
@@ -568,6 +595,59 @@ def _deactivate_demo_if_needed(tenant: dict, plan: str, request: Optional[Reques
             )
         except Exception:
             pass
+
+
+def provision_missing_org_store_numbers(org_id: str, request: Optional[Request] = None) -> dict:
+    """Give every store in a paid org its own AI line.
+
+    Stores added by an org manager are created without a number (there's no per-store
+    checkout to hang provisioning off — the group pays once). Without this, a manager
+    could add all their stores and none of them could receive a call.
+
+    Only runs when the org's billing is actually active, so an unpaid group can't
+    provision phone numbers. Safe to call repeatedly: stores that already have a number
+    are skipped, so it doubles as a backfill.
+    """
+    out = {"provisioned": 0, "skipped": 0, "failed": 0}
+    if not runtime.USE_DB:
+        return out
+    org = database.db_org_get_by_id(org_id)
+    if not org or not evaluate_billing(org)["active"]:
+        return out
+    for store in database.db_tenants_for_org(org_id):
+        if (store.get("twilio_phone_number") or "").strip():
+            out["skipped"] += 1
+            continue
+        # Match the store's own area code where we can, so the AI line looks local to
+        # the callers being forwarded to it.
+        area = _area_code_for_store(store)
+        try:
+            _provision_number_for_tenant(store, area_code=area, request=request)
+            fresh = database.db_tenant_get_by_id(store["id"]) or {}
+            if (fresh.get("twilio_phone_number") or "").strip():
+                out["provisioned"] += 1
+            else:
+                out["failed"] += 1
+        except Exception as e:
+            logger.error("org_store_provision_failed store=%s err=%s", store.get("client_id"), e)
+            out["failed"] += 1
+    logger.info("org_store_numbers org=%s %s", org_id, out)
+    return out
+
+
+def _area_code_for_store(store: dict) -> Optional[str]:
+    """The store's own area code, taken from the existing business number they're
+    forwarding from. None when we can't tell — Twilio then picks any available number."""
+    try:
+        import config_service
+
+        cfg = config_service._read_raw_client_config((store.get("client_id") or "").strip()) or {}
+        digits = "".join(c for c in (cfg.get("existing_business_number") or "") if c.isdigit())
+        if len(digits) >= 10:
+            return digits[-10:-7]  # area code of a US number
+    except Exception:
+        pass
+    return None
 
 
 def _provision_number_for_tenant(tenant: dict, area_code: Optional[str], request: Request) -> None:

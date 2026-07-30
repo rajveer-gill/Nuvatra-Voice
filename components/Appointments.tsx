@@ -16,6 +16,7 @@ import {
 import { useApiClient } from '@/lib/api'
 import AppointmentCalendar from '@/components/AppointmentCalendar'
 import { AppointmentCard, apiDetail } from '@/components/appointments/AppointmentCard'
+import { ImportFromZenoti } from '@/components/appointments/ImportFromZenoti'
 import { needsResponse, isHiddenAppointmentStatus, appointmentDateTimeSortKey } from '@/components/appointments/appointmentStatus'
 import type { Appointment } from '@/components/appointments/types'
 import { staggerContainer } from '@/components/motion/variants'
@@ -61,6 +62,10 @@ export default function Appointments() {
   const [declinePreview, setDeclinePreview] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [staffOptions, setStaffOptions] = useState<{ id: string; name: string }[]>([])
+  // True when this store's real calendar lives in another system (Zenoti). Enables the
+  // paste-in importer; false (the default) for every other customer.
+  const [externalBooking, setExternalBooking] = useState(false)
+  const [bookingProvider, setBookingProvider] = useState('')
   // Full schedule (time off + working days) keyed by staff id, plus shop closures and
   // configured service names — used to warn before saving a conflicting manual booking
   // and to power the service picker.
@@ -115,6 +120,10 @@ export default function Appointments() {
     api
       .get('/api/business-info')
       .then((r) => {
+        // External-booking stores (calendar lives in Zenoti etc.) get the paste-in
+        // importer; internal stores — every other customer — never see it.
+        setExternalBooking((r.data?.booking_mode || 'internal') === 'external')
+        setBookingProvider((r.data?.booking_provider_name || '').trim())
         const st = (r.data?.staff || []) as {
           id?: string
           name?: string
@@ -426,6 +435,15 @@ export default function Appointments() {
             </motion.button>
           </div>
         </div>
+
+        {externalBooking && (
+          <div className="mb-6">
+            <ImportFromZenoti
+              providerName={bookingProvider}
+              onImported={() => void fetchAppointments()}
+            />
+          </div>
+        )}
 
         <motion.div
           variants={staggerContainer}

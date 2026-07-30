@@ -1293,6 +1293,26 @@ def db_org_get_by_stripe_subscription_id(sub_id: str) -> Optional[dict]:
         return None
 
 
+def db_tenants_for_org(org_id: str) -> List[dict]:
+    """Every store in an org, as full tenant dicts (admin/system use — no user scoping;
+    for a user-scoped read use db_org_stores_for_user)."""
+    conn = _get_conn()
+    if not conn or not org_id:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT {_tenant_select_cols()} FROM tenants WHERE org_id = %s::uuid ORDER BY name",
+            (org_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [_row_to_tenant(r) for r in rows]
+    except Exception as e:
+        print(f"[DB] Failed to list tenants for org: {e}")
+        return []
+
+
 def db_org_store_count(org_id: str) -> int:
     """Stores in this org — the quantity the org's subscription is billed on."""
     conn = _get_conn()
@@ -1719,8 +1739,16 @@ def db_org_store_metrics(client_ids: List[str], days: int = 7) -> dict:
     conn = _get_conn()
     if not conn:
         return {}
-    out = {c: {"calls": 0, "missed": 0, "bookings": 0, "upcoming": 0, "unread_messages": 0} for c in cids}
-    since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+    out = {
+        c: {
+            "calls": 0, "missed": 0, "answered": 0, "bookings": 0,
+            "upcoming": 0, "unread_messages": 0, "prev_calls": 0, "prev_bookings": 0,
+        }
+        for c in cids
+    }
+    window = timedelta(days=max(1, days))
+    since = datetime.now(timezone.utc) - window
+    prev_since = since - window  # same-length window immediately before, for the trend
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         cur = conn.cursor()
@@ -1728,26 +1756,32 @@ def db_org_store_metrics(client_ids: List[str], days: int = 7) -> dict:
             """
             SELECT client_id,
                    COUNT(*) FILTER (WHERE created_at >= %s) AS calls,
-                   COUNT(*) FILTER (WHERE created_at >= %s AND outcome IN ('missed', 'no_answer')) AS missed
+                   COUNT(*) FILTER (WHERE created_at >= %s AND outcome IN ('missed', 'no_answer')) AS missed,
+                   COUNT(*) FILTER (WHERE created_at >= %s AND outcome = 'answered_by_ai') AS answered,
+                   COUNT(*) FILTER (WHERE created_at >= %s AND created_at < %s) AS prev_calls
             FROM call_log WHERE client_id = ANY(%s) GROUP BY client_id
             """,
-            (since, since, cids),
+            (since, since, since, prev_since, since, cids),
         )
-        for cid, calls, missed in cur.fetchall():
+        for cid, calls, missed, answered, prev_calls in cur.fetchall():
             out[cid]["calls"] = calls or 0
             out[cid]["missed"] = missed or 0
+            out[cid]["answered"] = answered or 0
+            out[cid]["prev_calls"] = prev_calls or 0
         cur.execute(
             """
             SELECT client_id,
                    COUNT(*) FILTER (WHERE created_at >= %s AND source = 'receptionist') AS bookings,
-                   COUNT(*) FILTER (WHERE date >= %s AND status NOT IN ('cancelled', 'completed')) AS upcoming
+                   COUNT(*) FILTER (WHERE date >= %s AND status NOT IN ('cancelled', 'completed')) AS upcoming,
+                   COUNT(*) FILTER (WHERE created_at >= %s AND created_at < %s AND source = 'receptionist') AS prev_bookings
             FROM appointments WHERE client_id = ANY(%s) GROUP BY client_id
             """,
-            (since, today, cids),
+            (since, today, prev_since, since, cids),
         )
-        for cid, bookings, upcoming in cur.fetchall():
+        for cid, bookings, upcoming, prev_bookings in cur.fetchall():
             out[cid]["bookings"] = bookings or 0
             out[cid]["upcoming"] = upcoming or 0
+            out[cid]["prev_bookings"] = prev_bookings or 0
         cur.execute(
             """
             SELECT client_id, COUNT(*) FILTER (WHERE status = 'unread') AS unread

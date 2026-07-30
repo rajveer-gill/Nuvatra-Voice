@@ -456,6 +456,16 @@ def require_tenant(request: Request):
         meta_tid = str(tenant_id_from_meta or "").strip()
         if tid and meta_tid != tid:
             _clerk_patch_user_tenant_metadata(user_id, tid)
+    if not tenant and runtime.USE_DB and user_id:
+        # Last resort: an org member who isn't a tenant_member of anything — e.g. a
+        # manager whose stores were all created through the org. With exactly one
+        # store, land them in it rather than making them pick from a list of one.
+        # With several, fall through to the 403; the dashboard sends them to the
+        # store list to choose. Only runs when normal resolution found nothing, so
+        # it costs a query for org managers, not for everyone.
+        org_stores = database.db_org_stores_for_user(user_id)
+        if len(org_stores) == 1:
+            tenant = org_stores[0]
     if not tenant:
         print(
             f"[Auth] no_tenant user_id={user_id} jwt_metadata_tenant_id={tenant_id_from_meta!r}"
