@@ -136,6 +136,31 @@ _LEADS = [
     ("Elliot Vasquez", 115, "Wanted a Saturday slot we didn't have — worth a follow-up"),
 ]
 
+# Two-way SMS threads, stored the way handle_incoming_sms writes them: newest last,
+# role "user" = the customer, "assistant" = the receptionist.
+_SMS_THREADS = [
+    ("Jordan Ellis", 101, [
+        {"role": "assistant", "content": "Hi Jordan — you're booked for a Haircut on Thursday at 2:30 PM with Maya. Reply YES to confirm."},
+        {"role": "user", "content": "yes"},
+        {"role": "assistant", "content": "All set. See you Thursday at 2:30!"},
+    ]),
+    ("Morgan Lee", 105, [
+        {"role": "assistant", "content": "Hi Morgan — confirming your Color appointment Saturday at 11:00 AM with Maya. Reply YES to confirm."},
+        {"role": "user", "content": "Can I move it to the following Saturday instead?"},
+        {"role": "assistant", "content": "Of course — I've passed that to the salon and they'll confirm the new time shortly."},
+    ]),
+    ("Casey Donovan", 107, [
+        {"role": "assistant", "content": "Hi Casey — you're booked for a Beard Trim tomorrow at 4:00 PM with Devon. Reply YES to confirm."},
+        {"role": "user", "content": "yes thanks"},
+        {"role": "assistant", "content": "Confirmed. See you tomorrow at 4."},
+    ]),
+    ("Avery Patel", 108, [
+        {"role": "user", "content": "Are you open on Sunday?"},
+        {"role": "assistant", "content": "We are — Sundays 10 AM to 4 PM. Would you like me to book something?"},
+        {"role": "user", "content": "Not yet, just checking. Thanks!"},
+    ]),
+]
+
 
 def demo_config(client_id: str, business_name: str, plan: str = "pro") -> dict:
     """Business config for a demo tenant: the prospect's own name on a fully
@@ -207,7 +232,7 @@ def seed_demo_tenant(
 
     config_service.save_raw_client_config(cid, demo_config(cid, business_name, plan))
 
-    counts = {"calls": 0, "appointments": 0, "messages": 0, "leads": 0}
+    counts = {"calls": 0, "appointments": 0, "messages": 0, "leads": 0, "texts": 0}
     services_by_id = {s["id"]: s for s in SAMPLE_SERVICES}
     staff_for_service: dict[str, list[dict]] = {
         s["id"]: [st for st in SAMPLE_STAFF if s["id"] in st["service_ids"]] for s in SAMPLE_SERVICES
@@ -356,6 +381,15 @@ def seed_demo_tenant(
                 counts["leads"] += 1
         except Exception as e:
             logger.warning("demo_seed lead insert failed cid=%s: %s", cid, e)
+
+    # SMS threads. Without these the dashboard's "Texts Exchanged" card reads 0 while
+    # the usage meter shows dozens of texts sent — which makes the demo look broken.
+    for _cust_name, cust_n, thread in _SMS_THREADS:
+        try:
+            database.db_sms_session_upsert(_fake_phone(cust_n), cid, thread)
+            counts["texts"] += len(thread)
+        except Exception as e:
+            logger.warning("demo_seed sms thread failed cid=%s: %s", cid, e)
 
     # Usage meters, so the plan/usage widget isn't sitting at zero.
     month = now.strftime("%Y-%m")

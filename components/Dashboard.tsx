@@ -421,7 +421,10 @@ export default function Dashboard() {
         <RevealItem className="bg-white rounded-lg shadow-md p-6 transition-transform duration-200 hover:-translate-y-1 hover:shadow-lg">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-gray-600 text-sm font-medium">Total Messages</p>
+              {/* Texts exchanged in SMS threads — NOT the count on the Messages tab,
+                  which lists messages the receptionist took from callers. Naming both
+                  "Messages" made the dashboard look broken when one was zero. */}
+              <p className="text-gray-600 text-sm font-medium">Texts Exchanged</p>
               <p className="text-3xl font-bold text-gray-900 mt-2">
                 <AnimatedNumber value={stats.total_messages} />
               </p>
