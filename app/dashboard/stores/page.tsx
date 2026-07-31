@@ -8,7 +8,7 @@ import { AppChrome } from '@/components/layout/AppChrome'
 import { CarrierForwardingInstructions } from '@/components/CarrierForwardingInstructions'
 import { useApiClient, setSelectedStoreId } from '@/lib/api'
 
-type SetupStep = 'needs_number' | 'needs_setup' | 'needs_forwarding' | 'live'
+type SetupStep = 'demo' | 'needs_number' | 'needs_setup' | 'needs_forwarding' | 'live'
 
 type Store = {
   client_id: string
@@ -77,6 +77,8 @@ function missedRate(calls: number, missed: number): number | null {
 
 /** What a store still needs before it can answer a call, in plain language. */
 const SETUP_LABEL: Record<SetupStep, { text: string; tone: string } | null> = {
+  // A demo already wears its own "Demo" badge; a second one would just repeat it.
+  demo: null,
   needs_number: { text: 'Getting phone line', tone: 'border-zinc-500/40 bg-zinc-500/10 text-zinc-300' },
   needs_setup: { text: 'Finish setup', tone: 'border-amber-500/40 bg-amber-500/10 text-amber-200' },
   needs_forwarding: {
@@ -515,6 +517,13 @@ function StoreSetupPanel({ store }: { store: Store }) {
   const step = store.setup_step
   return (
     <div className="mx-2 mb-2 rounded-b-2xl border border-t-0 border-white/10 bg-zinc-950/50 px-4 py-4">
+      {step === 'demo' && (
+        <p className="text-sm text-zinc-300">
+          This is a demo store — the calls and appointments here are sample data, and it
+          has no phone line yet. Activate to get a number and start taking real calls.
+        </p>
+      )}
+
       {step === 'needs_number' && (
         <p className="text-sm text-zinc-300">
           We&rsquo;re setting up this store&rsquo;s phone line. It usually takes a moment — refresh

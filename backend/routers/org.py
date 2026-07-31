@@ -78,7 +78,11 @@ def _store_setup_state(store: dict) -> dict:
     byon = (cfg.get("number_mode") or "new") == "existing"
     verified = bool((cfg.get("forwarding_verified_at") or "").strip())
     ready = bool(info) and config_service.voice_receptionist_ready(info)
-    if not has_number:
+    if store.get("demo_mode"):
+        # A demo is a preview, not a half-built store. Saying "we're setting up your
+        # phone line" would be a lie — it gets one when they activate, not before.
+        step = "demo"
+    elif not has_number:
         step = "needs_number"
     elif not ready:
         step = "needs_setup"          # team roster / services / human handoff
@@ -225,9 +229,10 @@ def get_org_stores(
         )
     }
     totals["stores"] = len(out)
-    # Stores that can't take a call yet — the owner's actual to-do list.
+    # Stores that can't take a call yet — the owner's actual to-do list. Demos are
+    # excluded: nothing is outstanding on them until the owner chooses to activate.
     totals["needs_attention"] = sum(
-        1 for s in out if s.get("setup_step") and s["setup_step"] != "live"
+        1 for s in out if s.get("setup_step") not in (None, "live", "demo")
     )
     totals["inactive"] = sum(1 for s in out if not s.get("can_use_app"))
     # Percentage change vs the immediately preceding window of the same length.
