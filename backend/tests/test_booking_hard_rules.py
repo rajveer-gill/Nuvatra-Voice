@@ -191,6 +191,58 @@ def test_prompt_marks_addons_and_lists_rules():
     assert "Fashion colors must be booked as Vivid color." in prompt
 
 
+# --- Saving the config through the API ---------------------------------------
+
+
+def test_update_model_accepts_the_booking_fields():
+    """The PATCH body must actually carry these, or the Settings UI writes nothing."""
+    from routers.business import BusinessInfoUpdate
+
+    body = BusinessInfoUpdate(
+        booking_mode="external",
+        booking_provider_name="Zenoti",
+        consult_only_services=["Corrective Color"],
+        booking_rules=["Fashion colors must be booked as Vivid color."],
+    )
+    assert body.booking_mode == "external"
+    assert body.booking_provider_name == "Zenoti"
+    assert body.consult_only_services == ["Corrective Color"]
+    assert body.booking_rules == ["Fashion colors must be booked as Vivid color."]
+
+
+def test_update_model_rejects_an_unknown_booking_mode():
+    """Only the two real modes are accepted — a typo is a 422, not a silent default."""
+    import pydantic
+
+    from routers.business import BusinessInfoUpdate
+
+    with pytest.raises(pydantic.ValidationError):
+        BusinessInfoUpdate(booking_mode="zenoti")
+
+
+def test_booking_fields_are_optional():
+    """Every other Settings save must keep working without sending them."""
+    from routers.business import BusinessInfoUpdate
+
+    body = BusinessInfoUpdate(name="Just a rename")
+    assert body.booking_mode is None
+    assert body.consult_only_services is None
+    assert body.booking_rules is None
+
+
+def test_addon_flag_survives_a_service_save():
+    """Services round-trip through _normalize_service_entries on write, so an add-on
+    marked in Settings has to still be an add-on after saving."""
+    saved = config_service._normalize_service_entries(
+        [
+            {"id": "s1", "name": "Haircut", "price": 28, "duration_minutes": 30},
+            {"id": "s2", "name": "Olaplex", "price": 20, "duration_minutes": 10, "is_addon": True},
+        ]
+    )
+    assert saved[0]["is_addon"] is False
+    assert saved[1]["is_addon"] is True
+
+
 def test_prompt_for_an_unconfigured_store_has_none_of_it():
     from prompts.receptionist import build_system_prompt
 

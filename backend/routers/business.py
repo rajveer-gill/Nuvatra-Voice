@@ -189,6 +189,15 @@ class BusinessInfoUpdate(BaseModel):
     # calls (for businesses whose only number forwards to the AI line). Replaces the need
     # for a separate forwarding_phone to satisfy call-readiness.
     transfer_takes_message: Optional[bool] = None
+    # Who owns the calendar: "internal" (we do — the default for everyone) or
+    # "external" (it lives in Zenoti/Mindbody/etc and we can't write to it, so the AI
+    # takes requests staff approve). See config_service.BOOKING_MODES.
+    booking_mode: Optional[Literal["internal", "external"]] = None
+    booking_provider_name: Optional[str] = Field(default=None, max_length=80)
+    # Services this business will not book over the phone (e.g. corrective color).
+    consult_only_services: Optional[List[str]] = None
+    # Free-text policies injected into this store's receptionist prompt.
+    booking_rules: Optional[List[str]] = None
 
 
 def _settings_load_debug_log_business_info(tenant: Optional[dict], out: dict) -> None:
@@ -806,6 +815,22 @@ async def api_update_business_info(
                 }
                 for s in data["staff"]
             ]
+    if update.booking_mode is not None:
+        # Normalized (unknown -> internal) so a bad value can never silently stop a
+        # store booking. Changing this changes what the AI promises callers, so it's
+        # voice-affecting: the prompt has to be rebuilt.
+        data["booking_mode"] = config_service._normalize_booking_mode(update.booking_mode)
+        voice_affecting = True
+    if update.booking_provider_name is not None:
+        data["booking_provider_name"] = update.booking_provider_name.strip()[:80]
+    if update.consult_only_services is not None:
+        data["consult_only_services"] = config_service._normalize_str_list(
+            update.consult_only_services, 60
+        )
+        voice_affecting = True
+    if update.booking_rules is not None:
+        data["booking_rules"] = config_service._normalize_str_list(update.booking_rules, 40)
+        voice_affecting = True
     if update.specials is not None:
         data["specials"] = config_service._normalize_special_entries(update.specials)
     if update.reservation_rules is not None:

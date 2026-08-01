@@ -31,6 +31,7 @@ import {
   VOICE_SAMPLE_BASE,
   VOICE_SAMPLE_TEXT,
 } from '@/components/settings/constants'
+import { BookingModeSection } from '@/components/settings/BookingModeSection'
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
 import { LockedFeature } from '@/components/ui/LockedFeature'
 import { StaffMembersSection, normalizeStaffFromApi, WORKING_DAYS, type StaffRow } from '@/components/settings/StaffMembersSection'
@@ -1255,6 +1256,9 @@ export default function Settings() {
             Time off
           </button>
         )}
+        <div className="mb-8">
+          <BookingModeSection />
+        </div>
         <StaffMembersSection
           staff={staff}
           availableServices={serviceItems}
