@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import database
 import deps
 import runtime
+from observability import _stable_sha256
 from security.webhooks import verify_stripe_event
 from subscription_access import evaluate_billing, get_tenant_subscription_state
 
@@ -902,6 +903,21 @@ async def stripe_webhook(request: Request):
     )
     if verr:
         code = 503 if verr == "Webhook secret not configured" else 400
+        # Log the reason. Stripe only surfaces the status code on its side, so without
+        # this a rejected delivery is an unexplained 400 in the access log — which is
+        # exactly how a signing-secret mismatch stays invisible for hours. The secret
+        # fingerprint (never the secret) tells you WHICH secret is loaded, so you can
+        # tell "wrong endpoint's secret" from "no secret at all".
+        logger.error(
+            "stripe_webhook_rejected status=%s reason=%s secret_present=%s "
+            "secret_fingerprint=%s sig_header_present=%s payload_bytes=%s",
+            code,
+            verr,
+            bool(secret),
+            (_stable_sha256(secret)[:8] if secret else "none"),
+            bool(sig),
+            len(payload or b""),
+        )
         raise HTTPException(status_code=code, detail=verr)
     assert event is not None
     if not runtime.USE_DB:
