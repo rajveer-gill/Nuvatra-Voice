@@ -102,6 +102,38 @@ def _is_billing_exempt_active(tenant: Optional[dict]) -> bool:
         return False
 
 
+def _billing_row_for_limits(tenant: Optional[dict]) -> Optional[dict]:
+    """The row that decides this tenant's feature tier.
+
+    Normally the tenant itself. But a store inside an org never has its own
+    subscription — the group pays once and the store's subscription_status stays
+    'incomplete' forever — so its trial and plan live on the org. Without this, an
+    org store on a 7-day trial reads as "no trial" and gets gated down to its paid
+    tier, which is exactly backwards: the trial is meant to grant full Pro access.
+
+    Only consulted when the tenant can't stand on its own, so a store that pays for
+    itself costs no extra query. Mirrors subscription_access._load_org_billing.
+    """
+    if not tenant:
+        return None
+    own_status = (tenant.get("subscription_status") or "").lower()
+    if _is_trial_active(tenant) or _is_billing_exempt_active(tenant) or own_status == "active":
+        return tenant
+    org_id = tenant.get("org_id")
+    if not org_id:
+        return tenant
+    try:
+        import runtime
+
+        if not runtime.USE_DB:
+            return tenant
+        import database
+
+        return database.db_org_get_by_id(str(org_id)) or tenant
+    except Exception:
+        return tenant
+
+
 def get_plan_limits(tenant: Optional[dict]) -> dict:
     """Return plan limits dict. Any free-access grant gets the FULL (pro-tier) experience.
 
@@ -110,8 +142,13 @@ def get_plan_limits(tenant: Optional[dict]) -> dict:
     or extended tenant is never gated to starter. (Billing exemption is checked here rather
     than forcing status="trialing", so a comped *paying* customer keeps their "active" status.)
     """
-    plan = _normalize_plan(tenant.get("plan") if tenant else None)
-    full_access = _is_trial_active(tenant) or _is_billing_exempt_active(tenant)
+    # For a store in an org this is the org's billing row, since that's where the
+    # trial and subscription actually live (see _billing_row_for_limits).
+    billing = _billing_row_for_limits(tenant)
+    plan = _normalize_plan(
+        (tenant.get("plan") if tenant else None) or (billing.get("plan") if billing else None)
+    )
+    full_access = _is_trial_active(billing) or _is_billing_exempt_active(billing)
     effective = "pro" if full_access else plan
     return {
         "plan": plan,
@@ -129,5 +166,5 @@ def get_plan_limits(tenant: Optional[dict]) -> dict:
         # SMS cap reuses the conversational-SMS-session quota (same metered unit as
         # tenant_usage.sms_count); exposed under a dedicated key for usage gating/billing.
         "sms_cap": PLAN_CONVERSATIONAL_SMS_SESSIONS.get(effective, 100),
-        "is_trial": _is_trial_active(tenant),
+        "is_trial": _is_trial_active(billing),
     }

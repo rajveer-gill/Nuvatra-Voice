@@ -151,6 +151,60 @@ def test_store_paying_for_itself_does_not_hit_the_org(monkeypatch):
     assert calls == []
 
 
+def test_trial_on_the_org_grants_pro_features_to_its_store(monkeypatch):
+    """The 7-day trial is meant to unlock everything. It lives on the ORG (the store's
+    own subscription_status stays 'incomplete'), so reading only the tenant made a
+    trialing customer see "PRO FEATURE — upgrade your plan" on Messages.
+    """
+    import plans
+
+    org = {
+        "id": "org-1",
+        "plan": "starter",
+        "subscription_status": "trialing",
+        "trial_ends_at": _future(),
+    }
+    monkeypatch.setattr(plans, "_billing_row_for_limits", lambda t: org)
+
+    limits = plans.get_plan_limits(_org_store(plan="starter"))
+    assert limits["is_trial"] is True
+    # Everything a trial is supposed to include, even on a starter plan.
+    assert limits["has_messages"] is True
+    assert limits["has_lead_capture"] is True
+    assert limits["has_call_recording"] is True
+    assert limits["minutes_cap"] == 3500
+
+
+def test_expired_org_trial_drops_the_store_to_its_paid_tier():
+    """Once the trial ends they get what they actually bought — not Pro forever."""
+    import plans
+
+    limits = plans.get_plan_limits(
+        {"plan": "starter", "subscription_status": "trialing", "trial_ends_at": _past()}
+    )
+    assert limits["is_trial"] is False
+    assert limits["has_messages"] is False
+
+
+def test_a_store_that_pays_for_itself_never_looks_up_an_org(monkeypatch):
+    """get_plan_limits runs on the voice path — it must not add a query per call for
+    tenants that can answer on their own."""
+    import plans
+
+    calls = []
+    monkeypatch.setattr(
+        plans, "_is_trial_active", lambda t: bool(t) and t.get("subscription_status") == "trialing"
+    )
+
+    import database
+
+    monkeypatch.setattr(
+        database, "db_org_get_by_id", lambda oid: calls.append(oid) or None
+    )
+    plans.get_plan_limits({"plan": "pro", "subscription_status": "active", "org_id": "org-1"})
+    assert calls == [], "an active tenant must resolve without touching its org"
+
+
 def test_org_store_gets_the_tier_the_group_paid_for(org_billing):
     """get_plan_limits only ever reads the tenant's own plan, which is why the store's
     plan column is stamped with the org's at creation."""
