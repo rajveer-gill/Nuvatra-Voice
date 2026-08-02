@@ -59,11 +59,39 @@ def test_missing_date_falls_back_to_the_pasted_day():
 
 @pytest.mark.parametrize("raw", ["first available", "First Available", "any", "N/A", "-"])
 def test_first_available_means_no_stylist(raw):
-    assert ai._clean_stylist(raw) == ""
+    assert ai._clean_stylist(raw) == ("", False)
 
 
 def test_named_stylist_is_kept_and_whitespace_collapsed():
-    assert ai._clean_stylist("  Jamie   B ") == "Jamie B"
+    assert ai._clean_stylist("  Jamie   B ") == ("Jamie B", False)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("Tina (Req.)", "Tina"), ("BRENDA TO (Req.)", "BRENDA TO"),
+     ("Dai Dao (req)", "Dai Dao"), ("Rin Chan (Requested)", "Rin Chan")],
+)
+def test_requested_marker_is_stripped_and_flagged(raw, expected):
+    """Zenoti writes 'Tina (Req.)'. The marker is data, not part of the name."""
+    name, requested = ai._clean_stylist(raw)
+    assert name == expected
+    assert requested is True
+
+
+def test_service_pipe_and_addon_count_are_split_out():
+    """Zenoti appends '|' and marks add-ons as '(+1)'."""
+    assert ai._clean_service("Shampoo & Haircut|") == ("Shampoo & Haircut", "")
+    assert ai._clean_service("All-over color (+1)|") == ("All-over color", "1 add-on")
+    assert ai._clean_service("Full Highlight (+2)|") == ("Full Highlight", "2 add-ons")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("Total : $138.00", "138.00"), ("$45", "45.00"), ("160.00", "160.00"),
+     ("$1,250.50", "1250.50"), ("", ""), ("free", "")],
+)
+def test_price_normalization(raw, expected):
+    assert ai._clean_price(raw) == expected
 
 
 # --- Parsing ------------------------------------------------------------------
@@ -148,6 +176,90 @@ def test_oversized_paste_is_truncated_with_a_warning(monkeypatch):
     _stub_llm(monkeypatch, {"appointments": []})
     out = ai.parse_pasted_appointments("x" * (ai.MAX_PASTE_CHARS + 500), default_date="2026-07-22")
     assert any("characters" in w for w in out["warnings"])
+
+
+# --- The real Zenoti queue format ---------------------------------------------
+# Verbatim shape from a HairMasters queue view (Lana, 2026-07-22). Kept as a
+# regression anchor: if Zenoti changes its export, this is what should break first.
+
+REAL_QUEUE_PASTE = """Guest
+Service
+  Arrived
+  Original
+  Expected
+10
+Jannie B
+All-over color (+1)|
+Tina (Req.)
+12:00 pm
+12:00 pm
+12:00 pm
+Total : $138.00
+
+Please add guest basic details
+Add Email
+27
+ROB R
+Shampoo & Haircut|
+Dai Dao (Req.)
+01:30 pm
+01:30 pm
+01:30 pm
+Total : $38.00
+28
+IRANA M
+Shampoo & Haircut|
+First Available
+03:00 pm
+03:00 pm
+03:00 pm
+Total : $38.00"""
+
+
+def test_real_queue_paste_shape(monkeypatch):
+    """What the model returns for the real format, put through our normalization."""
+    _stub_llm(monkeypatch, {"appointments": [
+        {"customer_name": "Jannie B", "service": "All-over color (+1)|",
+         "stylist": "Tina (Req.)", "time": "12:00 pm", "date": "",
+         "is_request": True, "price": "Total : $138.00", "notes": ""},
+        {"customer_name": "ROB R", "service": "Shampoo & Haircut|",
+         "stylist": "Dai Dao (Req.)", "time": "01:30 pm", "date": "",
+         "is_request": True, "price": "$38.00", "notes": ""},
+        {"customer_name": "IRANA M", "service": "Shampoo & Haircut|",
+         "stylist": "First Available", "time": "03:00 pm", "date": "",
+         "is_request": False, "price": "$38.00", "notes": ""},
+    ]})
+    out = ai.parse_pasted_appointments(REAL_QUEUE_PASTE, default_date="2026-07-22")
+    rows = out["appointments"]
+    assert len(rows) == 3
+
+    first = rows[0]
+    assert first["customer_name"] == "Jannie B"
+    assert first["service"] == "All-over color"      # trailing "|" and (+1) removed
+    assert first["notes"] == "1 add-on"              # ...but the add-on count kept
+    assert first["stylist"] == "Tina"                # "(Req.)" is not part of the name
+    assert first["is_request"] is True
+    assert first["time"] == "12:00"                  # 12:00 pm -> noon, not midnight
+    assert first["date"] == "2026-07-22"             # filled from the picker
+    assert first["price"] == "138.00"
+
+    # 01:30 pm is afternoon — a naive parse would store 01:30 and be 12 hours off.
+    assert rows[1]["time"] == "13:30"
+    assert rows[1]["stylist"] == "Dai Dao"
+
+    # First Available means no stylist, and is not a "request".
+    assert rows[2]["stylist"] == ""
+    assert rows[2]["is_request"] is False
+    assert rows[2]["time"] == "15:00"
+
+
+def test_real_paste_rows_are_distinct_appointments():
+    """Same service and price, different guests/times — must not collapse."""
+    keys = {
+        ai.import_key({"date": "2026-07-22", "time": t, "customer_name": n})
+        for n, t in (("ROB R", "13:30"), ("IRANA M", "15:00"), ("Jannie B", "12:00"))
+    }
+    assert len(keys) == 3
 
 
 # --- Idempotency key ----------------------------------------------------------

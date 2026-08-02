@@ -53,6 +53,7 @@ class ImportedAppointment(BaseModel):
     date: str
     time: str
     is_request: bool = False
+    price: str = ""
     notes: str = ""
 
 
@@ -154,9 +155,20 @@ def import_appointments_commit(
             invalid += 1
             continue
         key = appointment_import.import_key(data)
-        # Service name carries the stylist/notes context that our schema has no column
-        # for, so it's folded into `reason` — the field the dashboard already displays.
-        reason_bits = [b for b in (data.get("service"), data.get("notes")) if b]
+        # Service, stylist, price and notes have no columns of their own, so they're
+        # folded into `reason` — the field the dashboard already displays.
+        stylist = (data.get("stylist") or "").strip()
+        if stylist:
+            stylist = f"with {stylist}" + (" (requested)" if data.get("is_request") else "")
+        price = (data.get("price") or "").strip()
+        reason_bits = [
+            b for b in (
+                data.get("service"),
+                stylist,
+                f"${price}" if price else "",
+                data.get("notes"),
+            ) if b
+        ]
         reason = " — ".join(reason_bits) or "Imported appointment"
         if key in existing:
             prior = existing[key]

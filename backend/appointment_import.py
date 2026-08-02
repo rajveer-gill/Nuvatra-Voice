@@ -40,17 +40,29 @@ MAX_ROWS = 200
 _EXTRACT_SYSTEM = """You extract appointments from text copied out of a salon booking system (usually Zenoti's queue view).
 
 Return ONLY a JSON object, no prose, no markdown fence:
-{"appointments": [{"customer_name": str, "service": str, "stylist": str, "time": str, "date": str, "is_request": bool, "notes": str}]}
+{"appointments": [{"customer_name": str, "service": str, "stylist": str, "time": str, "date": str, "is_request": bool, "price": str, "notes": str}]}
+
+Zenoti's queue view pastes as one value per line, repeating this block per guest:
+  <queue number>        e.g. 10
+  <guest name>          e.g. Jannie B
+  <service>|            e.g. All-over color (+1)|     <- trailing pipe, (+N) = N add-ons
+  <stylist>             e.g. Tina (Req.)   or   First Available
+  <arrived time>        e.g. 12:00 pm
+  <original time>       e.g. 12:00 pm      <- THIS is the booked appointment time
+  <expected time>       e.g. 12:00 pm
+  Total : $138.00
+Column headers appear once at the top: Guest, Service, Arrived, Original, Expected.
 
 Rules:
-- time: 24-hour "HH:MM". A row often shows THREE times (arrival, appointment, expected finish). Use the APPOINTMENT time — normally the second, or the one the layout presents as the booked slot. Never invent a time.
-- date: "YYYY-MM-DD" if the text states a date. If no date appears anywhere, use "" (empty). Do NOT guess today's date.
-- stylist: the staff member's name. If the row says "first available", "any", or similar, use "" (empty).
-- is_request: true when the row indicates the guest REQUESTED a specific stylist (often marked "request"); false for first-available.
-- service: the service name as written. Do not translate or normalize it.
-- customer_name: the guest's name only, no phone or ID.
-- notes: anything else on the row worth keeping (add-ons, comments). "" if nothing.
-- Skip header rows, totals, column labels, and blank lines.
+- time: 24-hour "HH:MM". Three times appear per guest — arrived, ORIGINAL, expected. Use the ORIGINAL (middle) one: that's the booked slot. Never invent a time.
+- date: "YYYY-MM-DD" only if the text actually states one. A queue view is a single day and usually shows NO date — return "" then. Do NOT guess today's date.
+- stylist: the staff name with any "(Req.)" / "(Request)" marker REMOVED — "Tina (Req.)" -> "Tina". If it says "First Available", "Any", or similar, use "" (empty).
+- is_request: true when the stylist was marked as requested (e.g. "(Req.)"); false for first-available.
+- service: the service name, WITHOUT the trailing "|". Keep it exactly as written otherwise — do not translate, expand, or normalize it.
+- price: the "Total : $138.00" amount as a plain number string like "138.00". "" if absent.
+- customer_name: the guest's name only — never the queue number, phone, or ID.
+- notes: anything else worth keeping, e.g. "1 add-on" when the service showed (+1). "" if nothing.
+- SKIP these entirely: column headers, the leading queue number, "Please add guest basic details", "Add Email", blank lines.
 - If the text contains no appointments at all, return {"appointments": []}.
 Extract exactly what is written. Accuracy matters far more than filling every field."""
 
@@ -133,10 +145,43 @@ def _normalize_date(raw, *, fallback: Optional[str] = None) -> str:
 
 _FIRST_AVAILABLE = {"first available", "first avail", "any", "anyone", "any stylist", "n/a", "-"}
 
+# Zenoti marks a requested stylist as "Tina (Req.)". Strip the marker from the name —
+# whether the guest requested them is carried separately, in is_request.
+_REQ_MARKER = re.compile(r"\s*\((?:req\.?|request(?:ed)?)\)\s*$", re.IGNORECASE)
 
-def _clean_stylist(raw) -> str:
+
+def _clean_stylist(raw) -> tuple[str, bool]:
+    """Return (stylist_name, was_requested). Empty name means first-available."""
     s = re.sub(r"\s+", " ", str(raw or "").strip())
-    return "" if s.lower() in _FIRST_AVAILABLE else s[:120]
+    requested = bool(_REQ_MARKER.search(s))
+    s = _REQ_MARKER.sub("", s).strip()
+    if s.lower() in _FIRST_AVAILABLE:
+        return "", False
+    return s[:120], requested
+
+
+def _clean_service(raw) -> tuple[str, str]:
+    """Return (service_name, note). Zenoti appends a trailing '|' and marks add-ons
+    as '(+1)'; the count is worth keeping but doesn't belong in the service name."""
+    s = re.sub(r"\s+", " ", str(raw or "").strip()).rstrip("|").strip()
+    note = ""
+    m = re.search(r"\(\+(\d+)\)\s*$", s)
+    if m:
+        n = int(m.group(1))
+        note = f"{n} add-on" + ("s" if n != 1 else "")
+        s = s[: m.start()].strip()
+    return s[:200], note
+
+
+def _clean_price(raw) -> str:
+    """Normalize '$138.00' / 'Total : $138.00' / '138' to '138.00'. '' if not a price."""
+    digits = re.search(r"(\d+(?:\.\d{1,2})?)", str(raw or "").replace(",", ""))
+    if not digits:
+        return ""
+    try:
+        return f"{float(digits.group(1)):.2f}"
+    except ValueError:
+        return ""
 
 
 def parse_pasted_appointments(
@@ -207,15 +252,22 @@ def parse_pasted_appointments(
         if not name or not time:
             skipped += 1
             continue
+        stylist, requested = _clean_stylist(r.get("stylist"))
+        service, addon_note = _clean_service(r.get("service"))
+        notes = str(r.get("notes") or "").strip()[:500]
+        if addon_note and addon_note.lower() not in notes.lower():
+            notes = f"{addon_note} · {notes}" if notes else addon_note
         out.append(
             {
                 "customer_name": name,
-                "service": re.sub(r"\s+", " ", str(r.get("service") or "").strip())[:200],
-                "stylist": _clean_stylist(r.get("stylist")),
+                "service": service,
+                "stylist": stylist,
                 "date": _normalize_date(r.get("date"), fallback=fallback_date),
                 "time": time,
-                "is_request": bool(r.get("is_request")),
-                "notes": str(r.get("notes") or "").strip()[:500],
+                # Trust the marker in the text over the model's own judgement.
+                "is_request": requested or bool(r.get("is_request")),
+                "price": _clean_price(r.get("price")),
+                "notes": notes,
             }
         )
     if skipped:

@@ -18,6 +18,7 @@ type ParsedRow = {
   date: string
   time: string
   is_request: boolean
+  price?: string
   notes: string
   already_imported?: boolean
 }
@@ -279,6 +280,7 @@ export function ImportFromZenoti({
                       <th className="px-2 py-2 font-medium">Customer</th>
                       <th className="px-2 py-2 font-medium">Service</th>
                       <th className="px-2 py-2 font-medium">Stylist</th>
+                      <th className="px-2 py-2 text-right font-medium">Total</th>
                       <th className="w-8 px-2 py-2" />
                     </tr>
                   </thead>
@@ -344,6 +346,9 @@ export function ImportFromZenoti({
                               placeholder="first available"
                               className="w-28 rounded border border-white/10 bg-zinc-950/60 px-1.5 py-1 text-xs text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
                             />
+                          </td>
+                          <td className="whitespace-nowrap px-2 py-1.5 text-right text-zinc-400">
+                            {r.price ? `$${r.price}` : '—'}
                           </td>
                           <td className="px-2 py-1.5 align-middle">
                             <button
