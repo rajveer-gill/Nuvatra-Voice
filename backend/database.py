@@ -1398,6 +1398,29 @@ def db_org_sync_store_plans(org_id: str, plan: str) -> int:
         return 0
 
 
+def db_org_delete(org_id: str) -> bool:
+    """Delete an org. Its members and pending invites cascade away with it.
+
+    Any store still attached has its org_id set to NULL (the FK is ON DELETE SET
+    NULL), which makes it an independent store again — it does NOT delete stores.
+    That's survivable but usually not what you want, so callers should check the
+    store count first; the admin route refuses unless explicitly forced.
+    """
+    conn = _get_conn()
+    if not conn or not org_id:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM orgs WHERE id = %s::uuid", (org_id,))
+        ok = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return ok
+    except Exception as e:
+        print(f"[DB] Failed to delete org: {e}")
+        return False
+
+
 def db_org_member_add(clerk_user_id: str, org_id: str, role: str = "viewer") -> bool:
     """Add (or re-role) a user in an org. Unknown roles fall back to viewer — the
     least-privileged option, so a typo can never grant write access."""

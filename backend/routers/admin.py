@@ -431,6 +431,74 @@ def admin_create_org(req: AdminOrgCreate, request: Request, admin: str = Depends
     return org
 
 
+@router.delete("/api/admin/orgs/{org_id}")
+def admin_delete_org(
+    org_id: str,
+    request: Request,
+    force: bool = False,
+    admin: str = Depends(deps.require_admin),
+):
+    """Delete a group. Members and pending invites go with it; stores do NOT.
+
+    Two guards, both bypassable with ?force=true, because both describe damage that
+    is easy to cause and hard to notice:
+
+    - **Still has stores.** Deleting would detach them (org_id -> NULL), so they'd
+      become independent stores that no longer inherit the group's subscription —
+      i.e. a paying customer's locations quietly stop being paid for.
+    - **Still has a Stripe subscription.** Deleting the org loses our only link to
+      it, and Stripe keeps billing a subscription nobody can now find or cancel.
+
+    Detach the stores and cancel the subscription first, or pass force if you know
+    the group is disposable (a test leftover, typically).
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    org = database.db_org_get_by_id(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Org not found")
+    store_count = database.db_org_store_count(org_id)
+    sub_id = (org.get("stripe_subscription_id") or "").strip()
+    if not force:
+        if store_count:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This group still has {store_count} store(s). Detaching them here would "
+                    "stop them inheriting its subscription. Move or delete the stores first, "
+                    "or retry with force=true."
+                ),
+            )
+        if sub_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This group still has a Stripe subscription. Deleting it would leave that "
+                    "subscription billing with nothing pointing at it. Cancel it in Stripe "
+                    "first, or retry with force=true."
+                ),
+            )
+    ok = database.db_org_delete(org_id)
+    deps.audit_log(
+        "admin",
+        "org_deleted",
+        actor_id=admin,
+        resource_type="org",
+        resource_id=org_id,
+        details={
+            "name": org.get("name"),
+            "stores_detached": store_count,
+            "had_subscription": bool(sub_id),
+            "forced": bool(force),
+            "ok": ok,
+        },
+        request=request,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Could not delete the group")
+    return {"ok": True, "stores_detached": store_count}
+
+
 @router.post("/api/admin/orgs/{org_id}/stores")
 def admin_attach_stores(
     org_id: str, req: AdminOrgAttach, request: Request, admin: str = Depends(deps.require_admin)

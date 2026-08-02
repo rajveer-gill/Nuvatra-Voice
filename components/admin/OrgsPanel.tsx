@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { CollapsibleSection } from '@/components/ui/CollapsibleSection'
-import { Building2, Store, UserPlus, X } from 'lucide-react'
+import { Building2, Store, Trash2, UserPlus, X } from 'lucide-react'
 
 interface OrgMember {
   clerk_user_id: string
@@ -263,6 +263,18 @@ function OrgCard({
       onSuccess('Member removed.')
     })
 
+  const deleteOrg = () =>
+    run(async () => {
+      // The backend refuses if the group still has stores or a live subscription;
+      // that 409 surfaces as an error message rather than being forced through here.
+      // Forcing is deliberately API-only — it's not a thing to have one click away.
+      if (!window.confirm(`Delete the group "${org.name}"? Its members and pending invites go with it.`)) {
+        return
+      }
+      await api.delete(`/api/admin/orgs/${org.id}`, adminApi)
+      onSuccess(`Deleted group "${org.name}".`)
+    })
+
   const revokeInvite = (email: string) =>
     run(async () => {
       await api.delete(`/api/admin/orgs/${org.id}/invites`, { ...adminApi, data: { email } })
@@ -279,6 +291,19 @@ function OrgCard({
           {org.members.length} {org.members.length === 1 ? 'member' : 'members'}
           {org.pending_invites.length > 0 && ` · ${org.pending_invites.length} invited`}
         </span>
+        <button
+          type="button"
+          onClick={deleteOrg}
+          disabled={busy}
+          title={
+            org.stores.length
+              ? 'Detach its stores first'
+              : 'Delete this group'
+          }
+          className="ml-auto rounded p-1 text-zinc-600 motion-safe-transition hover:bg-white/5 hover:text-red-300 disabled:opacity-50"
+        >
+          <Trash2 className="h-4 w-4" aria-hidden />
+        </button>
       </div>
 
       <div className="grid gap-5 md:grid-cols-2">

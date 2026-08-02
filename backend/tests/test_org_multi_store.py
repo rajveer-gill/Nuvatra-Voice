@@ -238,6 +238,93 @@ def test_org_membership_does_not_touch_tenant_ownership():
 
 
 @_DB
+def test_deleting_an_org_takes_its_members_and_invites():
+    """Cleanup after a test run shouldn't leave orphaned membership rows behind."""
+    database.init_db()
+    org = database.db_org_create("Disposable")
+    database.db_org_member_add("user_x", org["id"], "manager")
+    database.db_org_invite_upsert("someone@co.com", org["id"], "viewer")
+
+    assert database.db_org_delete(org["id"]) is True
+    assert database.db_org_get_by_id(org["id"]) is None
+    assert database.db_org_memberships("user_x") == []   # cascaded
+    assert database.db_org_invites_for_org(org["id"]) == []
+
+
+@_DB
+def test_deleting_an_org_detaches_stores_rather_than_deleting_them():
+    """The FK is ON DELETE SET NULL, so a store survives as an independent one. This
+    is why the admin route refuses unless forced — the store lives, but it silently
+    stops inheriting the group's subscription."""
+    database.init_db()
+    org = database.db_org_create("Group")
+    t = database.db_tenant_create_pending("survives", "Survivor", "pro", "salon_chair")
+    database.db_org_attach_tenant(t["id"], org["id"])
+
+    database.db_org_delete(org["id"])
+
+    still_there = database.db_tenant_get_by_id(t["id"])
+    assert still_there is not None, "deleting a group must never delete its stores"
+    assert still_there["org_id"] is None
+
+
+def test_delete_route_refuses_a_group_that_still_has_stores(monkeypatch):
+    """The guard that stops someone quietly un-paying a customer's locations."""
+    from fastapi import HTTPException
+
+    from routers import admin as ad
+
+    monkeypatch.setattr(ad.runtime, "USE_DB", True)
+    monkeypatch.setattr(ad.database, "db_org_get_by_id", lambda oid: {"id": oid, "name": "G"})
+    monkeypatch.setattr(ad.database, "db_org_store_count", lambda oid: 3)
+    monkeypatch.setattr(
+        ad.database, "db_org_delete", lambda oid: pytest.fail("must not delete")
+    )
+    with pytest.raises(HTTPException) as e:
+        ad.admin_delete_org("org-1", request=None, force=False, admin="admin_1")
+    assert e.value.status_code == 409
+    assert "still has 3 store" in str(e.value.detail)
+
+
+def test_delete_route_refuses_a_group_with_a_live_subscription(monkeypatch):
+    """Deleting would orphan a subscription that keeps billing with nothing linked."""
+    from fastapi import HTTPException
+
+    from routers import admin as ad
+
+    monkeypatch.setattr(ad.runtime, "USE_DB", True)
+    monkeypatch.setattr(
+        ad.database, "db_org_get_by_id",
+        lambda oid: {"id": oid, "name": "G", "stripe_subscription_id": "sub_123"},
+    )
+    monkeypatch.setattr(ad.database, "db_org_store_count", lambda oid: 0)
+    monkeypatch.setattr(
+        ad.database, "db_org_delete", lambda oid: pytest.fail("must not delete")
+    )
+    with pytest.raises(HTTPException) as e:
+        ad.admin_delete_org("org-1", request=None, force=False, admin="admin_1")
+    assert e.value.status_code == 409
+    assert "subscription" in str(e.value.detail).lower()
+
+
+def test_delete_route_allows_an_empty_group(monkeypatch):
+    """The normal cleanup case: no stores, no subscription — just delete it."""
+    from routers import admin as ad
+
+    deleted = []
+    monkeypatch.setattr(ad.runtime, "USE_DB", True)
+    monkeypatch.setattr(ad.database, "db_org_get_by_id", lambda oid: {"id": oid, "name": "G"})
+    monkeypatch.setattr(ad.database, "db_org_store_count", lambda oid: 0)
+    monkeypatch.setattr(
+        ad.database, "db_org_delete", lambda oid: (deleted.append(oid), True)[1]
+    )
+    monkeypatch.setattr(ad.deps, "audit_log", lambda *a, **k: None)
+    res = ad.admin_delete_org("org-1", request=None, force=False, admin="admin_1")
+    assert res["ok"] is True
+    assert deleted == ["org-1"]
+
+
+@_DB
 def test_store_metrics_are_scoped_per_store():
     database.init_db()
     org = database.db_org_create("Region")
