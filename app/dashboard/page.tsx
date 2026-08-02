@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation'
 import { motion, useReducedMotion } from 'framer-motion'
 import { useApiClient, sameOriginApiConfig, getSelectedStoreId, setSelectedStoreId } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
+import { hasSkippedOnboarding } from '@/lib/onboardingSkip'
 import { PlanPicker } from '@/components/PlanPicker'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { AlertTriangle, ChevronLeft, Eye, Store, Users } from 'lucide-react'
@@ -310,6 +311,9 @@ export default function DashboardPage() {
     // the prospect never sees the dashboard they came to look at.
     const needsOnboarding =
       !subscription?.demo_mode &&
+      // "Skip to dashboard" on the wizard would otherwise bounce straight back here
+      // and be sent to the wizard again — an unescapable loop.
+      !hasSkippedOnboarding() &&
       !setupStatus.onboarding_completed_at &&
       (setupStatus.voice_ready === false || setupStatus.webhooks_configured === false)
     if (needsOnboarding && typeof window !== 'undefined') {

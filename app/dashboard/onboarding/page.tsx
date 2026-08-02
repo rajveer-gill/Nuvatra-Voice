@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { SetupWizard, type SetupWizardStatus } from '@/components/onboarding/SetupWizard'
 import { useApiClient } from '@/lib/api'
+import { markOnboardingSkipped } from '@/lib/onboardingSkip'
 
 export default function OnboardingPage() {
   const api = useApiClient()
@@ -58,7 +59,11 @@ export default function OnboardingPage() {
         <div className="mx-auto max-w-lg">
           <div className="mb-6 flex items-center justify-between">
             <h1 className="font-display text-2xl font-semibold text-white">Setup wizard</h1>
-            <Link href="/dashboard" className="text-sm text-zinc-400 hover:text-white">
+            <Link
+              href="/dashboard"
+              onClick={() => markOnboardingSkipped()}
+              className="text-sm text-zinc-400 hover:text-white"
+            >
               Skip to dashboard
             </Link>
           </div>
