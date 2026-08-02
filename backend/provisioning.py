@@ -63,6 +63,7 @@ def provision_one_tenant(
                         auth_token=auth_token,
                         base_url=base_url,
                         area_code=task.get("area_code") or default_area_code,
+                        label=(task.get("client_id") or "").strip() or None,
                     )
                     if not res.get("ok"):
                         raise RuntimeError(

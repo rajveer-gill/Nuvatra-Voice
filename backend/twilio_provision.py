@@ -212,6 +212,7 @@ def purchase_number(
     base_url: str,
     area_code: Optional[str] = None,
     country: str = "US",
+    label: Optional[str] = None,
 ) -> dict[str, Any]:
     """Search available local numbers and buy one, configuring webhooks at purchase.
 
@@ -251,15 +252,22 @@ def purchase_number(
         if not chosen:
             result["errors"].append("no_available_numbers")
             return result
-        purchased = client.incoming_phone_numbers.create(
-            phone_number=chosen,
-            voice_url=urls["voice"],
-            voice_method="POST",
-            sms_url=urls["sms"],
-            sms_method="POST",
-            status_callback=urls["status"],
-            status_callback_method="POST",
-        )
+        # Name the number after the store that owns it. Twilio otherwise labels every
+        # number with its own digits, so a console holding 34 stores plus disposable
+        # test lines is unreadable — you end up reading webhook URLs to tell which is
+        # which. Trimmed to Twilio's 64-char limit.
+        create_kwargs: dict[str, Any] = {
+            "phone_number": chosen,
+            "voice_url": urls["voice"],
+            "voice_method": "POST",
+            "sms_url": urls["sms"],
+            "sms_method": "POST",
+            "status_callback": urls["status"],
+            "status_callback_method": "POST",
+        }
+        if (label or "").strip():
+            create_kwargs["friendly_name"] = str(label).strip()[:64]
+        purchased = client.incoming_phone_numbers.create(**create_kwargs)
         result["ok"] = True
         result["phone_e164"] = normalize_e164(
             getattr(purchased, "phone_number", chosen) or chosen

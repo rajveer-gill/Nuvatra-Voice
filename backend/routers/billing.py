@@ -664,7 +664,12 @@ def _provision_number_for_tenant(tenant: dict, area_code: Optional[str], request
         logger.error("self_serve_provision_skipped: missing Twilio/base config tenant=%s", tenant.get("id"))
         return
     res = twilio_provision.purchase_number(
-        account_sid=acct, auth_token=tok, base_url=base, area_code=area_code
+        account_sid=acct,
+        auth_token=tok,
+        base_url=base,
+        area_code=area_code,
+        # Label it with the store, so the Twilio console is readable at 34 locations.
+        label=(tenant.get("client_id") or tenant.get("name") or "").strip() or None,
     )
     if res.get("ok") and res.get("phone_e164"):
         database.db_tenant_set_twilio_phone(tenant["id"], res["phone_e164"])
