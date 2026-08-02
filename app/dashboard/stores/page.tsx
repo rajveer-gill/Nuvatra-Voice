@@ -3,7 +3,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import type { AxiosInstance } from 'axios'
-import { AlertTriangle, ArrowRight, CreditCard, Mail, PhoneMissed, Plus, X } from 'lucide-react'
+import {
+  AlertTriangle,
+  ArrowRight,
+  ChevronLeft,
+  CreditCard,
+  Mail,
+  PhoneMissed,
+  Plus,
+  X,
+} from 'lucide-react'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { CarrierForwardingInstructions } from '@/components/CarrierForwardingInstructions'
 import { useApiClient, setSelectedStoreId } from '@/lib/api'
@@ -183,6 +192,20 @@ export default function StoresPage() {
                   ? `${totals.stores} ${totals.stores === 1 ? 'store' : 'stores'} · last ${days} days`
                   : 'Loading…'}
               </p>
+              {/* Getting here is now possible from the dashboard header, so there has
+                  to be a way back — otherwise a one-location owner who clicks through
+                  is stranded on a list of one. */}
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedStoreId(null)
+                  router.push('/dashboard')
+                }}
+                className="mt-2 inline-flex items-center gap-1 text-xs text-zinc-500 motion-safe-transition hover:text-zinc-300"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+                Back to dashboard
+              </button>
             </div>
             <div className="flex items-center gap-2">
               <div className="flex gap-1 rounded-full border border-white/10 bg-zinc-950/40 p-1">

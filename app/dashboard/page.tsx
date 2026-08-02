@@ -10,7 +10,7 @@ import { useApiClient, sameOriginApiConfig, getSelectedStoreId, setSelectedStore
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { PlanPicker } from '@/components/PlanPicker'
 import { AppChrome } from '@/components/layout/AppChrome'
-import { AlertTriangle, ChevronLeft, Eye, Users } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, Eye, Store, Users } from 'lucide-react'
 
 export const TEAM_ROSTER_SECTION_ID = 'team-roster-settings'
 export const STORE_PHONE_SECTION_ID = 'store-phone-settings'
@@ -81,7 +81,11 @@ export default function DashboardPage() {
   const [setupStatus, setSetupStatus] = useState<SetupStatusSnapshot | null>(null)
   // Multi-store oversight: set only for a franchise/regional account. A normal store
   // owner gets is_org_member=false and sees none of this.
-  const [org, setOrg] = useState<{ is_org_member: boolean; can_edit_any?: boolean } | null>(null)
+  const [org, setOrg] = useState<{
+    is_org_member: boolean
+    can_edit_any?: boolean
+    store_count?: number
+  } | null>(null)
   const [viewingStore, setViewingStore] = useState<string | null>(null)
 
   const tabs = useMemo(() => {
@@ -134,7 +138,9 @@ export default function DashboardPage() {
   useEffect(() => {
     setViewingStore(getSelectedStoreId())
     api
-      .get<{ is_org_member: boolean; can_edit_any?: boolean }>('/api/org/me')
+      .get<{ is_org_member: boolean; can_edit_any?: boolean; store_count?: number }>(
+        '/api/org/me'
+      )
       .then((r) => setOrg(r.data))
       .catch(() => setOrg(null))
   }, [api])
@@ -437,7 +443,23 @@ export default function DashboardPage() {
                 <p className="mt-1 text-sm text-zinc-500">AI-Powered Voice Receptionist</p>
               </div>
             </div>
-            <UserButton afterSignOutUrl="/" />
+            <div className="flex items-center gap-3">
+              {/* The only way into the stores page used to be the "All stores" button
+                  in the store-context bar — which itself only renders once a store is
+                  selected, which only happens by coming FROM the stores page. Circular,
+                  so a one-location owner could never reach it and never discover they
+                  could add a second. Shown to anyone who manages their account. */}
+              {org?.is_org_member && org.can_edit_any && (
+                <Link
+                  href="/dashboard/stores"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 motion-safe-transition hover:border-white/30 hover:text-white"
+                >
+                  <Store className="h-3.5 w-3.5" aria-hidden />
+                  {org.store_count && org.store_count > 1 ? 'Your stores' : 'Add a location'}
+                </Link>
+              )}
+              <UserButton afterSignOutUrl="/" />
+            </div>
           </header>
 
           {org?.is_org_member && viewingStore && (
