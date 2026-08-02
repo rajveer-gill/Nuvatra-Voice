@@ -356,8 +356,16 @@ def _resolve_org_store(request: Request, user_id: str):
                 details={"reason": "store_not_in_org", "store_ref": store_ref[:64]},
                 request=request,
             )
+            # Machine-readable code so the client can tell "this store is gone, drop
+            # your saved selection and retry" from a real permission problem. Without
+            # it, a store that gets deleted while someone has it selected locks them
+            # out of the whole app until they clear browser storage.
             raise HTTPException(
-                status_code=403, detail="You do not have access to that store."
+                status_code=403,
+                detail={
+                    "code": "STORE_NOT_ACCESSIBLE",
+                    "message": "You do not have access to that store.",
+                },
             )
         return None  # not an overseer — ignore the header, resolve them normally
     role = (scoped.get("role") or "viewer").strip().lower()

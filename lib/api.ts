@@ -92,11 +92,29 @@ export function useApiClient(): AxiosInstance {
     instance.interceptors.response.use(
       (response) => response,
       async (error: {
-        config?: { headers?: Record<string, string>; url?: string; _retry?: boolean }
-        response?: { status?: number }
+        config?: {
+          headers?: Record<string, string>
+          url?: string
+          _retry?: boolean
+          _storeRetry?: boolean
+        }
+        response?: { status?: number; data?: { detail?: unknown } }
       }) => {
         const cfg = error.config
         const status = error.response?.status
+        // A selected store that no longer exists (deleted, detached, or access
+        // revoked) would otherwise 403 every single request and lock the user out
+        // with no way back — clearing browser storage was the only escape. Drop the
+        // stale selection and retry once, unscoped.
+        if (status === 403 && cfg && !cfg._storeRetry) {
+          const detail = error.response?.data?.detail as { code?: string } | undefined
+          if (detail && typeof detail === 'object' && detail.code === 'STORE_NOT_ACCESSIBLE') {
+            cfg._storeRetry = true
+            setSelectedStoreId(null)
+            if (cfg.headers) delete cfg.headers['X-Store-Id']
+            return instance.request(cfg)
+          }
+        }
         if (status !== 401 || !cfg || cfg._retry) {
           return Promise.reject(error)
         }

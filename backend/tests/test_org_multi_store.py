@@ -63,6 +63,9 @@ def test_store_outside_your_org_is_403(monkeypatch):
     with pytest.raises(HTTPException) as e:
         deps._resolve_org_store(_Req(store="someone-elses-shop"), "user_1")
     assert e.value.status_code == 403
+    # Machine-readable so the client can drop a stale selection and retry instead of
+    # dead-ending. A store deleted while selected used to lock the user out entirely.
+    assert e.value.detail["code"] == "STORE_NOT_ACCESSIBLE"
 
 
 def test_stale_store_header_does_not_lock_out_a_normal_owner(monkeypatch):
