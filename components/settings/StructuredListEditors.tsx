@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { CheckCircle2, Clock, DollarSign, Plus, Pencil, Tag, Trash2, X } from 'lucide-react'
 
@@ -134,6 +134,27 @@ export function ServicesEditor({
     onChange(items.filter((x) => x.id !== id))
   }
 
+  const nameById = useMemo(() => new Map(items.map((s) => [s.id, s.name])), [items])
+  const groups = useMemo(() => {
+    const addons = items.filter((s) => s.is_addon)
+    return [
+      {
+        key: 'services',
+        title: 'Services',
+        hint: 'Booked on their own',
+        rows: items.filter((s) => !s.is_addon),
+      },
+      {
+        key: 'addons',
+        title: 'Add-ons',
+        hint: 'Added to a service — never booked alone',
+        rows: addons,
+      },
+    ].filter((g) => g.rows.length > 0 || g.key === 'services')
+  }, [items])
+  /** A shop with no add-ons doesn't need to be taught the distinction. */
+  const showGroupHeadings = groups.length > 1
+
   return (
     <div className="md:col-span-2 space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -192,59 +213,97 @@ export function ServicesEditor({
           </button>
         </div>
       </div>
-      <ul className="space-y-2">
-        <AnimatePresence initial={false}>
-          {items.map((s) => (
-            <motion.li
-              key={s.id}
-              layout
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-gray-200 bg-gray-50/80 px-4 py-3"
-            >
-              <div>
-                <p className="flex items-center gap-2 font-medium text-gray-900">
-                  {s.name || 'Untitled'}
-                  {s.is_addon && (
-                    <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
-                      {s.applies_to_service_ids?.length
-                        ? `Add-on · ${s.applies_to_service_ids.length} service${
-                            s.applies_to_service_ids.length === 1 ? '' : 's'
-                          }`
-                        : 'Add-on'}
-                    </span>
-                  )}
-                </p>
-                <p className="text-xs text-gray-600">
-                  ${Number(s.price).toFixed(2)} · {s.duration_minutes} min
-                </p>
-              </div>
-              <div className="flex gap-1">
-                <button
-                  type="button"
-                  className="rounded-lg p-2 text-gray-600 hover:bg-gray-200"
-                  onClick={() => {
-                    setEdit(s)
-                    setOpen(true)
-                  }}
-                  aria-label="Edit"
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  className="rounded-lg p-2 text-red-600 hover:bg-red-50"
-                  onClick={() => remove(s.id)}
-                  aria-label="Remove"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            </motion.li>
-          ))}
-        </AnimatePresence>
-      </ul>
+      {/* Two lists, because these are two different things: one is an appointment,
+          the other is a charge that rides along with one. After importing fifty rows
+          from a spreadsheet, telling them apart at a glance is the whole point. */}
+      {groups.map((g) => (
+        <div key={g.key}>
+          {showGroupHeadings && (
+            <div className="mb-2 mt-4 flex items-baseline gap-2 first:mt-0">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                {g.title} ({g.rows.length})
+              </h4>
+              <span className="text-xs text-gray-500">{g.hint}</span>
+            </div>
+          )}
+          <ul className="space-y-2">
+            <AnimatePresence initial={false}>
+              {g.rows.map((s) => {
+                const linked = (s.applies_to_service_ids || [])
+                  .map((id) => nameById.get(id))
+                  .filter(Boolean) as string[]
+                return (
+                  <motion.li
+                    key={s.id}
+                    layout
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-3 ${
+                      s.is_addon
+                        ? 'border-indigo-200 bg-indigo-50/50'
+                        : 'border-gray-200 bg-gray-50/80'
+                    }`}
+                  >
+                    {/* The whole row opens the editor — the pencil alone was easy to
+                        miss on a list this long. */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEdit(s)
+                        setOpen(true)
+                      }}
+                      className="min-w-0 flex-1 rounded-lg text-left focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    >
+                      <p className="flex flex-wrap items-center gap-2 font-medium text-gray-900">
+                        {s.name || 'Untitled'}
+                        {s.is_addon && (
+                          <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
+                            Add-on
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-xs text-gray-600">
+                        ${Number(s.price).toFixed(2)} · {s.duration_minutes} min
+                      </p>
+                      {s.is_addon && (
+                        <p className="mt-0.5 text-xs text-indigo-700">
+                          {linked.length
+                            ? `Goes with: ${linked.slice(0, 3).join(', ')}${
+                                linked.length > 3 ? ` +${linked.length - 3} more` : ''
+                              }`
+                            : 'Goes with any service'}
+                        </p>
+                      )}
+                    </button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-gray-600 hover:bg-gray-200"
+                        onClick={() => {
+                          setEdit(s)
+                          setOpen(true)
+                        }}
+                      >
+                        <Pencil className="h-4 w-4" />
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 text-red-600 hover:bg-red-50"
+                        onClick={() => remove(s.id)}
+                        aria-label={`Remove ${s.name || 'service'}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </motion.li>
+                )
+              })}
+            </AnimatePresence>
+          </ul>
+        </div>
+      ))}
       <Modal
         open={open}
         onClose={() => setOpen(false)}

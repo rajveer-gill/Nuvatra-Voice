@@ -10,9 +10,9 @@
  * Add-ons are guessed (a charge with no duration, or a name that says so) and
  * pre-ticked. It's a heuristic, so every row is editable before import. */
 
-import { useRef, useState } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import type { AxiosInstance } from 'axios'
-import { AlertTriangle, Loader2, Upload, X } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Loader2, Upload, X } from 'lucide-react'
 import type { ServiceRow } from '@/components/settings/StructuredListEditors'
 
 type ParsedService = {
@@ -42,6 +42,8 @@ export function ImportServicesButton({
   const [sheet, setSheet] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Index of the add-on whose "goes with" picker is open, if any. */
+  const [expanded, setExpanded] = useState<number | null>(null)
 
   const upload = async (file: File) => {
     setBusy(true)
@@ -71,6 +73,7 @@ export function ImportServicesButton({
     setRows(null)
     setWarnings([])
     setError(null)
+    setExpanded(null)
   }
 
   /** Every field is correctable before anything is saved. Parsing a stranger's
@@ -78,6 +81,21 @@ export function ImportServicesButton({
    *  typing them here beats opening 51 services one at a time afterwards. */
   const patch = (i: number, next: Partial<ParsedService>) =>
     setRows((prev) => (prev || []).map((r, ix) => (ix === i ? { ...r, ...next } : r)))
+
+  /** Toggle one service in an add-on's "goes with" list. */
+  const toggleLink = (i: number, serviceName: string) =>
+    setRows((prev) =>
+      (prev || []).map((r, ix) => {
+        if (ix !== i) return r
+        const cur = r.applies_to_names || []
+        return {
+          ...r,
+          applies_to_names: cur.includes(serviceName)
+            ? cur.filter((n) => n !== serviceName)
+            : [...cur, serviceName],
+        }
+      })
+    )
 
   const commit = () => {
     if (!rows) return
@@ -126,6 +144,35 @@ export function ImportServicesButton({
       ).length
     : 0
 
+  /** Two labelled groups, add-ons last, each row keeping its index in `rows` so the
+   *  editors above still patch the right one. Ticking the add-on box moves a row
+   *  between groups, which is the clearest possible confirmation it took effect. */
+  const { ordered, serviceCount, addonCount } = useMemo(() => {
+    const all = (rows || []).map((row, index) => ({ row, index }))
+    const plain = all.filter((r) => !r.row.is_addon)
+    const addons = all.filter((r) => r.row.is_addon)
+    return {
+      serviceCount: plain.length,
+      addonCount: addons.length,
+      ordered: [...plain, ...addons].map((r, i) => ({
+        ...r,
+        groupStart: i === 0 || i === plain.length,
+      })),
+    }
+  }, [rows])
+
+  /** Only real services can be picked — an add-on can't be the thing another add-on
+   *  attaches to, and an already-imported service is still a valid target. */
+  const bookableNames = useMemo(() => {
+    const names = [
+      ...existing.filter((s) => !s.is_addon).map((s) => s.name),
+      ...(rows || []).filter((r) => !r.is_addon).map((r) => r.name),
+    ]
+      .map((n) => n.trim())
+      .filter(Boolean)
+    return Array.from(new Set(names))
+  }, [existing, rows])
+
   return (
     <>
       <input
@@ -166,9 +213,10 @@ export function ImportServicesButton({
                 </h3>
                 <p className="text-xs text-gray-600">
                   {sheet && `From the “${sheet}” sheet. `}
-                  Everything here is editable — fix any name, price or duration before
-                  importing. Tick anything that&rsquo;s an add-on and the receptionist
-                  won&rsquo;t book it on its own.
+                  Everything here is editable — fix any name, price or duration now, or
+                  later under Services. Tick the add-on box and the receptionist
+                  won&rsquo;t book it on its own; click an add-on&rsquo;s blue line to
+                  choose which services it goes with.
                 </p>
               </div>
               <button
@@ -202,73 +250,126 @@ export function ImportServicesButton({
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r, i) => {
+                  {ordered.map(({ row: r, index: i, groupStart }) => {
                     const dupe = existing.some(
                       (s) => s.name.trim().toLowerCase() === r.name.trim().toLowerCase()
                     )
                     return (
-                      <tr
-                        key={`${r.name}-${i}`}
-                        className={`border-t border-gray-100 ${dupe ? 'opacity-40' : ''}`}
-                      >
-                        <td className="px-3 py-1.5">
-                          <input
-                            type="text"
-                            value={r.name}
-                            disabled={dupe}
-                            onChange={(e) => patch(i, { name: e.target.value })}
-                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-gray-900 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
-                          />
-                          {dupe && (
-                            <span className="ml-1 text-[10px] uppercase text-gray-500">
-                              already added
-                            </span>
-                          )}
-                          {r.is_addon && r.applies_to_names?.length ? (
-                            <span className="mt-0.5 block pl-1 text-[11px] text-indigo-700">
-                              with: {r.applies_to_names.slice(0, 3).join(', ')}
-                              {r.applies_to_names.length > 3
-                                ? ` +${r.applies_to_names.length - 3} more`
-                                : ''}
-                            </span>
-                          ) : null}
-                        </td>
-                        <td className="px-3 py-1.5">
-                          <input
-                            type="number"
-                            min={0}
-                            step={0.01}
-                            value={r.price || ''}
-                            placeholder="—"
-                            disabled={dupe}
-                            onChange={(e) => patch(i, { price: parseFloat(e.target.value) || 0 })}
-                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-right text-gray-700 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
-                          />
-                        </td>
-                        <td className="px-3 py-1.5">
-                          <input
-                            type="number"
-                            min={0}
-                            max={480}
-                            value={r.duration_minutes || ''}
-                            placeholder="—"
-                            disabled={dupe}
-                            onChange={(e) =>
-                              patch(i, { duration_minutes: parseInt(e.target.value, 10) || 0 })
-                            }
-                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-right text-gray-700 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
-                          />
-                        </td>
-                        <td className="px-3 py-1.5 text-center">
-                          <input
-                            type="checkbox"
-                            checked={r.is_addon}
-                            disabled={dupe}
-                            onChange={(e) => patch(i, { is_addon: e.target.checked })}
-                            className="h-4 w-4 rounded border-gray-300 text-primary-600"
-                          />
-                        </td>
-                      </tr>
+                      <React.Fragment key={`grp-${i}`}>
+                        {groupStart && (
+                          <tr className="bg-gray-100/80">
+                            <td colSpan={4} className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-600">
+                              {r.is_addon
+                                ? `Add-ons — never booked on their own (${addonCount})`
+                                : `Services (${serviceCount})`}
+                            </td>
+                          </tr>
+                        )}
+                        <tr
+                          key={`${r.name}-${i}`}
+                          className={`border-t border-gray-100 ${dupe ? 'opacity-40' : ''}`}
+                        >
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="text"
+                              value={r.name}
+                              disabled={dupe}
+                              onChange={(e) => patch(i, { name: e.target.value })}
+                              className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-gray-900 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
+                            />
+                            {dupe && (
+                              <span className="ml-1 text-[10px] uppercase text-gray-500">
+                                already added
+                              </span>
+                            )}
+                            {r.is_addon && !dupe && (
+                              <button
+                                type="button"
+                                onClick={() => setExpanded(expanded === i ? null : i)}
+                                className="mt-0.5 flex w-full items-center gap-1 pl-1 text-left text-[11px] text-indigo-700 hover:underline"
+                              >
+                                <ChevronDown
+                                  className={`h-3 w-3 shrink-0 transition-transform ${
+                                    expanded === i ? 'rotate-180' : ''
+                                  }`}
+                                />
+                                <span className="truncate">
+                                  {r.applies_to_names?.length
+                                    ? `with: ${r.applies_to_names.slice(0, 3).join(', ')}${
+                                        r.applies_to_names.length > 3
+                                          ? ` +${r.applies_to_names.length - 3} more`
+                                          : ''
+                                      }`
+                                    : 'goes with any service'}
+                                </span>
+                              </button>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              value={r.price || ''}
+                              placeholder="—"
+                              disabled={dupe}
+                              onChange={(e) => patch(i, { price: parseFloat(e.target.value) || 0 })}
+                              className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-right text-gray-700 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
+                            />
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="number"
+                              min={0}
+                              max={480}
+                              value={r.duration_minutes || ''}
+                              placeholder="—"
+                              disabled={dupe}
+                              onChange={(e) =>
+                                patch(i, { duration_minutes: parseInt(e.target.value, 10) || 0 })
+                              }
+                              className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-right text-gray-700 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
+                            />
+                          </td>
+                          <td className="px-3 py-1.5 text-center">
+                            <input
+                              type="checkbox"
+                              checked={r.is_addon}
+                              disabled={dupe}
+                              onChange={(e) => patch(i, { is_addon: e.target.checked })}
+                              className="h-4 w-4 rounded border-gray-300 text-primary-600"
+                            />
+                          </td>
+                        </tr>
+                        {r.is_addon && !dupe && expanded === i && (
+                          <tr className="bg-indigo-50/40">
+                            <td colSpan={4} className="px-3 py-2">
+                              <p className="mb-1 text-xs font-medium text-gray-700">
+                                Which services can &ldquo;{r.name}&rdquo; go with?
+                              </p>
+                              <p className="mb-2 text-[11px] text-gray-600">
+                                Untick everything to let it go with any service.
+                              </p>
+                              <div className="grid max-h-40 grid-cols-2 gap-x-4 gap-y-1 overflow-y-auto">
+                                {bookableNames.map((n) => (
+                                  <label
+                                    key={n}
+                                    className="flex cursor-pointer items-center gap-1.5 text-xs text-gray-700"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={(r.applies_to_names || []).includes(n)}
+                                      onChange={() => toggleLink(i, n)}
+                                      className="h-3.5 w-3.5 rounded border-gray-300 text-primary-600"
+                                    />
+                                    <span className="truncate">{n}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
                     )
                   })}
                 </tbody>
