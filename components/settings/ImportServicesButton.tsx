@@ -70,6 +70,12 @@ export function ImportServicesButton({
     setError(null)
   }
 
+  /** Every field is correctable before anything is saved. Parsing a stranger's
+   *  spreadsheet is guesswork, and this file in particular has no prices at all —
+   *  typing them here beats opening 51 services one at a time afterwards. */
+  const patch = (i: number, next: Partial<ParsedService>) =>
+    setRows((prev) => (prev || []).map((r, ix) => (ix === i ? { ...r, ...next } : r)))
+
   const commit = () => {
     if (!rows) return
     // Skip anything already on the list — importing twice shouldn't duplicate a menu.
@@ -137,8 +143,9 @@ export function ImportServicesButton({
                 </h3>
                 <p className="text-xs text-gray-600">
                   {sheet && `From the “${sheet}” sheet. `}
-                  Tick anything that&rsquo;s an add-on — the receptionist won&rsquo;t book
-                  those on their own.
+                  Everything here is editable — fix any name, price or duration before
+                  importing. Tick anything that&rsquo;s an add-on and the receptionist
+                  won&rsquo;t book it on its own.
                 </p>
               </div>
               <button
@@ -181,32 +188,52 @@ export function ImportServicesButton({
                         key={`${r.name}-${i}`}
                         className={`border-t border-gray-100 ${dupe ? 'opacity-40' : ''}`}
                       >
-                        <td className="px-3 py-1.5 text-gray-900">
-                          {r.name}
+                        <td className="px-3 py-1.5">
+                          <input
+                            type="text"
+                            value={r.name}
+                            disabled={dupe}
+                            onChange={(e) => patch(i, { name: e.target.value })}
+                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-gray-900 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
+                          />
                           {dupe && (
-                            <span className="ml-2 text-[10px] uppercase text-gray-500">
+                            <span className="ml-1 text-[10px] uppercase text-gray-500">
                               already added
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-1.5 text-right text-gray-600">
-                          {r.price ? `$${r.price.toFixed(2)}` : '—'}
+                        <td className="px-3 py-1.5">
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={r.price || ''}
+                            placeholder="—"
+                            disabled={dupe}
+                            onChange={(e) => patch(i, { price: parseFloat(e.target.value) || 0 })}
+                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-right text-gray-700 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
+                          />
                         </td>
-                        <td className="px-3 py-1.5 text-right text-gray-600">
-                          {r.duration_minutes || '—'}
+                        <td className="px-3 py-1.5">
+                          <input
+                            type="number"
+                            min={0}
+                            max={480}
+                            value={r.duration_minutes || ''}
+                            placeholder="—"
+                            disabled={dupe}
+                            onChange={(e) =>
+                              patch(i, { duration_minutes: parseInt(e.target.value, 10) || 0 })
+                            }
+                            className="w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-right text-gray-700 hover:border-gray-200 focus:border-primary-500 focus:bg-white focus:outline-none disabled:text-gray-400"
+                          />
                         </td>
                         <td className="px-3 py-1.5 text-center">
                           <input
                             type="checkbox"
                             checked={r.is_addon}
                             disabled={dupe}
-                            onChange={(e) =>
-                              setRows((prev) =>
-                                (prev || []).map((x, ix) =>
-                                  ix === i ? { ...x, is_addon: e.target.checked } : x
-                                )
-                              )
-                            }
+                            onChange={(e) => patch(i, { is_addon: e.target.checked })}
                             className="h-4 w-4 rounded border-gray-300 text-primary-600"
                           />
                         </td>
