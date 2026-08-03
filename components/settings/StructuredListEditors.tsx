@@ -4,7 +4,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { CheckCircle2, Clock, DollarSign, Plus, Pencil, Tag, Trash2, X } from 'lucide-react'
 
-export type ServiceRow = { id: string; name: string; price: number; duration_minutes: number }
+export type ServiceRow = {
+  id: string
+  name: string
+  price: number
+  duration_minutes: number
+  /** An extra that attaches to a real service (conditioner, hot tools, master-stylist
+   *  charge) and can never be the whole appointment. Enforced in the booking path. */
+  is_addon?: boolean
+}
 export type SpecialRow = { id: string; title: string; description: string; valid_until: string }
 export type RuleRow = { id: string; rule_text: string }
 
@@ -17,6 +25,8 @@ function normalizeServices(raw: unknown): ServiceRow[] {
       price: typeof s.price === 'number' ? s.price : parseFloat(String(s.price ?? 0)) || 0,
       duration_minutes:
         typeof s.duration_minutes === 'number' ? s.duration_minutes : parseInt(String(s.duration_minutes ?? 30), 10) || 30,
+      // Carried through, or every Settings save would silently un-flag add-ons.
+      is_addon: Boolean(s.is_addon),
     }))
   }
   return (raw as string[])
@@ -102,10 +112,14 @@ export function ServicesEditor({
   items,
   onChange,
   required = false,
+  importSlot,
 }: {
   items: ServiceRow[]
   onChange: (next: ServiceRow[]) => void
   required?: boolean
+  /** Optional "Import from file" control, injected so this editor stays free of
+   *  API/auth concerns. */
+  importSlot?: React.ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const [edit, setEdit] = useState<ServiceRow | null>(null)
@@ -152,17 +166,26 @@ export function ServicesEditor({
             </p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setEdit({ id: crypto.randomUUID(), name: '', price: 0, duration_minutes: 30 })
-            setOpen(true)
-          }}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white shadow hover:bg-primary-700"
-        >
-          <Plus className="h-4 w-4" />
-          Add service
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {importSlot}
+          <button
+            type="button"
+            onClick={() => {
+              setEdit({
+                id: crypto.randomUUID(),
+                name: '',
+                price: 0,
+                duration_minutes: 30,
+                is_addon: false,
+              })
+              setOpen(true)
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white shadow hover:bg-primary-700"
+          >
+            <Plus className="h-4 w-4" />
+            Add service
+          </button>
+        </div>
       </div>
       <ul className="space-y-2">
         <AnimatePresence initial={false}>
@@ -176,7 +199,14 @@ export function ServicesEditor({
               className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-gray-200 bg-gray-50/80 px-4 py-3"
             >
               <div>
-                <p className="font-medium text-gray-900">{s.name || 'Untitled'}</p>
+                <p className="flex items-center gap-2 font-medium text-gray-900">
+                  {s.name || 'Untitled'}
+                  {s.is_addon && (
+                    <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
+                      Add-on
+                    </span>
+                  )}
+                </p>
                 <p className="text-xs text-gray-600">
                   ${Number(s.price).toFixed(2)} · {s.duration_minutes} min
                 </p>
@@ -244,6 +274,7 @@ function ServiceForm({
   const [name, setName] = useState(initial.name)
   const [price, setPrice] = useState(initial.price)
   const [dur, setDur] = useState(initial.duration_minutes)
+  const [isAddon, setIsAddon] = useState(Boolean(initial.is_addon))
   return (
     <div className="space-y-4">
       <div>
@@ -278,6 +309,24 @@ function ServiceForm({
           />
         </div>
       </div>
+      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-gray-200 bg-gray-50/80 p-3">
+        <input
+          type="checkbox"
+          checked={isAddon}
+          onChange={(e) => setIsAddon(e.target.checked)}
+          className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600"
+        />
+        <span>
+          <span className="block text-sm font-medium text-gray-800">
+            This is an add-on
+          </span>
+          <span className="block text-xs text-gray-600">
+            Something added to another service — a conditioner, hot tools, a
+            master-stylist charge. The receptionist will never book it on its own; it
+            asks which service it goes with.
+          </span>
+        </span>
+      </label>
       <div className="flex justify-end gap-2 pt-2">
         <button type="button" className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onClick={onCancel}>
           Cancel
@@ -285,7 +334,9 @@ function ServiceForm({
         <button
           type="button"
           className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700"
-          onClick={() => onSave({ ...initial, name, price, duration_minutes: dur })}
+          onClick={() =>
+            onSave({ ...initial, name, price, duration_minutes: dur, is_addon: isAddon })
+          }
         >
           Save
         </button>

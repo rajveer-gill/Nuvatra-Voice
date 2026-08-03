@@ -32,6 +32,7 @@ import {
   VOICE_SAMPLE_TEXT,
 } from '@/components/settings/constants'
 import { BookingModeSection } from '@/components/settings/BookingModeSection'
+import { ImportServicesButton } from '@/components/settings/ImportServicesButton'
 import { SmsAutomationsSection } from '@/components/settings/SmsAutomationsSection'
 import { LockedFeature } from '@/components/ui/LockedFeature'
 import { StaffMembersSection, normalizeStaffFromApi, WORKING_DAYS, type StaffRow } from '@/components/settings/StaffMembersSection'
@@ -1226,7 +1227,18 @@ export default function Settings() {
               </motion.div>
             )}
           </div>
-          <ServicesEditor items={serviceItems} onChange={setServiceItems} required />
+          <ServicesEditor
+            items={serviceItems}
+            onChange={setServiceItems}
+            required
+            importSlot={
+              <ImportServicesButton
+                api={api}
+                existing={serviceItems}
+                onImport={setServiceItems}
+              />
+            }
+          />
           <SpecialsEditor items={specialItems} onChange={setSpecialItems} />
           <RulesEditor items={ruleItems} onChange={setRuleItems} />
         </div>

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, List, Literal, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError, field_validator
 
 import config_service
@@ -510,6 +510,35 @@ def api_setup_status(
             len(body.get("missing") or []),
         )
     return body
+
+
+@router.post("/api/business-info/services/import")
+async def api_import_services(
+    file: UploadFile = File(...),
+    sheet: Optional[str] = Form(None),
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Parse an uploaded service list. Writes NOTHING.
+
+    Returns the rows for the caller to review and edit; saving goes through the
+    normal business-info PATCH, so there's one write path for services rather than a
+    second one that could drift from it.
+    """
+    import service_import
+
+    deps._bind_tenant_db_context(tenant)
+    raw = await file.read()
+    result = service_import.parse_service_spreadsheet(
+        raw, filename=file.filename or "", sheet=sheet
+    )
+    system_info(
+        "service_import_preview",
+        client_id=(tenant or {}).get("client_id"),
+        filename=(file.filename or "")[:120],
+        found=len(result.get("services") or []),
+        sheet=result.get("sheet"),
+    )
+    return result
 
 
 class CreateBusinessRequest(BaseModel):
