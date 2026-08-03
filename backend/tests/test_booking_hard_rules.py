@@ -62,6 +62,72 @@ def test_ordinary_service_is_not_consult_only():
     assert config_service.service_requires_consult("Shampoo & Haircut", _configured()) is False
 
 
+def test_addon_can_be_restricted_to_specific_services():
+    """From the real service tree: Master Stylist 5 is for cuts and styling, Master
+    Stylist 10 for chemical services. Empty means it goes with anything."""
+    info = config_service._config_data_to_business_info(
+        {
+            "services": [
+                {"id": "cut", "name": "Haircut", "price": 28, "duration_minutes": 30},
+                {"id": "color", "name": "All-over color", "price": 100, "duration_minutes": 120},
+                {"id": "ms5", "name": "Master Stylist 5", "is_addon": True,
+                 "applies_to_service_ids": ["cut"]},
+                {"id": "olaplex", "name": "Olaplex", "is_addon": True},
+            ]
+        }
+    )
+    by_id = {s["id"]: s for s in info["services"]}
+    assert by_id["ms5"]["applies_to_service_ids"] == ["cut"]
+    assert by_id["olaplex"]["applies_to_service_ids"] == []   # unrestricted
+    assert by_id["cut"]["applies_to_service_ids"] == []       # not an add-on at all
+
+
+def test_references_to_deleted_services_are_dropped():
+    """Deleting a service must not leave an add-on pointing at nothing — the prompt
+    would render an empty restriction, making the add-on unofferable."""
+    info = config_service._config_data_to_business_info(
+        {
+            "services": [
+                {"id": "cut", "name": "Haircut", "price": 28, "duration_minutes": 30},
+                {"id": "ms5", "name": "Master Stylist 5", "is_addon": True,
+                 "applies_to_service_ids": ["cut", "deleted-service"]},
+            ]
+        }
+    )
+    ms5 = [s for s in info["services"] if s["id"] == "ms5"][0]
+    assert ms5["applies_to_service_ids"] == ["cut"]
+
+
+def test_an_addon_cannot_point_at_itself():
+    info = config_service._config_data_to_business_info(
+        {"services": [{"id": "a", "name": "Olaplex", "is_addon": True,
+                       "applies_to_service_ids": ["a"]}]}
+    )
+    assert info["services"][0]["applies_to_service_ids"] == []
+
+
+def test_prompt_states_which_services_an_addon_belongs_with():
+    from prompts.receptionist import build_system_prompt
+
+    info = config_service._config_data_to_business_info(
+        {
+            "name": "Salon",
+            "hours": "9-5",
+            "staff": [{"id": "s1", "name": "Jamie"}],
+            "services": [
+                {"id": "cut", "name": "Haircut", "price": 28, "duration_minutes": 30},
+                {"id": "ms5", "name": "Master Stylist 5", "is_addon": True,
+                 "applies_to_service_ids": ["cut"]},
+                {"id": "olaplex", "name": "Olaplex", "is_addon": True},
+            ],
+        }
+    )
+    prompt = build_system_prompt(business_info=info)
+    assert 'only with: "Haircut"' in prompt
+    # An unrestricted add-on says so, rather than leaving the model to invent a rule.
+    assert "goes with any service" in prompt
+
+
 def test_addon_flag_round_trips():
     info = _configured()
     assert config_service.is_addon_service("Specialty Conditioner", info) is True

@@ -201,6 +201,7 @@ def build_system_prompt(
                     "price": s.get("price", 0),
                     "duration_minutes": s.get("duration_minutes", ""),
                     "is_addon": bool(s.get("is_addon", False)),
+                    "applies_to_service_ids": s.get("applies_to_service_ids") or [],
                 }
             )
     else:
@@ -241,13 +242,25 @@ def build_system_prompt(
         help_lines.append(services_prompt_block)
     # Per-store booking policy. Both lists are empty for every store that hasn't
     # configured them, so nothing below is added to the prompt by default.
-    addon_names = [e["name"] for e in service_catalog if e.get("is_addon")]
-    if addon_names:
+    addons = [e for e in service_catalog if e.get("is_addon")]
+    if addons:
+        name_by_id = {e["id"]: e["name"] for e in service_catalog if e.get("id")}
+        lines = []
+        for a in addons:
+            allowed = [name_by_id[i] for i in (a.get("applies_to_service_ids") or []) if i in name_by_id]
+            # No restriction listed means it goes with anything — spelling that out
+            # stops the model inventing a rule that the business never set.
+            where = (
+                " — only with: " + ", ".join(f'"{n}"' for n in allowed)
+                if allowed
+                else " — goes with any service"
+            )
+            lines.append(f'  • "{a["name"]}"{where}')
         help_lines.append(
-            "- ADD-ONS: these are extras that attach to a real service and can NEVER be "
-            "the whole appointment: "
-            + ", ".join(f'"{n}"' for n in addon_names)
-            + ". If the caller asks for one on its own, ask which main service it goes with."
+            "- ADD-ONS: extras that attach to a real service and can NEVER be the whole "
+            "appointment. If the caller asks for one on its own, ask which main service "
+            "it goes with. Where a list is given, only offer that add-on alongside those "
+            "services:\n" + "\n".join(lines)
         )
     consult_only = business_info.get("consult_only_services") or []
     if consult_only:

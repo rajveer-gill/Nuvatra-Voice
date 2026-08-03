@@ -61,8 +61,23 @@ def _normalize_service_entries(raw) -> List[dict]:
                     # whole appointment (conditioners, hot tools, length/master-stylist
                     # charges). Defaults False, so every existing service is unchanged.
                     "is_addon": bool(s.get("is_addon", False)),
+                    # Which services this add-on may attach to. EMPTY means "any",
+                    # which is the sane default — a business that hasn't thought about
+                    # it shouldn't have its add-ons silently become unofferable.
+                    # e.g. Master Stylist 5 applies to cuts and styling, Master Stylist
+                    # 10 to chemical services.
+                    "applies_to_service_ids": _normalize_str_list(
+                        s.get("applies_to_service_ids"), 100
+                    ),
                 }
             )
+        # Drop references to services that no longer exist, so a deleted service can't
+        # leave an add-on pointing at nothing.
+        valid_ids = {e["id"] for e in out}
+        for e in out:
+            e["applies_to_service_ids"] = [
+                x for x in e["applies_to_service_ids"] if x in valid_ids and x != e["id"]
+            ]
         return out[:100]
     for line in raw if isinstance(raw, list) else []:
         t = str(line).strip()
@@ -74,6 +89,7 @@ def _normalize_service_entries(raw) -> List[dict]:
                     "price": 0.0,
                     "duration_minutes": 30,
                     "is_addon": False,  # legacy string services are always bookable
+                    "applies_to_service_ids": [],
                 }
             )
     return out[:100]

@@ -12,6 +12,8 @@ export type ServiceRow = {
   /** An extra that attaches to a real service (conditioner, hot tools, master-stylist
    *  charge) and can never be the whole appointment. Enforced in the booking path. */
   is_addon?: boolean
+  /** Which services this add-on may be offered with. Empty = any service. */
+  applies_to_service_ids?: string[]
 }
 export type SpecialRow = { id: string; title: string; description: string; valid_until: string }
 export type RuleRow = { id: string; rule_text: string }
@@ -27,6 +29,9 @@ function normalizeServices(raw: unknown): ServiceRow[] {
         typeof s.duration_minutes === 'number' ? s.duration_minutes : parseInt(String(s.duration_minutes ?? 30), 10) || 30,
       // Carried through, or every Settings save would silently un-flag add-ons.
       is_addon: Boolean(s.is_addon),
+      applies_to_service_ids: Array.isArray(s.applies_to_service_ids)
+        ? s.applies_to_service_ids.map(String)
+        : [],
     }))
   }
   return (raw as string[])
@@ -203,7 +208,11 @@ export function ServicesEditor({
                   {s.name || 'Untitled'}
                   {s.is_addon && (
                     <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
-                      Add-on
+                      {s.applies_to_service_ids?.length
+                        ? `Add-on · ${s.applies_to_service_ids.length} service${
+                            s.applies_to_service_ids.length === 1 ? '' : 's'
+                          }`
+                        : 'Add-on'}
                     </span>
                   )}
                 </p>
@@ -245,6 +254,7 @@ export function ServicesEditor({
           <ServiceForm
             key={edit.id}
             initial={edit}
+            allServices={items}
             onSave={(row) => {
               const next = [...items]
               const ix = next.findIndex((x) => x.id === row.id)
@@ -264,10 +274,13 @@ export function ServicesEditor({
 
 function ServiceForm({
   initial,
+  allServices,
   onSave,
   onCancel,
 }: {
   initial: ServiceRow
+  /** Everything on the menu, so an add-on can say which services it belongs with. */
+  allServices: ServiceRow[]
   onSave: (row: ServiceRow) => void
   onCancel: () => void
 }) {
@@ -275,6 +288,11 @@ function ServiceForm({
   const [price, setPrice] = useState(initial.price)
   const [dur, setDur] = useState(initial.duration_minutes)
   const [isAddon, setIsAddon] = useState(Boolean(initial.is_addon))
+  const [appliesTo, setAppliesTo] = useState<string[]>(initial.applies_to_service_ids || [])
+  // Only real services can host an add-on — an add-on can't attach to another add-on.
+  const hostServices = allServices.filter((s) => !s.is_addon && s.id !== initial.id && s.name.trim())
+  const toggleHost = (id: string) =>
+    setAppliesTo((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   return (
     <div className="space-y-4">
       <div>
@@ -327,6 +345,33 @@ function ServiceForm({
           </span>
         </span>
       </label>
+      {isAddon && hostServices.length > 0 && (
+        <div className="rounded-lg border border-gray-200 p-3">
+          <p className="text-sm font-medium text-gray-800">Which services can it go with?</p>
+          <p className="mb-2 text-xs text-gray-600">
+            Leave all unticked if it can go with anything. Tick some to restrict it — e.g.
+            a master-stylist charge for chemical services only.
+          </p>
+          <div className="max-h-44 space-y-1 overflow-y-auto">
+            {hostServices.map((s) => (
+              <label key={s.id} className="flex cursor-pointer items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={appliesTo.includes(s.id)}
+                  onChange={() => toggleHost(s.id)}
+                  className="h-4 w-4 rounded border-gray-300 text-primary-600"
+                />
+                {s.name}
+              </label>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-gray-500">
+            {appliesTo.length === 0
+              ? 'Currently: goes with any service.'
+              : `Currently: ${appliesTo.length} service${appliesTo.length === 1 ? '' : 's'} only.`}
+          </p>
+        </div>
+      )}
       <div className="flex justify-end gap-2 pt-2">
         <button type="button" className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onClick={onCancel}>
           Cancel
@@ -335,7 +380,16 @@ function ServiceForm({
           type="button"
           className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700"
           onClick={() =>
-            onSave({ ...initial, name, price, duration_minutes: dur, is_addon: isAddon })
+            onSave({
+              ...initial,
+              name,
+              price,
+              duration_minutes: dur,
+              is_addon: isAddon,
+              // Restrictions only mean anything for an add-on; clear them otherwise so
+              // a service that stops being an add-on doesn't keep stale references.
+              applies_to_service_ids: isAddon ? appliesTo : [],
+            })
           }
         >
           Save
