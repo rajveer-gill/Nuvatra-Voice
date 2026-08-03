@@ -179,6 +179,105 @@ def test_oversized_file_is_refused():
     assert any("large" in w.lower() for w in out["warnings"])
 
 
+# --- Suggesting which services an add-on belongs with -------------------------
+# The keyword pass can tell "Master Stylist 10" is a charge; only the prose says it's
+# for chemical services. The model reads that, then everything it returns is checked
+# against the real lists before it can reach a config.
+
+_SERVICES = [
+    {"name": "Shampoo & Haircut", "is_addon": False},
+    {"name": "Full Style", "is_addon": False},
+    {"name": "All-over color", "is_addon": False},
+    {"name": "Master Stylist 5", "is_addon": True},
+    {"name": "Master Stylist 10", "is_addon": True},
+]
+
+
+def _stub_llm(monkeypatch, payload):
+    import json as _json
+
+    text = payload if isinstance(payload, str) else _json.dumps(payload)
+
+    class _Fake:
+        @staticmethod
+        def chat(**kw):
+            return text
+
+    monkeypatch.setitem(__import__("sys").modules, "llm_provider", _Fake)
+
+
+def test_suggests_links_from_the_notes(monkeypatch):
+    _stub_llm(monkeypatch, {"links": [
+        {"addon": "Master Stylist 5", "services": ["Shampoo & Haircut", "Full Style"]},
+        {"addon": "Master Stylist 10", "services": ["All-over color"]},
+    ]})
+    out = service_import.suggest_addon_links(_SERVICES, "Master Stylist Charge for Haircuts")
+    assert out["Master Stylist 5"] == ["Shampoo & Haircut", "Full Style"]
+    assert out["Master Stylist 10"] == ["All-over color"]
+
+
+def test_invented_service_names_are_rejected(monkeypatch):
+    """A hallucinated service must never reach the config."""
+    _stub_llm(monkeypatch, {"links": [
+        {"addon": "Master Stylist 5", "services": ["Shampoo & Haircut", "Nonexistent Service"]},
+    ]})
+    out = service_import.suggest_addon_links(_SERVICES, "notes")
+    assert out["Master Stylist 5"] == ["Shampoo & Haircut"]
+
+
+def test_an_addon_with_no_valid_matches_is_dropped(monkeypatch):
+    """Empty links would read as 'offer this with nothing' — better to leave the
+    add-on available for everything."""
+    _stub_llm(monkeypatch, {"links": [
+        {"addon": "Master Stylist 5", "services": ["Only Invented Ones"]},
+    ]})
+    assert service_import.suggest_addon_links(_SERVICES, "notes") == {}
+
+
+def test_unknown_addon_names_are_rejected(monkeypatch):
+    _stub_llm(monkeypatch, {"links": [{"addon": "Ghost Charge", "services": ["Full Style"]}]})
+    assert service_import.suggest_addon_links(_SERVICES, "notes") == {}
+
+
+def test_matching_is_case_insensitive(monkeypatch):
+    _stub_llm(monkeypatch, {"links": [
+        {"addon": "master stylist 5", "services": ["SHAMPOO & HAIRCUT"]},
+    ]})
+    out = service_import.suggest_addon_links(_SERVICES, "notes")
+    assert out["Master Stylist 5"] == ["Shampoo & Haircut"]
+
+
+@pytest.mark.parametrize("reply", ["not json", "", '{"nope": 1}', "```json\n{bad}\n```"])
+def test_bad_model_output_suggests_nothing(monkeypatch, reply):
+    _stub_llm(monkeypatch, reply)
+    assert service_import.suggest_addon_links(_SERVICES, "notes") == {}
+
+
+def test_llm_failure_is_not_fatal(monkeypatch):
+    """Suggestions are a convenience — an outage must not break the import."""
+
+    class _Boom:
+        @staticmethod
+        def chat(**kw):
+            raise RuntimeError("rate limited")
+
+    monkeypatch.setitem(__import__("sys").modules, "llm_provider", _Boom)
+    assert service_import.suggest_addon_links(_SERVICES, "notes") == {}
+
+
+def test_no_notes_means_no_model_call(monkeypatch):
+    """A single-sheet file has nothing to read, so don't spend a call on it."""
+
+    class _Fail:
+        @staticmethod
+        def chat(**kw):
+            raise AssertionError("should not be called")
+
+    monkeypatch.setitem(__import__("sys").modules, "llm_provider", _Fail)
+    assert service_import.suggest_addon_links(_SERVICES, "") == {}
+    assert service_import.suggest_addon_links([], "some notes") == {}
+
+
 def test_csv_is_accepted():
     csv = b"ServiceName,Price,Duration\nHaircut,28,30\nColor,75,90\n"
     out = service_import.parse_service_spreadsheet(csv, "services.csv")

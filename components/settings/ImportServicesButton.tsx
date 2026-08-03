@@ -22,6 +22,9 @@ type ParsedService = {
   category?: string
   code?: string
   is_addon: boolean
+  /** Services this add-on was suggested to belong with, read from notes elsewhere in
+   *  the workbook. Names here, mapped to ids at import once rows have ids. */
+  applies_to_names?: string[]
 }
 
 export function ImportServicesButton({
@@ -80,18 +83,38 @@ export function ImportServicesButton({
     if (!rows) return
     // Skip anything already on the list — importing twice shouldn't duplicate a menu.
     const seen = new Set(existing.map((s) => s.name.trim().toLowerCase()))
-    const added: ServiceRow[] = rows
+    // Keep each new row paired with the parsed row it came from, so the suggested
+    // links can be resolved without re-deriving the filter and hoping indexes line up.
+    const pairs = rows
       .filter((r) => r.name.trim() && !seen.has(r.name.trim().toLowerCase()))
       .map((r) => ({
-        id: crypto.randomUUID(),
-        name: r.name,
-        price: r.price,
-        // An add-on legitimately has no duration of its own; a bookable service needs
-        // one, and the editor's own minimum is 5.
-        duration_minutes: r.is_addon ? Math.max(0, r.duration_minutes) : Math.max(5, r.duration_minutes),
-        is_addon: r.is_addon,
+        source: r,
+        row: {
+          id: crypto.randomUUID(),
+          name: r.name,
+          price: r.price,
+          // An add-on legitimately has no duration of its own; a bookable service
+          // needs one, and the editor's own minimum is 5.
+          duration_minutes: r.is_addon
+            ? Math.max(0, r.duration_minutes)
+            : Math.max(5, r.duration_minutes),
+          is_addon: r.is_addon,
+          applies_to_service_ids: [] as string[],
+        } satisfies ServiceRow,
       }))
-    onImport([...existing, ...added])
+    // Suggestions arrive as names, because ids only exist now. Resolve against the
+    // whole menu — an add-on can be linked to a service that was already there, not
+    // just one imported in this batch.
+    const idByName = new Map(
+      [...existing, ...pairs.map((p) => p.row)].map((s) => [s.name.trim().toLowerCase(), s.id])
+    )
+    for (const { source, row } of pairs) {
+      if (!row.is_addon || !source.applies_to_names?.length) continue
+      row.applies_to_service_ids = source.applies_to_names
+        .map((n) => idByName.get(n.trim().toLowerCase()))
+        .filter((x): x is string => Boolean(x))
+    }
+    onImport([...existing, ...pairs.map((p) => p.row)])
     close()
   }
 
@@ -201,6 +224,14 @@ export function ImportServicesButton({
                               already added
                             </span>
                           )}
+                          {r.is_addon && r.applies_to_names?.length ? (
+                            <span className="mt-0.5 block pl-1 text-[11px] text-indigo-700">
+                              with: {r.applies_to_names.slice(0, 3).join(', ')}
+                              {r.applies_to_names.length > 3
+                                ? ` +${r.applies_to_names.length - 3} more`
+                                : ''}
+                            </span>
+                          ) : null}
                         </td>
                         <td className="px-3 py-1.5">
                           <input

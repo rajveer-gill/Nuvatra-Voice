@@ -16,10 +16,16 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 from typing import Any, Optional
 
 logger = logging.getLogger("nuvatra")
+
+# Same lever as the appointment import — one env var to roll back or A/B.
+IMPORT_LLM_MODEL = (
+    os.getenv("IMPORT_LLM_MODEL") or os.getenv("VOICE_LLM_MODEL") or "gpt-4o-mini"
+).strip()
 
 MAX_ROWS = 500
 MAX_BYTES = 5 * 1024 * 1024  # a service list is kilobytes; anything larger is a mistake
@@ -103,6 +109,119 @@ def _find_header(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
     return -1, {}
 
 
+_LINK_SYSTEM = """You match salon add-on charges to the services they may be applied to.
+
+You are given a list of SERVICES, a list of ADD-ONS, and NOTES copied from the
+business's own service documentation. The notes explain, in prose, which services
+each add-on belongs with.
+
+Return ONLY a JSON object, no prose, no markdown fence:
+{"links": [{"addon": "<exact add-on name>", "services": ["<exact service name>", ...]}]}
+
+Rules:
+- Use names EXACTLY as given in the ADD-ONS and SERVICES lists. Never invent or
+  reword a name. If you can't match a name exactly, leave it out.
+- Only include an add-on when the notes actually say what it applies to. Omit an
+  add-on entirely rather than guessing — an omitted add-on stays available for
+  everything, which is the safe default.
+- Notes may describe a rule rather than a list, e.g. "all services marked with an
+  asterisk". Apply the rule to the SERVICES list yourself and return the matching
+  service names.
+- An add-on never applies to another add-on.
+- If nothing can be determined, return {"links": []}."""
+
+
+def suggest_addon_links(
+    services: list[dict], notes: str, model: Optional[str] = None
+) -> dict[str, list[str]]:
+    """Ask the model which services each add-on belongs with.
+
+    The keyword pass can tell that "Master Stylist 10" is a charge; only the prose
+    says it's for chemical services. Those relationships live in the business's own
+    documentation — usually a second sheet in the same workbook — so this reads them
+    rather than making an operator tick boxes for a dozen add-ons across every store.
+
+    Returns {addon_name: [service_name, ...]}. Empty on any failure: suggestions are
+    a convenience, and no suggestion (add-on available everywhere) is the safe
+    fallback. Names are validated against the real lists before being returned, so a
+    hallucinated service can't reach the config.
+    """
+    addons = [s["name"] for s in services if s.get("is_addon") and s.get("name")]
+    bookable = [s["name"] for s in services if not s.get("is_addon") and s.get("name")]
+    if not addons or not bookable or not (notes or "").strip():
+        return {}
+    try:
+        import llm_provider
+
+        reply = llm_provider.chat(
+            model=(model or IMPORT_LLM_MODEL),
+            messages=[
+                {"role": "system", "content": _LINK_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        "SERVICES:\n" + "\n".join(f"- {n}" for n in bookable)
+                        + "\n\nADD-ONS:\n" + "\n".join(f"- {n}" for n in addons)
+                        + "\n\nNOTES:\n" + notes[:12000]
+                    ),
+                },
+            ],
+            max_tokens=2000,
+            temperature=0,
+        )
+    except Exception as e:
+        logger.warning("addon_link_suggest_failed err=%s", type(e).__name__)
+        return {}
+
+    obj = _extract_json_object(reply)
+    if not obj or not isinstance(obj.get("links"), list):
+        return {}
+    addon_lookup = {n.lower(): n for n in addons}
+    service_lookup = {n.lower(): n for n in bookable}
+    out: dict[str, list[str]] = {}
+    for link in obj["links"][:100]:
+        if not isinstance(link, dict):
+            continue
+        addon = addon_lookup.get(str(link.get("addon") or "").strip().lower())
+        if not addon:
+            continue
+        matched = []
+        for s in link.get("services") or []:
+            real = service_lookup.get(str(s or "").strip().lower())
+            if real and real not in matched:
+                matched.append(real)
+        # An empty match list would read as "offer this with nothing" — drop it and
+        # let the add-on stay universally available instead.
+        if matched:
+            out[addon] = matched[:100]
+    return out
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Pull a JSON object out of a model reply, tolerating a code fence or stray prose."""
+    import json
+
+    s = (text or "").strip()
+    if not s:
+        return None
+    fence = re.search(r"```(?:json)?\s*(.+?)```", s, re.DOTALL)
+    if fence:
+        s = fence.group(1).strip()
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    start, end = s.find("{"), s.rfind("}")
+    if 0 <= start < end:
+        try:
+            obj = json.loads(s[start : end + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
 def parse_service_spreadsheet(
     data: bytes, filename: str = "", sheet: Optional[str] = None
 ) -> dict:
@@ -126,6 +245,10 @@ def parse_service_spreadsheet(
     rows: list[list[Any]] = []
     sheets: list[str] = []
     chosen = ""
+    # Text from the workbook's OTHER sheets. The service list says what exists; a
+    # companion sheet usually says how it's used ("Master Stylist Charge for Chemical
+    # Services"), which is where add-on applicability actually lives.
+    notes_text = ""
     name = (filename or "").lower()
     try:
         if name.endswith(".csv") or name.endswith(".txt"):
@@ -165,6 +288,18 @@ def parse_service_spreadsheet(
                 if not rows and sheets:
                     chosen = sheets[0]
                     rows = [list(r) for r in wb[chosen].iter_rows(values_only=True)]
+            # Gather the other sheets as plain text for the add-on linker.
+            note_lines: list[str] = []
+            for other in sheets:
+                if other == chosen:
+                    continue
+                for r in wb[other].iter_rows(values_only=True):
+                    cells = [str(c).strip() for c in r if c is not None and str(c).strip()]
+                    if cells:
+                        note_lines.append(" | ".join(cells))
+                    if len(note_lines) > 400:
+                        break
+            notes_text = "\n".join(note_lines)
     except Exception as e:
         logger.warning("service_import_read_failed file=%r err=%s", filename, e)
         return {
@@ -221,6 +356,18 @@ def parse_service_spreadsheet(
                 "code": str(cell("code") or "").strip()[:64],
                 "is_addon": _looks_like_addon(svc_name, duration, category),
             }
+        )
+
+    # Suggest which services each add-on belongs with, read from the workbook's other
+    # sheets. Best-effort: no suggestion just means the add-on stays available for
+    # everything, and every one is reviewable before import.
+    links = suggest_addon_links(out, notes_text) if notes_text else {}
+    for s in out:
+        s["applies_to_names"] = links.get(s["name"], []) if s.get("is_addon") else []
+    if links:
+        warnings.append(
+            f"Suggested which services {len(links)} add-on(s) go with, based on the notes "
+            "in your file — check them after importing."
         )
 
     if skipped:
