@@ -2,7 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { CheckCircle2, Clock, DollarSign, Plus, Pencil, Tag, Trash2, X } from 'lucide-react'
+import {
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  DollarSign,
+  Plus,
+  Pencil,
+  Tag,
+  Trash2,
+  X,
+} from 'lucide-react'
 
 export type ServiceRow = {
   id: string
@@ -113,6 +123,9 @@ function Modal({ open, onClose, title, children }: ModalProps) {
   )
 }
 
+/** How many services each group shows before "Show all". */
+const PREVIEW_COUNT = 3
+
 export function ServicesEditor({
   items,
   onChange,
@@ -128,6 +141,8 @@ export function ServicesEditor({
 }) {
   const [open, setOpen] = useState(false)
   const [edit, setEdit] = useState<ServiceRow | null>(null)
+  /** Which groups are fully expanded. Collapsed by default — see the button below. */
+  const [showAll, setShowAll] = useState<Record<string, boolean>>({})
   const ready = items.length > 0
 
   const remove = (id: string) => {
@@ -216,7 +231,10 @@ export function ServicesEditor({
       {/* Two lists, because these are two different things: one is an appointment,
           the other is a charge that rides along with one. After importing fifty rows
           from a spreadsheet, telling them apart at a glance is the whole point. */}
-      {groups.map((g) => (
+      {groups.map((g) => {
+        const expandedGroup = Boolean(showAll[g.key])
+        const visible = expandedGroup ? g.rows : g.rows.slice(0, PREVIEW_COUNT)
+        return (
         <div key={g.key}>
           {showGroupHeadings && (
             <div className="mb-2 mt-4 flex items-baseline gap-2 first:mt-0">
@@ -228,7 +246,7 @@ export function ServicesEditor({
           )}
           <ul className="space-y-2">
             <AnimatePresence initial={false}>
-              {g.rows.map((s) => {
+              {visible.map((s) => {
                 const linked = (s.applies_to_service_ids || [])
                   .map((id) => nameById.get(id))
                   .filter(Boolean) as string[]
@@ -302,8 +320,25 @@ export function ServicesEditor({
               })}
             </AnimatePresence>
           </ul>
+          {/* A 39-service menu buries everything below it on the Settings page, and
+              nobody scrolls a list they aren't looking through. */}
+          {g.rows.length > PREVIEW_COUNT && (
+            <button
+              type="button"
+              onClick={() => setShowAll((p) => ({ ...p, [g.key]: !expandedGroup }))}
+              className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-gray-300 px-4 py-2 text-sm font-medium text-gray-600 hover:border-gray-400 hover:bg-gray-50"
+            >
+              <ChevronDown
+                className={`h-4 w-4 transition-transform ${expandedGroup ? 'rotate-180' : ''}`}
+              />
+              {expandedGroup
+                ? 'Show fewer'
+                : `Show all ${g.rows.length} ${g.title.toLowerCase()}`}
+            </button>
+          )}
         </div>
-      ))}
+        )
+      })}
       <Modal
         open={open}
         onClose={() => setOpen(false)}
@@ -320,6 +355,14 @@ export function ServicesEditor({
               if (ix >= 0) next[ix] = row
               else next.push(row)
               onChange(next)
+              // Saving a service and not seeing it reads as the save having failed.
+              // If it lands outside the collapsed window, open its group.
+              const posInGroup = next
+                .filter((x) => Boolean(x.is_addon) === Boolean(row.is_addon))
+                .findIndex((x) => x.id === row.id)
+              if (posInGroup >= PREVIEW_COUNT) {
+                setShowAll((p) => ({ ...p, [row.is_addon ? 'addons' : 'services']: true }))
+              }
               setOpen(false)
               setEdit(null)
             }}
