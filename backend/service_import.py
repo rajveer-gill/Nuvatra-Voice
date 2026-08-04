@@ -109,6 +109,135 @@ def _find_header(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
     return -1, {}
 
 
+# How much of each sheet the layout model sees. Enough to spot a header buried under
+# a title block, small enough that a 40-sheet workbook is still one cheap call.
+_PREVIEW_ROWS = 15
+_PREVIEW_COLS = 12
+
+_LAYOUT_SYSTEM = """You read spreadsheets exported from booking and salon software and
+work out where the service menu lives.
+
+You are given a preview of every sheet in one workbook: the first rows of each, with
+0-based row and column indexes on every cell.
+
+Find the ONE sheet holding the list of bookable services, and say which column holds
+what. Ignore sheets listing locations, staff, customers, appointments, or prose
+documentation.
+
+Return ONLY a JSON object, no prose, no markdown fence:
+{"sheet": "<exact sheet name>",
+ "header_row": <0-based index of the header row, or -1 if there is no header>,
+ "columns": {"name": <index>, "price": <index or null>, "duration": <index or null>,
+             "category": <index or null>, "code": <index or null>}}
+
+Rules:
+- "sheet" must be copied exactly from a given sheet name.
+- "name" is required: the column holding what a customer would ask for by name.
+  Never point it at a description, notes, or instructions column.
+- "duration" is how long the service takes, in minutes. Only pick a column whose
+  values are lengths of time. A column of prices is not a duration.
+- "price" is what the customer pays. Use null when the file has no prices — never
+  substitute another number column just to fill the field.
+- Use null for anything not present. Do not invent columns.
+- Indexes are 0-based column positions, exactly as shown in the preview."""
+
+
+def _preview_for_model(all_rows: dict[str, list[list[Any]]]) -> str:
+    """Render the workbook as indexed text for the layout model."""
+    parts: list[str] = []
+    for sname, rows in all_rows.items():
+        parts.append(f"### SHEET {sname or '(single sheet)'} — {len(rows)} rows")
+        for i, row in enumerate(rows[:_PREVIEW_ROWS]):
+            cells = []
+            for j, c in enumerate(row[:_PREVIEW_COLS]):
+                if c is None:
+                    continue
+                txt = re.sub(r"\s+", " ", str(c).strip())[:40]
+                if txt:
+                    cells.append(f"[{j}]={txt}")
+            parts.append(f"row {i}: " + (" | ".join(cells) if cells else "(blank)"))
+    return "\n".join(parts)
+
+
+def _llm_locate_layout(
+    all_rows: dict[str, list[list[Any]]], model: Optional[str] = None
+) -> Optional[dict]:
+    """Ask the model where the service list is when the header aliases don't match.
+
+    The keyword pass only recognises headers we thought of — "ServiceName", "Service
+    Name", "Service". A salon exporting from something we've never seen may label the
+    column "Treatment", "Menu Item" or "Tx", put the data under a merged title block,
+    or ship no header at all, and every one of those is a dead end for a fixed alias
+    list.
+
+    The model only says WHERE to look. Python still does the reading, so a wrong answer
+    produces wrong columns the user can see and correct in the preview, never invented
+    services. Returns None on any failure — the caller then reports what it couldn't
+    find, exactly as before.
+    """
+    if not all_rows:
+        return None
+    try:
+        import llm_provider
+
+        reply = llm_provider.chat(
+            model=(model or IMPORT_LLM_MODEL),
+            messages=[
+                {"role": "system", "content": _LAYOUT_SYSTEM},
+                {"role": "user", "content": _preview_for_model(all_rows)[:24000]},
+            ],
+            max_tokens=400,
+            temperature=0,
+        )
+    except Exception as e:
+        logger.warning("service_import_layout_failed err=%s", type(e).__name__)
+        return None
+
+    obj = _extract_json_object(reply)
+    if not obj:
+        return None
+
+    # Everything below is validation. The model picks; none of its numbers are trusted.
+    wanted = str(obj.get("sheet") or "").strip()
+    sheet_name = wanted if wanted in all_rows else None
+    if sheet_name is None:
+        sheet_name = next((s for s in all_rows if s.lower() == wanted.lower()), None)
+    if sheet_name is None and len(all_rows) == 1:
+        sheet_name = next(iter(all_rows))
+    if sheet_name is None:
+        return None
+
+    rows = all_rows[sheet_name]
+    width = max((len(r) for r in rows), default=0)
+    raw_cols = obj.get("columns")
+    if not rows or not width or not isinstance(raw_cols, dict):
+        return None
+
+    def _ix(field: str) -> Optional[int]:
+        v = raw_cols.get(field)
+        # bool is an int subclass, and True would read as column 1.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        v = int(v)
+        return v if 0 <= v < width else None
+
+    name_ix = _ix("name")
+    if name_ix is None:
+        return None
+    cols: dict[str, int] = {"name": name_ix}
+    for field in ("price", "duration", "category", "code"):
+        ix = _ix(field)
+        if ix is not None and ix != name_ix:
+            cols[field] = ix
+
+    hr = obj.get("header_row")
+    header_ix = int(hr) if isinstance(hr, (int, float)) and not isinstance(hr, bool) else -1
+    # -1 means "data starts at row 0"; extraction reads from header_ix + 1 either way.
+    if not -1 <= header_ix < len(rows):
+        header_ix = -1
+    return {"sheet": sheet_name, "header_row": header_ix, "columns": cols}
+
+
 _LINK_SYSTEM = """You match salon add-on charges to the services they may be applied to.
 
 You are given a list of SERVICES, a list of ADD-ONS, and NOTES copied from the
@@ -222,6 +351,70 @@ def _extract_json_object(text: str) -> Optional[dict]:
     return None
 
 
+def _extract_services(
+    rows: list[list[Any]], header_ix: int, cols: dict[str, int]
+) -> tuple[list[dict], int, bool]:
+    """Read service rows given a located header and column map.
+
+    Returns (services, skipped, hit_row_cap). header_ix of -1 means the data starts at
+    row 0 — a sheet with no header at all.
+    """
+    out: list[dict] = []
+    skipped = 0
+    capped = False
+    for row in rows[header_ix + 1 :]:
+        if len(out) >= MAX_ROWS:
+            capped = True
+            break
+        if not row:
+            continue
+        name_ix = cols["name"]
+        raw_name = row[name_ix] if name_ix < len(row) else None
+        # Guard the None explicitly: str(None) is "None", which is truthy and would
+        # sail through as a service literally called "None".
+        svc_name = (
+            re.sub(r"\s+", " ", str(raw_name).strip())[:200] if raw_name is not None else ""
+        )
+        if not svc_name or _key(svc_name) in _NAME_KEYS:
+            skipped += 1
+            continue
+
+        def cell(field: str, _row=row):
+            ix = cols.get(field)
+            return _row[ix] if ix is not None and ix < len(_row) else None
+
+        duration = max(0, min(_to_int(cell("duration"), 30), 480))
+        category = str(cell("category") or "").strip()[:120]
+        out.append(
+            {
+                "name": svc_name,
+                "price": round(_to_float(cell("price")), 2),
+                # 0 is meaningful here (an add-on charge with no time of its own), so
+                # it's preserved; the UI floors it to 5 for anything actually bookable.
+                "duration_minutes": duration,
+                "category": category,
+                "code": str(cell("code") or "").strip()[:64],
+                "is_addon": _looks_like_addon(svc_name, duration, category),
+            }
+        )
+    return out, skipped, capped
+
+
+def _notes_from(all_rows: dict[str, list[list[Any]]], chosen: str) -> str:
+    """Every sheet except the service list, flattened to text for the add-on linker."""
+    lines: list[str] = []
+    for other, rows in all_rows.items():
+        if other == chosen:
+            continue
+        for r in rows:
+            cells = [str(c).strip() for c in r if c is not None and str(c).strip()]
+            if cells:
+                lines.append(" | ".join(cells))
+            if len(lines) > 400:
+                break
+    return "\n".join(lines)
+
+
 def parse_service_spreadsheet(
     data: bytes, filename: str = "", sheet: Optional[str] = None
 ) -> dict:
@@ -242,64 +435,25 @@ def parse_service_spreadsheet(
             "sheet": "",
         }
 
-    rows: list[list[Any]] = []
+    all_rows: dict[str, list[list[Any]]] = {}
     sheets: list[str] = []
     chosen = ""
-    # Text from the workbook's OTHER sheets. The service list says what exists; a
-    # companion sheet usually says how it's used ("Master Stylist Charge for Chemical
-    # Services"), which is where add-on applicability actually lives.
-    notes_text = ""
     name = (filename or "").lower()
     try:
         if name.endswith(".csv") or name.endswith(".txt"):
             import csv
 
             text = data.decode("utf-8-sig", errors="replace")
-            rows = [list(r) for r in csv.reader(io.StringIO(text))]
+            all_rows = {"": [list(r) for r in csv.reader(io.StringIO(text))]}
         else:
             import openpyxl
 
             wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
             sheets = list(wb.sheetnames)
-            # Prefer the requested sheet, else the first one that actually parses —
-            # a real export often has several tabs (services, staff, locations).
-            if sheet and sheet in sheets:
-                chosen = sheet
-                rows = [list(r) for r in wb[chosen].iter_rows(values_only=True)]
-            else:
-                # Score every sheet and take the richest. A workbook usually has
-                # several tabs, and the first one with a name-ish column is often the
-                # wrong one — a descriptions tab beats the actual catalogue on a
-                # first-match rule. Columns like duration and price are what identify
-                # a real service list.
-                best_score = -1
-                for candidate in sheets:
-                    candidate_rows = [
-                        list(r) for r in wb[candidate].iter_rows(values_only=True)
-                    ]
-                    ix, cols = _find_header(candidate_rows)
-                    if ix < 0:
-                        continue
-                    score = len(cols) + (2 if "duration" in cols else 0) + (
-                        2 if "price" in cols else 0
-                    )
-                    if score > best_score:
-                        best_score, rows, chosen = score, candidate_rows, candidate
-                if not rows and sheets:
-                    chosen = sheets[0]
-                    rows = [list(r) for r in wb[chosen].iter_rows(values_only=True)]
-            # Gather the other sheets as plain text for the add-on linker.
-            note_lines: list[str] = []
-            for other in sheets:
-                if other == chosen:
-                    continue
-                for r in wb[other].iter_rows(values_only=True):
-                    cells = [str(c).strip() for c in r if c is not None and str(c).strip()]
-                    if cells:
-                        note_lines.append(" | ".join(cells))
-                    if len(note_lines) > 400:
-                        break
-            notes_text = "\n".join(note_lines)
+            # Read every sheet up front. The layout fallback below needs to see all of
+            # them to choose, and a service list is kilobytes.
+            for s in sheets:
+                all_rows[s] = [list(r) for r in wb[s].iter_rows(values_only=True)]
     except Exception as e:
         logger.warning("service_import_read_failed file=%r err=%s", filename, e)
         return {
@@ -309,54 +463,74 @@ def parse_service_spreadsheet(
             "sheet": chosen,
         }
 
+    # Prefer the requested sheet, else score every sheet and take the richest. A
+    # workbook usually has several tabs, and the first one with a name-ish column is
+    # often the wrong one — a descriptions tab beats the actual catalogue on a
+    # first-match rule. Columns like duration and price identify a real service list.
+    if sheet and sheet in all_rows:
+        chosen = sheet
+    else:
+        best_score = -1
+        for candidate, candidate_rows in all_rows.items():
+            ix, candidate_cols = _find_header(candidate_rows)
+            if ix < 0:
+                continue
+            score = (
+                len(candidate_cols)
+                + (2 if "duration" in candidate_cols else 0)
+                + (2 if "price" in candidate_cols else 0)
+            )
+            if score > best_score:
+                best_score, chosen = score, candidate
+        if best_score < 0 and all_rows:
+            chosen = next(iter(all_rows))
+
+    rows = all_rows.get(chosen, [])
     header_ix, cols = _find_header(rows)
-    if header_ix < 0:
+    out: list[dict] = []
+    skipped = 0
+    capped = False
+    if header_ix >= 0:
+        out, skipped, capped = _extract_services(rows, header_ix, cols)
+
+    # Fall back to the model when the fixed aliases got nowhere: an unfamiliar header
+    # ("Treatment", "Menu Item"), a sheet with no header at all, or a header we matched
+    # that turned out to hold no services. Every export labels these differently and we
+    # can't enumerate them all in advance.
+    used_ai_layout = False
+    if not out:
+        layout = _llm_locate_layout(all_rows)
+        if layout:
+            chosen = layout["sheet"]
+            rows = all_rows.get(chosen, [])
+            out, skipped, capped = _extract_services(
+                rows, layout["header_row"], layout["columns"]
+            )
+            used_ai_layout = bool(out)
+
+    if not out:
         return {
             "services": [],
             "warnings": [
-                "Couldn't find a service-name column. The sheet needs a header row with "
-                "something like 'Service Name'."
+                "Couldn't find a service list in that file. The sheet needs a column of "
+                "service names — a header like 'Service Name' helps."
             ],
             "sheets": sheets,
             "sheet": chosen,
         }
 
-    out: list[dict] = []
-    skipped = 0
-    for row in rows[header_ix + 1 :]:
-        if len(out) >= MAX_ROWS:
-            warnings.append(f"Only the first {MAX_ROWS} services were read.")
-            break
-        if not row:
-            continue
-        name_ix = cols["name"]
-        raw_name = row[name_ix] if name_ix < len(row) else None
-        # Guard the None explicitly: str(None) is "None", which is truthy and would
-        # sail through as a service literally called "None".
-        svc_name = re.sub(r"\s+", " ", str(raw_name).strip())[:200] if raw_name is not None else ""
-        if not svc_name or _key(svc_name) in _NAME_KEYS:
-            skipped += 1
-            continue
-
-        def cell(field: str):
-            ix = cols.get(field)
-            return row[ix] if ix is not None and ix < len(row) else None
-
-        duration = _to_int(cell("duration"), 30)
-        duration = max(0, min(duration, 480))
-        category = str(cell("category") or "").strip()[:120]
-        out.append(
-            {
-                "name": svc_name,
-                "price": round(_to_float(cell("price")), 2),
-                # 0 is meaningful here (an add-on charge with no time of its own), so
-                # it's preserved; the UI floors it to 5 for anything actually bookable.
-                "duration_minutes": duration,
-                "category": category,
-                "code": str(cell("code") or "").strip()[:64],
-                "is_addon": _looks_like_addon(svc_name, duration, category),
-            }
+    if capped:
+        warnings.append(f"Only the first {MAX_ROWS} services were read.")
+    if used_ai_layout:
+        warnings.append(
+            "This file's layout wasn't one we recognised, so the columns were worked "
+            "out from the file itself — check the names and durations below."
         )
+
+    # The service list says what exists; a companion sheet usually says how it's used
+    # ("Master Stylist Charge for Chemical Services"), which is where add-on
+    # applicability actually lives.
+    notes_text = _notes_from(all_rows, chosen)
 
     # Suggest which services each add-on belongs with, read from the workbook's other
     # sheets. Best-effort: no suggestion just means the add-on stays available for

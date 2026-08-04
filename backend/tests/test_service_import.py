@@ -278,6 +278,142 @@ def test_no_notes_means_no_model_call(monkeypatch):
     assert service_import.suggest_addon_links([], "some notes") == {}
 
 
+# --- Unfamiliar layouts: the model locates, Python still reads ----------------
+# The alias list only recognises headers we thought of. A salon exporting from
+# software we've never seen labels the column something else entirely, and that must
+# not be a dead end. The model only says WHERE to look — every index it returns is
+# range-checked, and the rows themselves are always read by Python.
+
+
+def _layout_llm(monkeypatch, payload, calls=None):
+    import json as _json
+
+    text = payload if isinstance(payload, str) else _json.dumps(payload)
+
+    class _Fake:
+        @staticmethod
+        def chat(**kw):
+            if calls is not None:
+                calls.append(kw)
+            return text
+
+    monkeypatch.setitem(__import__("sys").modules, "llm_provider", _Fake)
+
+
+_ALIEN = {
+    "Tab1": [
+        ["Treatment", "Mins", "Fee"],
+        ["Scalp massage", 20, "35.00"],
+        ["Beard sculpt", 45, "60.00"],
+    ]
+}
+
+
+def test_an_unrecognised_header_falls_back_to_the_model(monkeypatch):
+    """"Treatment"/"Mins"/"Fee" match none of our aliases."""
+    assert service_import._find_header(_ALIEN["Tab1"])[0] == -1, "precondition: aliases miss"
+    _layout_llm(monkeypatch, {
+        "sheet": "Tab1", "header_row": 0,
+        "columns": {"name": 0, "duration": 1, "price": 2, "category": None, "code": None},
+    })
+    out = service_import.parse_service_spreadsheet(_xlsx(_ALIEN), "alien.xlsx")
+    assert [s["name"] for s in out["services"]] == ["Scalp massage", "Beard sculpt"]
+    assert out["services"][0]["duration_minutes"] == 20
+    assert out["services"][1]["price"] == 60.0
+    assert any("wasn't one we recognised" in w for w in out["warnings"])
+
+
+def test_a_sheet_with_no_header_row_at_all(monkeypatch):
+    """header_row -1 means the data starts immediately."""
+    _layout_llm(monkeypatch, {
+        "sheet": "S", "header_row": -1, "columns": {"name": 0, "duration": 1},
+    })
+    out = service_import.parse_service_spreadsheet(
+        _xlsx({"S": [["Scalp massage", 20], ["Beard sculpt", 45]]}), "x.xlsx"
+    )
+    assert [s["name"] for s in out["services"]] == ["Scalp massage", "Beard sculpt"]
+
+
+def test_a_recognised_file_never_costs_a_layout_call(monkeypatch):
+    """The deterministic pass is exact and free — the model is a fallback, not a step."""
+
+    class _Fail:
+        @staticmethod
+        def chat(**kw):
+            raise AssertionError("should not be called")
+
+    monkeypatch.setitem(__import__("sys").modules, "llm_provider", _Fail)
+    out = service_import.parse_service_spreadsheet(
+        _xlsx({"S": [["ServiceName", "Duration"], ["Haircut", 30]]}), "s.xlsx"
+    )
+    assert [s["name"] for s in out["services"]] == ["Haircut"]
+    assert not any("recognised" in w for w in out["warnings"])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sheet": "Nonexistent", "header_row": 0, "columns": {"name": 0}},   # invented sheet
+        {"sheet": "Tab1", "header_row": 0, "columns": {"name": 99}},          # out of range
+        {"sheet": "Tab1", "header_row": 0, "columns": {"name": -1}},          # negative
+        {"sheet": "Tab1", "header_row": 0, "columns": {"price": 2}},          # no name column
+        {"sheet": "Tab1", "header_row": 0, "columns": "nope"},                # wrong shape
+        {"sheet": "Tab1", "header_row": 0},                                   # no columns
+        "not json at all",
+        "",
+    ],
+)
+def test_a_bad_layout_answer_is_refused_not_used(monkeypatch, payload):
+    """A wrong sheet or a made-up index must degrade to the normal 'couldn't find it'
+    message, never to services read out of the wrong column."""
+    _layout_llm(monkeypatch, payload)
+    # Two sheets, so a missing/invented sheet name can't be resolved by being the only one.
+    out = service_import.parse_service_spreadsheet(
+        _xlsx({**_ALIEN, "Other": [["a", "b"], ["c", "d"]]}), "alien.xlsx"
+    )
+    assert out["services"] == []
+    assert any("Couldn't find a service list" in w for w in out["warnings"])
+
+
+def test_a_boolean_column_index_is_refused(monkeypatch):
+    """bool is an int subclass — True would silently read as column 1."""
+    _layout_llm(monkeypatch, {"sheet": "Tab1", "header_row": 0, "columns": {"name": True}})
+    out = service_import.parse_service_spreadsheet(
+        _xlsx({**_ALIEN, "Other": [["a"], ["c"]]}), "alien.xlsx"
+    )
+    assert out["services"] == []
+
+
+def test_a_layout_outage_is_not_fatal(monkeypatch):
+    class _Boom:
+        @staticmethod
+        def chat(**kw):
+            raise RuntimeError("rate limited")
+
+    monkeypatch.setitem(__import__("sys").modules, "llm_provider", _Boom)
+    out = service_import.parse_service_spreadsheet(_xlsx(_ALIEN), "alien.xlsx")
+    assert out["services"] == []
+    assert out["warnings"]
+
+
+def test_the_preview_carries_indexes_for_every_sheet():
+    """The model answers in column indexes, so it has to see them."""
+    text = service_import._preview_for_model(
+        {"Tab1": _ALIEN["Tab1"], "Two": [["x"]]}
+    )
+    assert "SHEET Tab1" in text and "SHEET Two" in text
+    assert "[0]=Treatment" in text and "[1]=Mins" in text
+    assert "row 0:" in text
+
+
+def test_the_preview_is_bounded():
+    """A 5,000-row sheet must not become a 5,000-row prompt."""
+    big = {"S": [[f"c{j}" for j in range(40)] for _ in range(500)]}
+    text = service_import._preview_for_model(big)
+    assert text.count("row ") <= service_import._PREVIEW_ROWS
+    assert "[12]=" not in text
+
+
 def test_csv_is_accepted():
     csv = b"ServiceName,Price,Duration\nHaircut,28,30\nColor,75,90\n"
     out = service_import.parse_service_spreadsheet(csv, "services.csv")

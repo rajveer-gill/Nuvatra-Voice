@@ -240,7 +240,11 @@ export function ImportServicesButton({
             ))}
 
             <div className="flex-1 overflow-y-auto rounded-lg border border-gray-200">
-              <table className="w-full text-left text-sm">
+              {/* table-fixed, not auto: the "goes with" line is nowrap-and-truncate,
+                  and under auto layout its full untruncated width feeds the column's
+                  intrinsic size — the name column swallowed the table and squeezed
+                  Price/Min down to nothing, so imported durations looked missing. */}
+              <table className="w-full table-fixed text-left text-sm">
                 <thead className="sticky top-0 bg-gray-50 text-xs text-gray-600">
                   <tr>
                     <th className="px-3 py-2 font-medium">Service</th>
@@ -354,7 +358,7 @@ export function ImportServicesButton({
                                 {bookableNames.map((n) => (
                                   <label
                                     key={n}
-                                    className="flex cursor-pointer items-center gap-1.5 text-xs text-gray-700"
+                                    className="flex min-w-0 cursor-pointer items-center gap-1.5 text-xs text-gray-700"
                                   >
                                     <input
                                       type="checkbox"
