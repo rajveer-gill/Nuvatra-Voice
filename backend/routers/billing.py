@@ -361,7 +361,13 @@ class CreateOrgCheckoutRequest(BaseModel):
 
 def _resolve_managed_org(user_id: str, org_id: Optional[str]) -> dict:
     """The caller must manage the org they're trying to pay for."""
-    managed = [m for m in database.db_org_memberships(user_id) if m.get("role") == "manager"]
+    # org_wide: the group's subscription belongs to whoever oversees the group, never
+    # to a manager who was invited to one store inside it.
+    managed = [
+        m
+        for m in database.db_org_memberships_org_wide(user_id)
+        if m.get("role") == "manager"
+    ]
     if not managed:
         raise HTTPException(status_code=403, detail="Your account cannot manage billing.")
     if org_id:

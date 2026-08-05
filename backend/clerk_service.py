@@ -209,13 +209,19 @@ def _clerk_relink_user_to_tenant(
     return displaced
 
 
-def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") -> dict:
+def _clerk_invite_email_to_org(
+    email: str, org_id: str, role: str = "viewer", tenant_id: Optional[str] = None
+) -> dict:
     """Invite someone to oversee/manage a group by email.
 
     If they already have a Clerk account, add them to org_members right now — no email
     needed. Otherwise store a pending org invite and send a Clerk invitation; the
     invite is turned into membership the first time they sign in with this email
     (routers/org.get_org_me -> database.db_org_invites_consume_for_emails).
+
+    tenant_id scopes the membership to one store (an invited store manager) instead of
+    the whole group. Either way this is additive — nobody is displaced, and the
+    invitee keeps every other store they already had.
 
     Returns {invite_sent, user_added, pending_invite_stored, clerk_error}.
     """
@@ -232,7 +238,7 @@ def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") ->
     if lowered.endswith(("@example.com", "@example.org", "@test.com")):
         # Still store the pending invite (a test may sign up later) but be honest that
         # no mail can go to a placeholder address.
-        database.db_org_invite_upsert(email, org_id, role)
+        database.db_org_invite_upsert(email, org_id, role, tenant_id)
         return {
             "invite_sent": False,
             "user_added": False,
@@ -241,7 +247,7 @@ def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") ->
         }
     clerk_secret = os.getenv("CLERK_SECRET_KEY", "").strip()
     if not clerk_secret:
-        database.db_org_invite_upsert(email, org_id, role)
+        database.db_org_invite_upsert(email, org_id, role, tenant_id)
         return {
             "invite_sent": False,
             "user_added": False,
@@ -256,7 +262,7 @@ def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") ->
     if existing:
         if len(existing) > 1:
             print(f"[Admin] {email!r} matches {len(existing)} Clerk users; adding the first to org.")
-        database.db_org_member_add(existing[0], org_id, role)
+        database.db_org_member_add(existing[0], org_id, role, tenant_id)
         deps._admin_access_log("invite_email_to_org", tenant_id=org_id, email=email, user_added=True)
         return {
             "invite_sent": False,
@@ -266,7 +272,7 @@ def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") ->
             "clerk_user_id": existing[0],
         }
     # No account yet: queue the invite and email them.
-    database.db_org_invite_upsert(email, org_id, role)
+    database.db_org_invite_upsert(email, org_id, role, tenant_id)
     invite_sent = False
     clerk_error: Optional[str] = None
     try:
@@ -278,7 +284,9 @@ def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") ->
                 # Carried for reference only — membership is materialized by matching
                 # the verified email at login, not by trusting this metadata.
                 "public_metadata": {"org_id": org_id, "org_role": role},
-                "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com") + "/dashboard/stores",
+                # A store manager has no rollup to land on; send them to the dashboard.
+                "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com")
+                + ("/dashboard" if tenant_id else "/dashboard/stores"),
             },
             timeout=10.0,
         )
@@ -290,7 +298,7 @@ def _clerk_invite_email_to_org(email: str, org_id: str, role: str = "viewer") ->
             if resp.status_code == 422 and "form_identifier_exists" in body:
                 retry = _clerk_user_ids_for_email(email, headers)[:1]
                 if retry:
-                    database.db_org_member_add(retry[0], org_id, role)
+                    database.db_org_member_add(retry[0], org_id, role, tenant_id)
                     database.db_org_invite_delete(email, org_id)
                     return {
                         "invite_sent": False,

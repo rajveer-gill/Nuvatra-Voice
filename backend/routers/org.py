@@ -38,7 +38,13 @@ def _require_org_manager(user_id: str, org_id: Optional[str] = None) -> dict:
     omitted and they manage exactly one org, that's the one — the common case, since
     a regional manager has a single group.
     """
-    memberships = [m for m in database.db_org_memberships(user_id) if m.get("role") == "manager"]
+    # org_wide: a manager invited to a single store is an org member, but adding or
+    # changing stores across the group is not theirs to do.
+    memberships = [
+        m
+        for m in database.db_org_memberships_org_wide(user_id)
+        if m.get("role") == "manager"
+    ]
     if not memberships:
         raise HTTPException(
             status_code=403, detail="Your account cannot add or change stores in this group."
@@ -152,6 +158,12 @@ def get_org_me(user_id: str = Depends(deps.require_user)):
             orgs = database.db_org_memberships(user_id)
         if not orgs:
             return {"is_org_member": False, "orgs": [], "store_count": 0}
+    # A manager invited to one store is an org member in the database, but they are
+    # not an overseer: no switcher, no rollup, no group billing. They see that single
+    # store and it resolves like any other dashboard, so report them as a normal owner.
+    orgs = [o for o in orgs if not o.get("tenant_id")]
+    if not orgs:
+        return {"is_org_member": False, "orgs": [], "store_count": 0}
     stores = database.db_org_stores_for_user(user_id)
     # Attach billing state per org so the UI can prompt a manager to set up payment
     # before their stores can take calls. Only a manager needs (or is shown) this.
@@ -335,7 +347,11 @@ def create_org_store(
 
     invite: dict = {}
     if req.manager_email:
-        invite = clerk_service._clerk_link_email_to_tenant(str(req.manager_email), tenant["id"])
+        # Scoped to this store, and additive — see invite_store_manager for why this
+        # is an org membership rather than a tenant_members row.
+        invite = clerk_service._clerk_invite_email_to_org(
+            str(req.manager_email), org_id, role="manager", tenant_id=str(tenant["id"])
+        )
     deps.audit_log(
         "user",
         "org_store_created",
@@ -375,12 +391,17 @@ def invite_store_manager(
 ):
     """Invite the person who runs this store.
 
-    They get a Clerk invite and, on sign-up, land in this store only — require_tenant
-    consumes the pending invite and links them (db_tenant_invite_consume). They never
-    see the group's other stores, and they can't see the rollup.
+    They get an org membership scoped to this one store: no rollup, no switcher, no
+    group billing, and no access to the group's other stores. require_tenant's
+    single-store fallback lands them in it.
 
-    Note there is at most one pending invite per store, so re-inviting replaces the
-    previous address rather than adding a second manager.
+    Deliberately NOT a tenant_members row. That path runs through
+    db_tenant_member_assign_owner ("make this user the sole owner"), which deletes
+    every other member of the store AND every other membership the invitee had — so
+    inviting someone who already had an account silently took a store away from them.
+    Making it non-destructive at the invite site alone doesn't hold either, because
+    db_tenant_get_for_user collapses multi-membership on read. Org membership is
+    exempt from all of that by design, which is why it's the right home for this.
     """
     if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
@@ -394,7 +415,14 @@ def invite_store_manager(
             status_code=403, detail="Your account can view this store but not change it."
         )
     tenant = scoped["tenant"]
-    link = clerk_service._clerk_link_email_to_tenant(str(req.email), tenant["id"])
+    org_of_store = str(tenant.get("org_id") or "")
+    if not org_of_store:
+        # Every store reached through this endpoint belongs to an org by construction;
+        # without one there is nothing to scope the membership to.
+        raise HTTPException(status_code=409, detail="That store is not part of a group.")
+    link = clerk_service._clerk_invite_email_to_org(
+        str(req.email), org_of_store, role="manager", tenant_id=str(tenant["id"])
+    )
     deps.audit_log(
         "user",
         "org_store_manager_invited",
@@ -405,12 +433,14 @@ def invite_store_manager(
         details={"email": str(req.email), **{k: v for k, v in link.items() if k != "email"}},
         request=request,
     )
-    if link.get("clerk_error") and not link.get("invite_sent"):
+    # user_added is a success with no email: they already had an account and now have
+    # the store. Only a genuine failure to reach anyone is a 502.
+    if link.get("clerk_error") and not link.get("invite_sent") and not link.get("user_added"):
         # The pending invite row is still stored, so they'd be linked if they sign up
         # anyway — but say so plainly rather than reporting a success that isn't one.
         raise HTTPException(status_code=502, detail=str(link.get("clerk_error")))
     return {
         "ok": True,
         "invite_sent": bool(link.get("invite_sent")),
-        "user_relinked": bool(link.get("user_relinked")),
+        "user_added": bool(link.get("user_added")),
     }

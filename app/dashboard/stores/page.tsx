@@ -857,13 +857,13 @@ function InviteManagerModal({
     setSubmitting(true)
     setError(null)
     try {
-      const { data } = await api.post<{ invite_sent?: boolean; user_relinked?: boolean }>(
+      const { data } = await api.post<{ invite_sent?: boolean; user_added?: boolean }>(
         `/api/org/stores/${encodeURIComponent(store.client_id)}/invite`,
         { email: email.trim() }
       )
       setResult({
         emailed: Boolean(data?.invite_sent),
-        relinked: Boolean(data?.user_relinked),
+        relinked: Boolean(data?.user_added),
       })
     } catch (err) {
       setError(detailOf(err) || 'Could not send the invite. Please try again.')

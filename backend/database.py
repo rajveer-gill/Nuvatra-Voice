@@ -405,6 +405,23 @@ def init_db() -> bool:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_org_invites_email ON org_invites(email)")
         except Exception:
             pass
+        # An org membership is normally the whole group (a regional manager). Setting
+        # tenant_id narrows it to one store, which is what a store manager gets — see
+        # 0012_org_member_store_scope for why they aren't tenant_members.
+        for tbl in ("org_members", "org_invites"):
+            try:
+                cur.execute(
+                    f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS tenant_id UUID "
+                    "REFERENCES tenants(id) ON DELETE CASCADE"
+                )
+            except Exception:
+                pass
+        try:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_org_members_tenant ON org_members(tenant_id)"
+            )
+        except Exception:
+            pass
         # Org-level billing: one subscription covering N stores. Mirrors the tenant
         # billing columns so subscription_access can judge an org with the same rules.
         for col, typ in [
@@ -1421,9 +1438,18 @@ def db_org_delete(org_id: str) -> bool:
         return False
 
 
-def db_org_member_add(clerk_user_id: str, org_id: str, role: str = "viewer") -> bool:
+def db_org_member_add(
+    clerk_user_id: str,
+    org_id: str,
+    role: str = "viewer",
+    tenant_id: Optional[str] = None,
+) -> bool:
     """Add (or re-role) a user in an org. Unknown roles fall back to viewer — the
-    least-privileged option, so a typo can never grant write access."""
+    least-privileged option, so a typo can never grant write access.
+
+    tenant_id None = the whole group; set = that one store, which is what an invited
+    store manager gets. Adding is never destructive: unlike the tenant_members path,
+    nobody is displaced and the user keeps whatever else they had."""
     uid = (clerk_user_id or "").strip()
     if not uid or not org_id:
         return False
@@ -1436,9 +1462,11 @@ def db_org_member_add(clerk_user_id: str, org_id: str, role: str = "viewer") -> 
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO org_members (clerk_user_id, org_id, role) VALUES (%s, %s::uuid, %s) "
-            "ON CONFLICT (clerk_user_id, org_id) DO UPDATE SET role = EXCLUDED.role",
-            (uid, org_id, r),
+            "INSERT INTO org_members (clerk_user_id, org_id, role, tenant_id) "
+            "VALUES (%s, %s::uuid, %s, %s) "
+            "ON CONFLICT (clerk_user_id, org_id) DO UPDATE SET role = EXCLUDED.role, "
+            "tenant_id = EXCLUDED.tenant_id",
+            (uid, org_id, r, tenant_id),
         )
         conn.commit()
         cur.close()
@@ -1468,7 +1496,12 @@ def db_org_member_remove(clerk_user_id: str, org_id: str) -> bool:
 
 
 def db_org_memberships(clerk_user_id: str) -> List[dict]:
-    """Orgs this user oversees: [{org_id, name, role}]. Empty for a normal owner."""
+    """Orgs this user oversees: [{org_id, name, role, tenant_id}]. Empty for a normal owner.
+
+    tenant_id is None for someone who oversees the whole group, or a store id for an
+    invited store manager. Callers deciding anything group-level (the rollup, billing,
+    adding stores) must require tenant_id is None — see db_org_memberships_org_wide.
+    """
     uid = (clerk_user_id or "").strip()
     if not uid:
         return []
@@ -1478,19 +1511,38 @@ def db_org_memberships(clerk_user_id: str) -> List[dict]:
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT o.id, o.name, om.role FROM org_members om "
+            "SELECT o.id, o.name, om.role, om.tenant_id FROM org_members om "
             "JOIN orgs o ON o.id = om.org_id WHERE om.clerk_user_id = %s ORDER BY o.name",
             (uid,),
         )
         rows = cur.fetchall()
         cur.close()
-        return [{"org_id": str(r[0]), "name": r[1], "role": r[2]} for r in rows]
+        return [
+            {
+                "org_id": str(r[0]),
+                "name": r[1],
+                "role": r[2],
+                "tenant_id": str(r[3]) if r[3] else None,
+            }
+            for r in rows
+        ]
     except Exception as e:
         print(f"[DB] Failed to load org memberships: {e}")
         return []
 
 
-def db_org_invite_upsert(email: str, org_id: str, role: str = "viewer") -> bool:
+def db_org_memberships_org_wide(clerk_user_id: str) -> List[dict]:
+    """Only memberships covering the whole group.
+
+    The gate for anything group-level: the rollup, billing, adding stores. A manager
+    invited to one store is an org member too, and must not reach any of it.
+    """
+    return [m for m in db_org_memberships(clerk_user_id) if not m.get("tenant_id")]
+
+
+def db_org_invite_upsert(
+    email: str, org_id: str, role: str = "viewer", tenant_id: Optional[str] = None
+) -> bool:
     """Queue (or re-role) a pending org invite by email. Unknown roles -> viewer."""
     em = _normalize_invite_email(email)
     if not em or not org_id:
@@ -1504,9 +1556,11 @@ def db_org_invite_upsert(email: str, org_id: str, role: str = "viewer") -> bool:
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO org_invites (email, org_id, role) VALUES (%s, %s::uuid, %s) "
-            "ON CONFLICT (email, org_id) DO UPDATE SET role = EXCLUDED.role",
-            (em, org_id, r),
+            "INSERT INTO org_invites (email, org_id, role, tenant_id) "
+            "VALUES (%s, %s::uuid, %s, %s) "
+            "ON CONFLICT (email, org_id) DO UPDATE SET role = EXCLUDED.role, "
+            "tenant_id = EXCLUDED.tenant_id",
+            (em, org_id, r, tenant_id),
         )
         conn.commit()
         cur.close()
@@ -1578,18 +1632,27 @@ def db_org_invites_consume_for_emails(clerk_user_id: str, emails: List[str]) -> 
         # Doing the DELETE first makes the claim atomic: a concurrent call finds no
         # rows and does nothing.
         cur.execute(
-            "DELETE FROM org_invites WHERE email = ANY(%s) RETURNING org_id, role",
+            "DELETE FROM org_invites WHERE email = ANY(%s) RETURNING org_id, role, tenant_id",
             (ems,),
         )
         claimed = cur.fetchall()
         joined = []
-        for org_id, role in claimed:
+        for org_id, role, tenant_id in claimed:
+            # tenant_id rides along, so a store manager's invite becomes access to that
+            # store rather than to the whole group.
             cur.execute(
-                "INSERT INTO org_members (clerk_user_id, org_id, role) VALUES (%s, %s, %s) "
+                "INSERT INTO org_members (clerk_user_id, org_id, role, tenant_id) "
+                "VALUES (%s, %s, %s, %s) "
                 "ON CONFLICT (clerk_user_id, org_id) DO NOTHING",
-                (uid, str(org_id), role),
+                (uid, str(org_id), role, tenant_id),
             )
-            joined.append({"org_id": str(org_id), "role": role})
+            joined.append(
+                {
+                    "org_id": str(org_id),
+                    "role": role,
+                    "tenant_id": str(tenant_id) if tenant_id else None,
+                }
+            )
         conn.commit()
         cur.close()
         return joined
@@ -1639,7 +1702,11 @@ def db_org_stores_for_user(clerk_user_id: str) -> List[dict]:
             f"""
             SELECT {_tenant_select_cols('t')}, o.name, om.role
             FROM tenants t
-            JOIN org_members om ON om.org_id = t.org_id
+            JOIN org_members om
+              ON om.org_id = t.org_id
+             -- Same scope rule as db_org_store_for_user: a store-scoped membership
+             -- lists that store only, never the rest of the group.
+             AND (om.tenant_id IS NULL OR om.tenant_id = t.id)
             JOIN orgs o ON o.id = t.org_id
             WHERE om.clerk_user_id = %s
             ORDER BY t.name
@@ -1685,8 +1752,15 @@ def db_org_store_for_user(clerk_user_id: str, store_ref: str) -> Optional[dict]:
             f"""
             SELECT {_tenant_select_cols('t')}, om.role
             FROM tenants t
-            JOIN org_members om ON om.org_id = t.org_id
+            JOIN org_members om
+              ON om.org_id = t.org_id
+             -- NULL tenant_id = oversees the whole group; set = that one store only,
+             -- which is what an invited store manager gets.
+             AND (om.tenant_id IS NULL OR om.tenant_id = t.id)
             WHERE om.clerk_user_id = %s AND (t.client_id = %s OR t.id::text = %s)
+            -- Someone can hold both an org-wide and a store-scoped row; the stronger
+            -- role wins rather than whichever Postgres happens to return first.
+            ORDER BY CASE WHEN om.role = 'manager' THEN 0 ELSE 1 END
             LIMIT 1
             """,
             (uid, ref, ref),

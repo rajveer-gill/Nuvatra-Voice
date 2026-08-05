@@ -328,6 +328,34 @@ STORE_HEADER = "X-Store-Id"
 _READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+def _enforce_org_write_role(request: Request, role: str, user_id: str, client_id: str) -> None:
+    """Block a read-only org viewer from anything that isn't a read.
+
+    Shared by both routes into an org store — the X-Store-Id path and require_tenant's
+    single-store fallback — because a gate that only one of them applies is a gate you
+    can walk around by omitting a header.
+    """
+    if (role or "viewer").strip().lower() == "manager":
+        return
+    if request.method.upper() in _READ_ONLY_METHODS:
+        return
+    audit_log(
+        "user",
+        "auth_failure",
+        actor_id=user_id,
+        details={
+            "reason": "org_viewer_write_blocked",
+            "method": request.method,
+            "client_id": client_id,
+        },
+        request=request,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail="Your account can view this store but not change it.",
+    )
+
+
 def _resolve_org_store(request: Request, user_id: str):
     """Resolve the store an org overseer is asking for, or None if they aren't one.
 
@@ -368,23 +396,12 @@ def _resolve_org_store(request: Request, user_id: str):
                 },
             )
         return None  # not an overseer — ignore the header, resolve them normally
-    role = (scoped.get("role") or "viewer").strip().lower()
-    if role != "manager" and request.method.upper() not in _READ_ONLY_METHODS:
-        audit_log(
-            "user",
-            "auth_failure",
-            actor_id=user_id,
-            details={
-                "reason": "org_viewer_write_blocked",
-                "method": request.method,
-                "client_id": (scoped.get("tenant") or {}).get("client_id"),
-            },
-            request=request,
-        )
-        raise HTTPException(
-            status_code=403,
-            detail="Your account can view this store but not change it.",
-        )
+    _enforce_org_write_role(
+        request,
+        scoped.get("role") or "viewer",
+        user_id,
+        (scoped.get("tenant") or {}).get("client_id"),
+    )
     return scoped.get("tenant")
 
 
@@ -474,6 +491,15 @@ def require_tenant(request: Request):
         org_stores = database.db_org_stores_for_user(user_id)
         if len(org_stores) == 1:
             tenant = org_stores[0]
+            # This path skips _resolve_org_store, so it applies the same role gate —
+            # otherwise a read-only viewer with exactly one store gets write access
+            # simply by not sending the store header.
+            _enforce_org_write_role(
+                request,
+                tenant.get("org_role") or "viewer",
+                user_id,
+                tenant.get("client_id"),
+            )
     if not tenant:
         print(
             f"[Auth] no_tenant user_id={user_id} jwt_metadata_tenant_id={tenant_id_from_meta!r}"
