@@ -57,13 +57,34 @@ def _clerk_revoke_active_sessions(user_id: str, headers: dict) -> None:
         print(f"[Admin] Error revoking sessions for Clerk user {user_id}: {e}")
 
 
+def _emails_on_clerk_user(row: dict) -> List[str]:
+    """Every email address on a Clerk user object, lowercased."""
+    out: List[str] = []
+    for entry in row.get("email_addresses") or []:
+        if isinstance(entry, dict):
+            addr = str(entry.get("email_address") or "").strip().lower()
+            if addr:
+                out.append(addr)
+    return out
+
+
 def _clerk_user_ids_from_api(email: str, headers: dict) -> List[str]:
-    """Query Clerk Users API by email (tries common filter shapes)."""
+    """Clerk user IDs whose address really is `email`.
+
+    Every row is checked against the address we asked for, because the filter cannot
+    be trusted. Clerk silently ignores query parameters it doesn't recognise and
+    returns the whole user list, so a request whose filter didn't take looks exactly
+    like "these all matched". That result then flowed into
+    _clerk_link_email_to_tenant, which took [0] and made that person the sole owner of
+    the store — inviting someone with no account handed their shop to an unrelated
+    account. Verifying here is what makes that impossible, whatever the API does.
+    """
     import httpx
 
     raw = (email or "").strip()
     if not raw or "@" not in raw:
         return []
+    wanted = raw.lower()
     ids: List[str] = []
     seen: set = set()
     for candidate in {raw, raw.lower()}:
@@ -85,12 +106,24 @@ def _clerk_user_ids_from_api(email: str, headers: dict) -> List[str]:
                 continue
             users = users_resp.json()
             user_list = users if isinstance(users, list) else users.get("data", [])
+            returned = 0
             for row in user_list or []:
-                if isinstance(row, dict) and row.get("id"):
-                    uid = str(row["id"])
-                    if uid not in seen:
-                        seen.add(uid)
-                        ids.append(uid)
+                if not isinstance(row, dict) or not row.get("id"):
+                    continue
+                returned += 1
+                if wanted not in _emails_on_clerk_user(row):
+                    continue  # the filter didn't hold; this is somebody else
+                uid = str(row["id"])
+                if uid not in seen:
+                    seen.add(uid)
+                    ids.append(uid)
+            if returned and not ids:
+                # Rows came back and none of them own the address — the filter was
+                # ignored. Loud, because it means this URL shape doesn't work.
+                print(
+                    f"[Admin] Clerk user lookup returned {returned} row(s) but none "
+                    f"match the requested address; ignoring. url_shape={url.split('?')[1].split('=')[0]}"
+                )
             if ids:
                 return ids
     return ids
