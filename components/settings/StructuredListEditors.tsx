@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Clock,
   DollarSign,
+  Loader2,
   Plus,
   Pencil,
   Tag,
@@ -130,14 +131,49 @@ function Modal({ open, onClose, title, children }: ModalProps) {
 /** How many services each group shows before "Show all". */
 const PREVIEW_COUNT = 3
 
+/** Apply a list change locally and write it to the server.
+ *
+ * These editors used to only touch React state, so a modal button labelled "Save"
+ * saved nothing until you found the "Save changes" bar at the bottom of the page —
+ * and a service added on a long list scrolled well past it. Now the label is honest.
+ *
+ * Returns whether the write stuck, so a caller can keep its modal open on failure
+ * rather than closing over an error the user never sees.
+ */
+function useCommit<T>(
+  onChange: (next: T[]) => void,
+  onPersist?: (next: T[]) => Promise<boolean>
+) {
+  const [saving, setSaving] = useState(false)
+  const commit = useCallback(
+    async (next: T[]) => {
+      // Applied locally first either way: the list should react immediately, and an
+      // editor with no onPersist (nothing to save to) still has to work.
+      onChange(next)
+      if (!onPersist) return true
+      setSaving(true)
+      try {
+        return await onPersist(next)
+      } finally {
+        setSaving(false)
+      }
+    },
+    [onChange, onPersist]
+  )
+  return { commit, saving }
+}
+
 export function ServicesEditor({
   items,
   onChange,
+  onPersist,
   required = false,
   importSlot,
 }: {
   items: ServiceRow[]
   onChange: (next: ServiceRow[]) => void
+  /** Writes the list to the server. Omit and the editor is local-only, as before. */
+  onPersist?: (next: ServiceRow[]) => Promise<boolean>
   required?: boolean
   /** Optional "Import from file" control, injected so this editor stays free of
    *  API/auth concerns. */
@@ -149,8 +185,10 @@ export function ServicesEditor({
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
   const ready = items.length > 0
 
+  const { commit, saving } = useCommit(onChange, onPersist)
+
   const remove = (id: string) => {
-    onChange(items.filter((x) => x.id !== id))
+    void commit(items.filter((x) => x.id !== id))
   }
 
   const nameById = useMemo(() => new Map(items.map((s) => [s.id, s.name])), [items])
@@ -353,12 +391,12 @@ export function ServicesEditor({
             key={edit.id}
             initial={edit}
             allServices={items}
-            onSave={(row) => {
+            saving={saving}
+            onSave={async (row) => {
               const next = [...items]
               const ix = next.findIndex((x) => x.id === row.id)
               if (ix >= 0) next[ix] = row
               else next.push(row)
-              onChange(next)
               // Saving a service and not seeing it reads as the save having failed.
               // If it lands outside the collapsed window, open its group.
               const posInGroup = next
@@ -367,8 +405,12 @@ export function ServicesEditor({
               if (posInGroup >= PREVIEW_COUNT) {
                 setShowAll((p) => ({ ...p, [row.is_addon ? 'addons' : 'services']: true }))
               }
-              setOpen(false)
-              setEdit(null)
+              // Stay open if the write failed — the page banner explains why, and the
+              // user still has the row in front of them to retry.
+              if (await commit(next)) {
+                setOpen(false)
+                setEdit(null)
+              }
             }}
             onCancel={() => setOpen(false)}
           />
@@ -383,12 +425,14 @@ function ServiceForm({
   allServices,
   onSave,
   onCancel,
+  saving = false,
 }: {
   initial: ServiceRow
   /** Everything on the menu, so an add-on can say which services it belongs with. */
   allServices: ServiceRow[]
   onSave: (row: ServiceRow) => void
   onCancel: () => void
+  saving?: boolean
 }) {
   const [name, setName] = useState(initial.name)
   const [price, setPrice] = useState(initial.price)
@@ -484,12 +528,18 @@ function ServiceForm({
         </div>
       )}
       <div className="flex justify-end gap-2 pt-2">
-        <button type="button" className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onClick={onCancel}>
+        <button
+          type="button"
+          disabled={saving}
+          className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          onClick={onCancel}
+        >
           Cancel
         </button>
         <button
           type="button"
-          className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700"
+          disabled={saving}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-60"
           onClick={() =>
             onSave({
               ...initial,
@@ -503,7 +553,8 @@ function ServiceForm({
             })
           }
         >
-          Save
+          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+          {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>
@@ -513,12 +564,16 @@ function ServiceForm({
 export function SpecialsEditor({
   items,
   onChange,
+  onPersist,
 }: {
   items: SpecialRow[]
   onChange: (next: SpecialRow[]) => void
+  /** Writes the list to the server. Omit and the editor is local-only, as before. */
+  onPersist?: (next: SpecialRow[]) => Promise<boolean>
 }) {
   const [open, setOpen] = useState(false)
   const [edit, setEdit] = useState<SpecialRow | null>(null)
+  const { commit, saving } = useCommit(onChange, onPersist)
 
   return (
     <div className="md:col-span-2 space-y-3">
@@ -558,7 +613,7 @@ export function SpecialsEditor({
               >
                 <Pencil className="h-4 w-4" />
               </button>
-              <button type="button" className="rounded-lg p-2 text-red-600 hover:bg-red-50" onClick={() => onChange(items.filter((x) => x.id !== s.id))}>
+              <button type="button" className="rounded-lg p-2 text-red-600 hover:bg-red-50" onClick={() => void commit(items.filter((x) => x.id !== s.id))}>
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
@@ -569,14 +624,16 @@ export function SpecialsEditor({
         {edit && (
           <SpecialForm
             initial={edit}
-            onSave={(row) => {
+            saving={saving}
+            onSave={async (row) => {
               const next = [...items]
               const ix = next.findIndex((x) => x.id === row.id)
               if (ix >= 0) next[ix] = row
               else next.push(row)
-              onChange(next)
-              setOpen(false)
-              setEdit(null)
+              if (await commit(next)) {
+                setOpen(false)
+                setEdit(null)
+              }
             }}
             onCancel={() => setOpen(false)}
           />
@@ -590,10 +647,12 @@ function SpecialForm({
   initial,
   onSave,
   onCancel,
+  saving = false,
 }: {
   initial: SpecialRow
   onSave: (row: SpecialRow) => void
   onCancel: () => void
+  saving?: boolean
 }) {
   const [title, setTitle] = useState(initial.title)
   const [description, setDescription] = useState(initial.description)
@@ -615,16 +674,17 @@ function SpecialForm({
         <input type="date" className="cs-field w-full" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} />
       </div>
       <div className="flex justify-end gap-2 pt-2">
-        <button type="button" className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onClick={onCancel}>
+        <button type="button" disabled={saving} className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50" onClick={onCancel}>
           Cancel
         </button>
         <button
           type="button"
-          disabled={!title.trim()}
-          className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
+          disabled={!title.trim() || saving}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
           onClick={() => onSave({ ...initial, title: title.trim(), description: description.trim(), valid_until: validUntil })}
         >
-          Save
+          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+          {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>
@@ -634,12 +694,16 @@ function SpecialForm({
 export function RulesEditor({
   items,
   onChange,
+  onPersist,
 }: {
   items: RuleRow[]
   onChange: (next: RuleRow[]) => void
+  /** Writes the list to the server. Omit and the editor is local-only, as before. */
+  onPersist?: (next: RuleRow[]) => Promise<boolean>
 }) {
   const [open, setOpen] = useState(false)
   const [edit, setEdit] = useState<RuleRow | null>(null)
+  const { commit, saving } = useCommit(onChange, onPersist)
 
   return (
     <div className="md:col-span-2 space-y-3">
@@ -665,7 +729,7 @@ export function RulesEditor({
               <button type="button" className="rounded-lg p-2 text-gray-600 hover:bg-gray-200" onClick={() => { setEdit(s); setOpen(true) }}>
                 <Pencil className="h-4 w-4" />
               </button>
-              <button type="button" className="rounded-lg p-2 text-red-600 hover:bg-red-50" onClick={() => onChange(items.filter((x) => x.id !== s.id))}>
+              <button type="button" className="rounded-lg p-2 text-red-600 hover:bg-red-50" onClick={() => void commit(items.filter((x) => x.id !== s.id))}>
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
@@ -676,14 +740,16 @@ export function RulesEditor({
         {edit && (
           <RuleForm
             initial={edit}
-            onSave={(row) => {
+            saving={saving}
+            onSave={async (row) => {
               const next = [...items]
               const ix = next.findIndex((x) => x.id === row.id)
               if (ix >= 0) next[ix] = row
               else next.push(row)
-              onChange(next)
-              setOpen(false)
-              setEdit(null)
+              if (await commit(next)) {
+                setOpen(false)
+                setEdit(null)
+              }
             }}
             onCancel={() => setOpen(false)}
           />
@@ -697,10 +763,12 @@ function RuleForm({
   initial,
   onSave,
   onCancel,
+  saving = false,
 }: {
   initial: RuleRow
   onSave: (row: RuleRow) => void
   onCancel: () => void
+  saving?: boolean
 }) {
   const [text, setText] = useState(initial.rule_text)
   return (
@@ -710,16 +778,17 @@ function RuleForm({
         <textarea className="cs-field w-full min-h-[100px]" value={text} onChange={(e) => setText(e.target.value)} placeholder="24h cancellation notice" />
       </div>
       <div className="flex justify-end gap-2 pt-2">
-        <button type="button" className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" onClick={onCancel}>
+        <button type="button" disabled={saving} className="rounded-lg px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50" onClick={onCancel}>
           Cancel
         </button>
         <button
           type="button"
-          disabled={!text.trim()}
-          className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
+          disabled={!text.trim() || saving}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
           onClick={() => onSave({ ...initial, rule_text: text.trim() })}
         >
-          Save
+          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+          {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </div>

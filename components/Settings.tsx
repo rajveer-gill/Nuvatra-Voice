@@ -452,6 +452,49 @@ export default function Settings() {
     }
   }
 
+  const errorText = (e: unknown, fallback: string) => {
+    const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    if (typeof detail === 'string') return detail
+    if (
+      typeof detail === 'object' &&
+      detail !== null &&
+      'message' in detail &&
+      typeof (detail as { message?: string }).message === 'string'
+    ) {
+      return (detail as { message: string }).message
+    }
+    return fallback
+  }
+
+  /** Write one part of Settings straight to the server.
+   *
+   * Sub-editors call this so a button labelled "Save" saves — and saves only what it
+   * is attached to. Sending the whole form would quietly commit half-typed edits
+   * elsewhere on the page, which is its own kind of surprise.
+   *
+   * Lists are sent even when empty, so deleting the last row persists; the PATCH
+   * reads an absent field as "leave alone". Returns false on failure so the caller
+   * can stay open and let the user retry.
+   */
+  const persistFields = async (
+    patch: Record<string, unknown>,
+    label: string
+  ): Promise<boolean> => {
+    setSaving(true)
+    setMessage(null)
+    try {
+      await api.patch('/api/business-info', patch)
+      setMessage({ type: 'success', text: `${label} saved.` })
+      refreshSetupStatus()
+      return true
+    } catch (e: unknown) {
+      setMessage({ type: 'error', text: errorText(e, `Failed to save ${label.toLowerCase()}`) })
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleSave = async () => {
     setSaving(true)
     setMessage(null)
@@ -493,14 +536,7 @@ export default function Settings() {
       setGreetingPreview(null)
       refreshSetupStatus()
     } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-      const msg =
-        typeof detail === 'string'
-          ? detail
-          : typeof detail === 'object' && detail !== null && 'message' in detail && typeof (detail as { message?: string }).message === 'string'
-            ? (detail as { message: string }).message
-            : 'Failed to save settings'
-      setMessage({ type: 'error', text: msg })
+      setMessage({ type: 'error', text: errorText(e, 'Failed to save settings') })
     } finally {
       setSaving(false)
     }
@@ -1230,17 +1266,31 @@ export default function Settings() {
           <ServicesEditor
             items={serviceItems}
             onChange={setServiceItems}
+            onPersist={(next) => persistFields({ services: next }, 'Services')}
             required
             importSlot={
               <ImportServicesButton
                 api={api}
                 existing={serviceItems}
-                onImport={setServiceItems}
+                // "Add 51 services" should add them, not stage them behind another
+                // button — same reason the modal's Save now saves.
+                onImport={(next) => {
+                  setServiceItems(next)
+                  void persistFields({ services: next }, 'Services')
+                }}
               />
             }
           />
-          <SpecialsEditor items={specialItems} onChange={setSpecialItems} />
-          <RulesEditor items={ruleItems} onChange={setRuleItems} />
+          <SpecialsEditor
+            items={specialItems}
+            onChange={setSpecialItems}
+            onPersist={(next) => persistFields({ specials: next }, 'Specials')}
+          />
+          <RulesEditor
+            items={ruleItems}
+            onChange={setRuleItems}
+            onPersist={(next) => persistFields({ reservation_rules: next }, 'Booking rules')}
+          />
         </div>
 
       </SettingsSection>
