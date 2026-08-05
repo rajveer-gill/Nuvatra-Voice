@@ -810,7 +810,8 @@ function AddStoreModal({
             className="w-full rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:border-cyan-500 focus:outline-none"
           />
           <p className="mt-1 text-xs text-zinc-500">
-            We&rsquo;ll email them an invite to run this store. You can also do this later.
+            They get access to run this store — emailed an invitation if they don&rsquo;t have an
+            account yet. You can also do this later.
           </p>
         </div>
 
@@ -843,7 +844,11 @@ function InviteManagerModal({
 }) {
   const [email, setEmail] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [sent, setSent] = useState(false)
+  /** What actually happened, not just that it worked. An address with no account yet
+   *  gets an email from Clerk; one that already has an account is linked silently and
+   *  is never told, so saying "invite sent" would send the manager waiting for a mail
+   *  that is not coming. */
+  const [result, setResult] = useState<{ emailed: boolean; relinked: boolean } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const submit = async (e: React.FormEvent) => {
@@ -852,10 +857,14 @@ function InviteManagerModal({
     setSubmitting(true)
     setError(null)
     try {
-      await api.post(`/api/org/stores/${encodeURIComponent(store.client_id)}/invite`, {
-        email: email.trim(),
+      const { data } = await api.post<{ invite_sent?: boolean; user_relinked?: boolean }>(
+        `/api/org/stores/${encodeURIComponent(store.client_id)}/invite`,
+        { email: email.trim() }
+      )
+      setResult({
+        emailed: Boolean(data?.invite_sent),
+        relinked: Boolean(data?.user_relinked),
       })
-      setSent(true)
     } catch (err) {
       setError(detailOf(err) || 'Could not send the invite. Please try again.')
     } finally {
@@ -865,12 +874,31 @@ function InviteManagerModal({
 
   return (
     <ModalShell title={`Invite manager · ${store.name}`} onClose={onClose}>
-      {sent ? (
+      {result ? (
         <div className="space-y-4">
-          <p className="text-sm text-zinc-300">
-            Invite sent to <span className="font-medium text-white">{email}</span>. When they sign up
-            with that address they&rsquo;ll land in this store.
-          </p>
+          {result.emailed ? (
+            <p className="text-sm text-zinc-300">
+              We emailed an invitation to{' '}
+              <span className="font-medium text-white">{email}</span>. They&rsquo;ll land in this
+              store when they accept it and sign up.
+            </p>
+          ) : result.relinked ? (
+            <>
+              <p className="text-sm text-zinc-300">
+                <span className="font-medium text-white">{email}</span> already has an account, and
+                it now has access to this store.
+              </p>
+              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                No email was sent — tell them to sign in and they&rsquo;ll see this store.
+              </p>
+            </>
+          ) : (
+            <p className="text-sm text-zinc-300">
+              <span className="font-medium text-white">{email}</span> is saved for this store.
+              We couldn&rsquo;t send an email, but they&rsquo;ll be linked to it when they sign up
+              with that address.
+            </p>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -882,8 +910,8 @@ function InviteManagerModal({
       ) : (
         <form onSubmit={submit} className="space-y-4">
           <p className="text-sm text-zinc-400">
-            They&rsquo;ll get an email invite and see only this store — never the group rollup or
-            your other stores.
+            If they don&rsquo;t have an account yet we&rsquo;ll email them an invitation. Either way
+            they see only this store — never the group rollup or your other stores.
           </p>
           <div>
             <label className="mb-1 block text-sm font-medium text-zinc-300">Email</label>
