@@ -22,6 +22,9 @@ export type ServiceRow = {
   /** An extra that attaches to a real service (conditioner, hot tools, master-stylist
    *  charge) and can never be the whole appointment. Enforced in the booking path. */
   is_addon?: boolean
+  /** Menu section this belongs to ("Color Services"), carried through from the import.
+   *  Lets a stylist be assigned a whole category at once. Empty when unknown. */
+  category?: string
   /** Which services this add-on may be offered with. Empty = any service. */
   applies_to_service_ids?: string[]
 }
@@ -39,6 +42,7 @@ function normalizeServices(raw: unknown): ServiceRow[] {
         typeof s.duration_minutes === 'number' ? s.duration_minutes : parseInt(String(s.duration_minutes ?? 30), 10) || 30,
       // Carried through, or every Settings save would silently un-flag add-ons.
       is_addon: Boolean(s.is_addon),
+      category: String(s.category ?? ''),
       applies_to_service_ids: Array.isArray(s.applies_to_service_ids)
         ? s.applies_to_service_ids.map(String)
         : [],
@@ -419,13 +423,18 @@ function ServiceForm({
           <label className="mb-1 flex items-center gap-1 text-xs font-medium text-gray-600">
             <Clock className="h-3 w-3" /> Duration (min)
           </label>
+          {/* An add-on may legitimately have no time of its own — Master Stylist 5 is
+              a $5 charge, not five minutes — so only a bookable service floors at 5. */}
           <input
             type="number"
-            min={5}
+            min={isAddon ? 0 : 5}
             max={480}
             className="cs-field w-full"
             value={dur}
-            onChange={(e) => setDur(parseInt(e.target.value, 10) || 30)}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10)
+              setDur(Number.isNaN(n) ? (isAddon ? 0 : 30) : n)
+            }}
           />
         </div>
       </div>

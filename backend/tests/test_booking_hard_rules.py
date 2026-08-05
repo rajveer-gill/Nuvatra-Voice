@@ -309,6 +309,42 @@ def test_addon_flag_survives_a_service_save():
     assert saved[1]["is_addon"] is True
 
 
+def test_an_addon_keeps_a_zero_duration_through_a_save():
+    """Master Stylist 5 is a $5 charge, not five minutes. The old floor of 5 rewrote
+    the imported 0, which would pad any appointment the add-on joins."""
+    saved = config_service._normalize_service_entries(
+        [{"id": "ms5", "name": "Master Stylist 5", "duration_minutes": 0, "is_addon": True}]
+    )
+    assert saved[0]["duration_minutes"] == 0
+
+
+def test_a_bookable_service_still_floors_at_five_minutes():
+    """The floor exists so a real appointment can't be zero-length — only add-ons are
+    exempt."""
+    saved = config_service._normalize_service_entries(
+        [{"id": "cut", "name": "Haircut", "duration_minutes": 0}]
+    )
+    assert saved[0]["duration_minutes"] == 5
+
+
+def test_category_survives_a_save():
+    """The import reads "Color Services" off the spreadsheet; staff assignment groups
+    by it, so dropping it on save would empty every group."""
+    saved = config_service._normalize_service_entries(
+        [
+            {"id": "c1", "name": "All-over color", "category": "Color Services"},
+            {"id": "c2", "name": "Haircut"},
+        ]
+    )
+    assert saved[0]["category"] == "Color Services"
+    assert saved[1]["category"] == "", "no category is empty, never None"
+
+
+def test_legacy_string_services_get_an_empty_category():
+    saved = config_service._normalize_service_entries(["Haircut", "Color"])
+    assert [s["category"] for s in saved] == ["", ""]
+
+
 def test_prompt_for_an_unconfigured_store_has_none_of_it():
     from prompts.receptionist import build_system_prompt
 

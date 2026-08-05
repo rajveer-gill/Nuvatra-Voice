@@ -117,6 +117,9 @@ export function ImportServicesButton({
             ? Math.max(0, r.duration_minutes)
             : Math.max(5, r.duration_minutes),
           is_addon: r.is_addon,
+          // The menu section from the file ("Color Services"), so staff can later be
+          // assigned a whole category rather than 39 services one at a time.
+          category: r.category || '',
           applies_to_service_ids: [] as string[],
         } satisfies ServiceRow,
       }))

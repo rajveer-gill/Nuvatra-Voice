@@ -51,16 +51,26 @@ def _normalize_service_entries(raw) -> List[dict]:
                 dm = int(s.get("duration_minutes", 30))
             except (TypeError, ValueError):
                 dm = 30
+            # An add-on rides along with a real service and can never be the whole
+            # appointment (conditioners, hot tools, length/master-stylist charges).
+            # Defaults False, so every existing service is unchanged.
+            is_addon = bool(s.get("is_addon", False))
             out.append(
                 {
                     "id": sid,
                     "name": str(s.get("name") or "")[:200],
                     "price": max(0.0, min(price, 999999.0)),
-                    "duration_minutes": max(5, min(dm, 480)),
-                    # An add-on rides along with a real service and can never be the
-                    # whole appointment (conditioners, hot tools, length/master-stylist
-                    # charges). Defaults False, so every existing service is unchanged.
-                    "is_addon": bool(s.get("is_addon", False)),
+                    # A bookable service needs real time on the calendar, so 5 is the
+                    # floor. An add-on legitimately has none of its own — Master Stylist
+                    # 5 is a $5 charge, not five minutes — and flooring it there
+                    # overwrote the imported 0 and would pad any appointment it joins.
+                    "duration_minutes": max(0 if is_addon else 5, min(dm, 480)),
+                    "is_addon": is_addon,
+                    # The menu section this came from ("Color Services"). Carried through
+                    # from the import so staff can be assigned a whole category at once
+                    # instead of ticking services one at a time. Free text — every
+                    # booking system names these differently.
+                    "category": str(s.get("category") or "").strip()[:120],
                     # Which services this add-on may attach to. EMPTY means "any",
                     # which is the sane default — a business that hasn't thought about
                     # it shouldn't have its add-ons silently become unofferable.
@@ -89,6 +99,7 @@ def _normalize_service_entries(raw) -> List[dict]:
                     "price": 0.0,
                     "duration_minutes": 30,
                     "is_addon": False,  # legacy string services are always bookable
+                    "category": "",
                     "applies_to_service_ids": [],
                 }
             )

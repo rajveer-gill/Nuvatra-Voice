@@ -1,10 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import type { AxiosInstance } from 'axios'
 import { Calendar, CheckCircle2, ChevronRight, Clock, Mail, Pencil, Phone, Plus, Tag, Trash2, User, Users, X } from 'lucide-react'
 import type { ServiceRow } from '@/components/settings/StructuredListEditors'
+import { StaffServicePicker } from '@/components/settings/StaffServicePicker'
 import { fadeUpChild, staggerContainer } from '@/components/motion'
 
 export type DayHours = { start: string; end: string }
@@ -181,6 +182,17 @@ export function StaffMembersSection({
     working_hours: {} as Record<string, DayHours>,
   })
   const [draftError, setDraftError] = useState<string | null>(null)
+
+  /** People already set up, offered as a starting point for the next one — a salon
+   *  runs two or three skill profiles, not ten. Only those with an actual selection:
+   *  copying "everything" is what leaving it blank already does. */
+  const copySources = useMemo(
+    () =>
+      staff
+        .filter((s) => s.id !== editId && s.service_ids.length > 0)
+        .map((s) => ({ id: s.id, name: s.name, service_ids: s.service_ids })),
+    [staff, editId]
+  )
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
@@ -719,44 +731,15 @@ export function StaffMembersSection({
                   <motion.div layout>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Services they provide</label>
                     <p className="text-xs text-gray-500 mb-2">
-                      Optional. Leave none checked to allow any service on your menu. The AI uses this when booking with a
-                      specific person.
+                      Optional — the AI uses this when booking with a specific person. Tick a whole
+                      category at once, or leave it all unticked so they can be booked for anything.
                     </p>
-                    <div className="max-h-40 overflow-y-auto rounded-xl border border-teal-100 bg-teal-50/40 p-3 space-y-2">
-                      {availableServices.map((svc) => {
-                        const checked = draft.service_ids.includes(svc.id)
-                        return (
-                          <label
-                            key={svc.id}
-                            className="flex items-start gap-2 text-sm text-gray-800 cursor-pointer"
-                          >
-                            <input
-                              type="checkbox"
-                              className="mt-1 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
-                              checked={checked}
-                              onChange={() => {
-                                setDraft((d) => ({
-                                  ...d,
-                                  service_ids: checked
-                                    ? d.service_ids.filter((id) => id !== svc.id)
-                                    : [...d.service_ids, svc.id],
-                                }))
-                              }}
-                            />
-                            <span>
-                              <span className="font-medium">{svc.name}</span>
-                              {(svc.duration_minutes > 0 || svc.price > 0) && (
-                                <span className="text-gray-500 text-xs block">
-                                  {svc.duration_minutes > 0 ? `${svc.duration_minutes} min` : ''}
-                                  {svc.duration_minutes > 0 && svc.price > 0 ? ' · ' : ''}
-                                  {svc.price > 0 ? `$${svc.price}` : ''}
-                                </span>
-                              )}
-                            </span>
-                          </label>
-                        )
-                      })}
-                    </div>
+                    <StaffServicePicker
+                      services={availableServices}
+                      selected={draft.service_ids}
+                      onChange={(service_ids) => setDraft((d) => ({ ...d, service_ids }))}
+                      copyFrom={copySources}
+                    />
                   </motion.div>
                 ) : (
                   <p className="text-xs text-gray-500 rounded-lg border border-dashed border-gray-200 px-3 py-2">
