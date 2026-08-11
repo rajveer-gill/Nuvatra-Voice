@@ -271,6 +271,29 @@ def build_system_prompt(
             "this service needs a quick conversation with a stylist first, take their name, "
             "number and what they're after, and tell them the salon will call them back."
         )
+    # Request mode. The store's real calendar lives somewhere we cannot read (Zenoti,
+    # which refused API access), so we do not know what is free and must never imply
+    # we do. The backend already files these as requests rather than bookings; without
+    # this block the caller was still told "I'll book you for 2 PM on Thursday", which
+    # is the exact double-booking this mode exists to prevent. Empty for every store on
+    # the default internal mode, so nobody else's wording changes.
+    if str(business_info.get("booking_mode") or "").strip().lower() == "external":
+        provider = str(business_info.get("booking_provider_name") or "").strip()
+        help_lines.append(
+            "- REQUEST ONLY — YOU CANNOT SEE THE CALENDAR"
+            + (f" (it lives in {provider})" if provider else "")
+            + ". You are taking a REQUEST, not making a booking. Therefore:\n"
+            "  • NEVER say a day or time is available, free, or open — you have no way to know.\n"
+            "  • NEVER say the appointment is booked, confirmed, scheduled, reserved or "
+            "\"all set\", and never say \"see you then\".\n"
+            "  • Do NOT offer or suggest specific times. Ask what day and time they would "
+            "LIKE, and take it down as a request.\n"
+            "  • Once you have their details, tell them the salon will confirm — e.g. "
+            "\"I've sent that through to the salon and they'll confirm your time with you "
+            "shortly.\" Say requested, not booked.\n"
+            "  • If they ask whether a time is free, say you'll pass the request on and the "
+            "salon will confirm what's available."
+        )
     booking_rules = business_info.get("booking_rules") or []
     if booking_rules:
         help_lines.append(
@@ -541,6 +564,24 @@ def build_system_prompt(
                 f"- STYLIST: One provider on the roster ({roster_names[0]}). "
                 f"Confirm the appointment is with {roster_names[0]}; put their name in the staff field.\n"
             )
+        # Rule (6) below normally allows "you're booked" once BOOKING is emitted. In
+        # request mode there is nothing to be booked into, so the permission has to be
+        # withdrawn or it contradicts the REQUEST ONLY block above and, being later in
+        # the prompt, tends to win.
+        if str(business_info.get("booking_mode") or "").strip().lower() == "external":
+            confirm_rule = (
+                'NEVER tell the caller the appointment is booked, confirmed, scheduled, '
+                'reserved or "all set", and never say "see you then" — not even after you '
+                'output BOOKING. You are recording a REQUEST. On the turn you output '
+                'BOOKING, tell them you have sent it to the salon and they will confirm '
+                'the time.'
+            )
+        else:
+            confirm_rule = (
+                'NEVER tell the caller the appointment is booked, confirmed, scheduled, or '
+                '"all set"—and never say "see you then"—until you output BOOKING on that '
+                'same turn; until then say you are gathering details and will text them to confirm.'
+            )
         if has_configured_services:
             service_booking_rules = (
                 "- SERVICES: This business has a configured service menu. Only offer or confirm services from that list—never invent services. "
@@ -569,7 +610,7 @@ def build_system_prompt(
 - AVAILABILITY: When offering a time to book, use ONLY a time from the 'ONLY suggest these times' list for that day (if present). Never offer or say "we have an open slot at" a time that is listed as already taken. If they ask for availability for a day, suggest only the free times listed for that day.
 - If they request a time that IS in the booked/taken list: politely say it's taken and suggest one of the free times from the list.
 - CALLER PHONE: We already have the caller's phone number from this call—do NOT ask for it. Never say "please provide your phone number" or "what's your number". We will fill it in automatically. Only ask for: name (if needed), date, time, service, and stylist when applicable. Do NOT ask for email—we confirm by text/SMS only.
-{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). Field 1 name is the CALLER's name (the customer)—NEVER a stylist. Field 7 staff is ONLY for the stylist when they chose one. The reason field holds the service name when a service menu exists, or a short visit note otherwise. RULES: (1) You MUST include the caller's name in field 1—if they haven't given it, ask for their name first, then output BOOKING. Never put a stylist name in field 1. (2) For phone and email: leave empty (we have phone from the call; we do not collect email). (3) Date must be YYYY-MM-DD. Today is {today_dow} {today_str}; tomorrow is {tomorrow_dow} {tomorrow_str}. Use the DATE REFERENCE list to map any weekday the caller names to its date—do NOT compute the day of week yourself (e.g. "tomorrow" = {tomorrow_str}). (4) Time: write it WITH its am/pm period exactly as agreed (e.g. "1 PM", "9:30 AM", "12 PM" for noon)—do NOT convert to 24-hour/military time yourself. (5) Do not output BOOKING until you have at least name, date, and time. (6) NEVER tell the caller the appointment is booked, confirmed, scheduled, or "all set"—and never say "see you then"—until you output BOOKING on that same turn; until then say you are gathering details and will text them to confirm. (7) When multiple stylists and a service menu exist, ask which SERVICE they want FIRST; then suggest only the stylists who provide that service and ask which they prefer (or anyone is fine)—do not ask for the stylist before the service. (8) Be proactive: never end a turn with vague filler like "let me get the rest of your details", "one moment", or "let me pull that up" and then stop. While any detail is still missing, ALWAYS end your reply by directly asking the caller for the single next missing item (their name, the day/time, the stylist, or the service) so they know exactly what to say—do not make them ask what you need. (9) If the caller CHANGES any already-agreed detail (service, stylist, date, or time) after you have output BOOKING, you MUST output a NEW BOOKING line on that same turn with ALL fields updated to the new details—do not just acknowledge the change in words, or it will NOT be saved. This applies to a service or stylist change exactly as it does to a time change."""
+{service_booking_rules}reply with EXACTLY: BOOKING: name|phone|email|date|time|reason|staff (| separator). Field 1 name is the CALLER's name (the customer)—NEVER a stylist. Field 7 staff is ONLY for the stylist when they chose one. The reason field holds the service name when a service menu exists, or a short visit note otherwise. RULES: (1) You MUST include the caller's name in field 1—if they haven't given it, ask for their name first, then output BOOKING. Never put a stylist name in field 1. (2) For phone and email: leave empty (we have phone from the call; we do not collect email). (3) Date must be YYYY-MM-DD. Today is {today_dow} {today_str}; tomorrow is {tomorrow_dow} {tomorrow_str}. Use the DATE REFERENCE list to map any weekday the caller names to its date—do NOT compute the day of week yourself (e.g. "tomorrow" = {tomorrow_str}). (4) Time: write it WITH its am/pm period exactly as agreed (e.g. "1 PM", "9:30 AM", "12 PM" for noon)—do NOT convert to 24-hour/military time yourself. (5) Do not output BOOKING until you have at least name, date, and time. (6) {confirm_rule} (7) When multiple stylists and a service menu exist, ask which SERVICE they want FIRST; then suggest only the stylists who provide that service and ask which they prefer (or anyone is fine)—do not ask for the stylist before the service. (8) Be proactive: never end a turn with vague filler like "let me get the rest of your details", "one moment", or "let me pull that up" and then stop. While any detail is still missing, ALWAYS end your reply by directly asking the caller for the single next missing item (their name, the day/time, the stylist, or the service) so they know exactly what to say—do not make them ask what you need. (9) If the caller CHANGES any already-agreed detail (service, stylist, date, or time) after you have output BOOKING, you MUST output a NEW BOOKING line on that same turn with ALL fields updated to the new details—do not just acknowledge the change in words, or it will NOT be saved. This applies to a service or stylist change exactly as it does to a time change."""
         slots_block += date_reference_block
 
     help_section = (

@@ -152,6 +152,13 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
             "Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
             "You can also reply with changes.\n\n"
         )
+    elif status == "pending_review":
+        # Request mode: the real calendar is elsewhere, so nothing is booked yet and the
+        # customer must not be told otherwise. The old wording fell through to "your
+        # updated appointment info on file", which reads like a confirmation for someone
+        # whose request hasn't even been looked at.
+        intro = "Your request is with the salon — nothing is booked yet, they'll confirm your time with you:"
+        footer = "Reply if you'd like to change anything before they confirm.\n\n"
     else:
         intro = "Here's your updated appointment info on file:"
         footer = "Reply if anything still needs to change.\n\n"

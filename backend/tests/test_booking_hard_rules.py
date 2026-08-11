@@ -345,6 +345,98 @@ def test_legacy_string_services_get_an_empty_category():
     assert [s["category"] for s in saved] == ["", ""]
 
 
+# --- Request mode has to reach the words, not just the database -------------
+# A real call proved the gap: the store was in external mode, the appointment was
+# correctly filed as a request, and the caller was still told "I'll book you for a
+# shampoo and haircut at 2 PM on Thursday" and texted "your appointment info on
+# file". The database was the only honest party in the transaction.
+
+
+def _external(**over):
+    data = {
+        "name": "HairMasters",
+        "hours": "Mon-Fri 9 AM - 5 PM",
+        "booking_mode": "external",
+        "booking_provider_name": "Zenoti",
+        "services": [{"id": "s1", "name": "Shampoo & Haircut", "price": 28, "duration_minutes": 30}],
+        "staff": [{"id": "stf-1", "name": "Jamie", "service_ids": []}],
+    }
+    data.update(over)
+    return config_service._config_data_to_business_info(data)
+
+
+def test_request_mode_forbids_claiming_availability():
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(business_info=_external(), include_booked_slots=True)
+    assert "REQUEST ONLY" in prompt
+    assert "YOU CANNOT SEE THE CALENDAR" in prompt
+    assert "Zenoti" in prompt, "name the system so the AI knows where the calendar is"
+    assert "NEVER say a day or time is available" in prompt
+
+
+def test_request_mode_withdraws_permission_to_say_booked():
+    """Rule (6) normally allows "you're booked" once BOOKING is emitted. In request
+    mode that permission has to be revoked, or it contradicts the block above and —
+    being later in the prompt — tends to win."""
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(business_info=_external(), include_booked_slots=True)
+    assert "not even after you output BOOKING" in prompt
+
+
+def test_internal_mode_keeps_the_original_confirmation_rule():
+    """Every store on the default mode must be word-for-word unchanged."""
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(business_info=_configured(), include_booked_slots=True)
+    assert "REQUEST ONLY" not in prompt
+    assert "until you output BOOKING on that same turn" in prompt
+    assert "not even after you output BOOKING" not in prompt
+
+
+def test_a_store_with_no_provider_name_still_gets_the_block():
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(
+        business_info=_external(booking_provider_name=""), include_booked_slots=True
+    )
+    assert "REQUEST ONLY" in prompt
+    assert "(it lives in" not in prompt, "don't render an empty parenthetical"
+
+
+def test_the_request_sms_says_nothing_is_booked_yet():
+    import booking_service
+
+    apt = {
+        "name": "Raj Gill", "phone": "+14155550101", "date": "2026-08-13",
+        "time": "14:00", "reason": "Shampoo & Haircut", "status": "pending_review",
+    }
+    msg = booking_service._format_appointment_details_confirmation_sms(apt)
+    assert "nothing is booked yet" in msg
+    assert "they'll confirm" in msg
+    # The old fall-through wording read like a confirmation of something that existed.
+    assert "appointment info on file" not in msg
+    assert "YES or CONFIRM" not in msg, "there is no slot for the customer to reserve"
+
+
+def test_the_internal_confirmation_texts_are_unchanged():
+    import booking_service
+
+    base = {
+        "name": "Raj", "phone": "+14155550101", "date": "2026-08-13",
+        "time": "14:00", "reason": "Haircut",
+    }
+    pending = booking_service._format_appointment_details_confirmation_sms(
+        {**base, "status": "pending_customer"}
+    )
+    assert "YES or CONFIRM" in pending
+    other = booking_service._format_appointment_details_confirmation_sms(
+        {**base, "status": "confirmed"}
+    )
+    assert "appointment info on file" in other
+
+
 def test_prompt_for_an_unconfigured_store_has_none_of_it():
     from prompts.receptionist import build_system_prompt
 
