@@ -611,7 +611,20 @@ def _extract_booking_line_from_conversation(
         f"Staff: {', '.join(staff_names) or 'none'}. "
         f"Services: {', '.join(service_names) or 'any'}.\n"
         f"Caller name on file: {mem_name or 'unknown'}.\n"
-        "If name, date, or time is missing or ambiguous, reply with exactly: NONE"
+        # A returning caller often never says their name, because the AI never asks —
+        # it already greeted them by it. Refusing to use the name we hold means the
+        # whole request is dropped at the end of a call where the day, time and service
+        # were all agreed. The name is from this phone number's own history, not a
+        # guess.
+        + (
+            f"The caller did not have to state their name: if the transcript does not "
+            f"contain one, use the name on file ({mem_name}) in field 1.\n"
+            if mem_name
+            else ""
+        )
+        + "If date or time is missing or ambiguous, reply with exactly: NONE. "
+        "Reply NONE for the name only when there is no name in the transcript AND none "
+        "on file."
     )
     try:
         raw = (

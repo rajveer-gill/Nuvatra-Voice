@@ -536,3 +536,61 @@ def test_clock_times_normalize(clock, expected):
     import conversation_service
 
     assert conversation_service.normalize_booking_time(clock) == expected
+
+
+# --- The end-of-call backstop -------------------------------------------------
+# The model is unreliable about emitting BOOKING at the right moment: across five
+# live calls it announced "I've sent your request to the salon" three times without
+# ever emitting the marker. Two rounds of prompt tightening didn't stop it. The
+# reconciler exists for exactly this, so it has to be the robust one.
+
+
+def _extractor_prompt(monkeypatch, *, mem_name, history):
+    """Capture the system prompt the end-of-call extractor sends."""
+    import conversation_service as cs
+
+    seen = {}
+
+    def fake_chat(**kw):
+        seen["system"] = kw["messages"][0]["content"]
+        seen["transcript"] = kw["messages"][1]["content"]
+        return "NONE"
+
+    monkeypatch.setattr(cs.llm_provider, "chat", fake_chat)
+    monkeypatch.setattr(
+        cs.config_service, "get_business_info",
+        lambda: config_service._config_data_to_business_info(
+            {"name": "S", "hours": "9-5", "services": _SERVICES,
+             "staff": [{"id": "s1", "name": "Jamie"}]}
+        ),
+    )
+    cs._extract_booking_line_from_conversation(
+        history, caller_memory={"name": mem_name} if mem_name else None
+    )
+    return seen.get("system", "")
+
+
+_HISTORY = [
+    {"role": "user", "content": "I'd like a shampoo and haircut Thursday at 2 PM"},
+    {"role": "assistant", "content": "Sure, what time?"},
+]
+
+
+def test_the_extractor_may_use_the_name_on_file(monkeypatch):
+    """A returning caller often never says their name — the AI greeted them by it and
+    never asked. Dropping the whole request over that is the worst outcome."""
+    sys_prompt = _extractor_prompt(monkeypatch, mem_name="Raj", history=_HISTORY)
+    assert "use the name on file (Raj)" in sys_prompt
+    assert "Caller name on file: Raj" in sys_prompt
+
+
+def test_without_a_name_on_file_the_extractor_still_refuses(monkeypatch):
+    """No name anywhere is still a reason to give up — a nameless request is bad data."""
+    sys_prompt = _extractor_prompt(monkeypatch, mem_name="", history=_HISTORY)
+    assert "use the name on file" not in sys_prompt
+    assert "none on file" in sys_prompt
+
+
+def test_date_and_time_are_still_required(monkeypatch):
+    sys_prompt = _extractor_prompt(monkeypatch, mem_name="Raj", history=_HISTORY)
+    assert "If date or time is missing or ambiguous, reply with exactly: NONE" in sys_prompt
