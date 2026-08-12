@@ -288,11 +288,15 @@ def build_system_prompt(
             "\"all set\", and never say \"see you then\".\n"
             "  • Do NOT offer or suggest specific times. Ask what day and time they would "
             "LIKE, and take it down as a request.\n"
-            "  • Once you have their details, tell them the salon will confirm — e.g. "
-            "\"I've sent that through to the salon and they'll confirm your time with you "
-            "shortly.\" Say requested, not booked.\n"
             "  • If they ask whether a time is free, say you'll pass the request on and the "
-            "salon will confirm what's available."
+            "salon will confirm what's available.\n"
+            "  • THIS CHANGES ONLY YOUR WORDING, NOT YOUR JOB. You must still collect the "
+            "caller's NAME, the day and the time, still ask for whichever of those is "
+            "missing, and still output the BOOKING line exactly as described below. A "
+            "request you never write down is lost — the salon never sees it.\n"
+            "  • Do NOT say the request has been sent, noted, passed on or received until "
+            "you output BOOKING on that same turn. Saying it earlier tells the caller their "
+            "request is with the salon when nothing has been recorded at all."
         )
     booking_rules = business_info.get("booking_rules") or []
     if booking_rules:

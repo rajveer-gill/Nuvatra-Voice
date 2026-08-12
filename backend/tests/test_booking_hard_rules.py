@@ -395,6 +395,20 @@ def test_internal_mode_keeps_the_original_confirmation_rule():
     assert "not even after you output BOOKING" not in prompt
 
 
+def test_request_mode_still_demands_the_booking_line():
+    """The first version of this block ended on "tell them the salon will confirm",
+    and a live call showed the model treating that as the finish line: it never asked
+    for the caller's name, never emitted BOOKING, and told the caller their request
+    was with the salon while nothing at all had been recorded. Softening the words
+    must not soften the work."""
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(business_info=_external(), include_booked_slots=True)
+    assert "THIS CHANGES ONLY YOUR WORDING, NOT YOUR JOB" in prompt
+    assert "still output the BOOKING line" in prompt
+    assert "Do NOT say the request has been sent" in prompt
+
+
 def test_a_store_with_no_provider_name_still_gets_the_block():
     from prompts.receptionist import build_system_prompt
 
