@@ -296,7 +296,12 @@ def build_system_prompt(
             "request you never write down is lost — the salon never sees it.\n"
             "  • Do NOT say the request has been sent, noted, passed on or received until "
             "you output BOOKING on that same turn. Saying it earlier tells the caller their "
-            "request is with the salon when nothing has been recorded at all."
+            "request is with the salon when nothing has been recorded at all.\n"
+            "  • You still need a SPECIFIC CLOCK TIME. \"Thursday afternoon\", \"the "
+            "morning\" or \"sometime after work\" cannot be recorded and the request would "
+            "be silently lost. If they give a vague time, ask which time specifically "
+            "(e.g. \"what time works — around 2 PM?\"), and put that clock time in the "
+            "BOOKING time field as \"2 PM\". Never write a word like \"afternoon\" there."
         )
     booking_rules = business_info.get("booking_rules") or []
     if booking_rules:

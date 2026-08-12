@@ -509,3 +509,30 @@ def test_an_unknown_status_falls_back_to_the_internal_wording():
     """Only pending_review means request mode; anything else keeps today's behaviour."""
     for status in ("", "confirmed", "cancelled", "pending_customer"):
         assert "YES" in _spoken(status)
+
+
+def test_request_mode_insists_on_a_clock_time():
+    """A live call emitted BOOKING with time="afternoon". normalize_booking_time
+    returns None for that, so the row was rejected and the caller was never told —
+    a silently dropped request, which is the worst outcome available."""
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(business_info=_external(), include_booked_slots=True)
+    assert "SPECIFIC CLOCK TIME" in prompt
+    assert 'Never write a word like "afternoon" there' in prompt
+
+
+@pytest.mark.parametrize("vague", ["afternoon", "morning", "evening", "Two in the afternoon"])
+def test_vague_times_really_are_unusable(vague):
+    """The premise of the rule above. If any of these ever start normalizing, the
+    prompt could relax — until then the model must convert them itself."""
+    import conversation_service
+
+    assert conversation_service.normalize_booking_time(vague) is None
+
+
+@pytest.mark.parametrize("clock,expected", [("2 PM", "14:00"), ("9:30 AM", "09:30"), ("12 PM", "12:00")])
+def test_clock_times_normalize(clock, expected):
+    import conversation_service
+
+    assert conversation_service.normalize_booking_time(clock) == expected

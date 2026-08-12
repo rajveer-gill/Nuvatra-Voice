@@ -1673,6 +1673,7 @@ async def generate_response_async(
         # Full AI reply (incl. any BOOKING marker) when OBS_TRACE_TRANSCRIPT=1 — pairs with the
         # caller_said lines so the whole conversation is reconstructable from the logs.
         voice_transcript("ai_said", call_sid=call_sid, text=ai_text or "")
+        _model_reply_raw = ai_text or ""
         booking = parse_booking(ai_text)
         if booking:
             booking, repairs, reject = _prepare_parsed_booking(
@@ -1877,6 +1878,14 @@ async def generate_response_async(
         if call_data.pop("forward_unavailable", False):
             if not (config_service.get_business_info().get("forwarding_phone") or "").strip():
                 ai_text = _NO_TRANSFER_FALLBACK_TEXT
+
+        if (ai_text or "") != _model_reply_raw:
+            voice_transcript(
+                "ai_spoken",
+                call_sid=call_sid,
+                text=ai_text or "",
+                substituted=True,
+            )
 
         # Add AI response to conversation
         ai_message = {"role": "assistant", "content": ai_text}
