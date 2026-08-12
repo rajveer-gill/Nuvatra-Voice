@@ -706,6 +706,52 @@ def _caller_phone_for_booking(booking_phone: Optional[str], from_num: str) -> st
     return ai if digits >= 7 else (from_num or "")
 
 
+# What the caller HEARS once the appointment row exists. The model's own reply is
+# discarded at this point, so this text is the last thing they're told — and it was
+# hardcoded to the internal flow ("reply YES or CONFIRM, that locks the time"). In
+# request mode there is no slot to lock and nothing for the caller to confirm; the
+# salon confirms to them. It also has to agree with the SMS, which asks for no reply.
+_SPOKEN_AFTER_BOOKING = {
+    ("request", "texted"): (
+        "I've sent your request to the salon and texted you the details. "
+        "They'll confirm your time with you shortly — just reply to that text "
+        "if anything needs changing."
+    ),
+    ("request", "sms_failed"): (
+        "Your request is saved and the salon will confirm your time with you. "
+        "We couldn't send you a text from this line right now."
+    ),
+    ("request", "no_phone"): (
+        "We've saved your request and the salon will confirm your time with you."
+    ),
+    ("internal", "texted"): (
+        "I've texted you the details. Please check your phone and reply YES or CONFIRM "
+        "when everything looks right—that locks the time and sends your request to "
+        "the shop. The time is not finalized until you confirm by text."
+    ),
+    ("internal", "sms_failed"): (
+        "Your visit request is saved. We could not send the confirmation text from this "
+        "line right now—please text YES to this business number from your mobile when "
+        "you're ready to confirm, or call us back."
+    ),
+    ("internal", "no_phone"): (
+        "We've saved your booking request. We don't have a mobile number on this call to "
+        "text you—please call back or text us from your phone with YES to confirm."
+    ),
+}
+
+
+def post_booking_spoken_confirmation(status: str, outcome: str) -> str:
+    """Spoken confirmation after a booking lands.
+
+    status is the appointment's own status — pending_review means request mode, which
+    is set only by the external-booking branch. outcome is one of "texted",
+    "sms_failed", "no_phone".
+    """
+    mode = "request" if (status or "").strip() == "pending_review" else "internal"
+    return _SPOKEN_AFTER_BOOKING[(mode, outcome)]
+
+
 def _strip_booking_directive_for_voice(ai_text: str) -> str:
     """Remove BOOKING:... from model output so it is never read aloud by TTS."""
     if not ai_text or "BOOKING:" not in ai_text.upper():
@@ -1161,6 +1207,10 @@ def _send_booking_confirmation_sms(
         to_set=bool(to_number_sms),
         from_set=bool(from_number_sms),
     )
+    # Request mode: the calendar is in another system, so there is no slot for the
+    # caller to lock and nothing for them to confirm — the salon confirms to them.
+    # Read off the row we just wrote; pending_review is set only by the external branch.
+    is_request = (apt.get("status") or "").strip() == "pending_review"
     if to_number_sms:
         if runtime.USE_DB and cid and cid != "default":
             database.db_sms_consent_record(
@@ -1189,7 +1239,10 @@ def _send_booking_confirmation_sms(
                             {
                                 "role": "assistant",
                                 "content": (
-                                    "Appointment details sent by text. "
+                                    "Request details sent by text. The salon will "
+                                    "confirm the time."
+                                    if is_request
+                                    else "Appointment details sent by text. "
                                     "Reply YES or CONFIRM when everything looks right."
                                 ),
                             }
@@ -1208,19 +1261,16 @@ def _send_booking_confirmation_sms(
                         sess_err,
                         exc_info=True,
                     )
-            ai_text = (
-                "I've texted you the details. Please check your phone and reply YES or CONFIRM when everything looks right—that locks the time and sends your request to the shop. "
-                "The time is not finalized until you confirm by text."
-            )
+            ai_text = post_booking_spoken_confirmation(apt.get("status") or "", "texted")
         else:
-            ai_text = "Your visit request is saved. We could not send the confirmation text from this line right now—please text YES to this business number from your mobile when you're ready to confirm, or call us back."
+            ai_text = post_booking_spoken_confirmation(apt.get("status") or "", "sms_failed")
     else:
         sms_info(
             "post_booking_confirmation_skipped",
             reason="no_caller_phone",
             client_id=cid,
         )
-        ai_text = "We've saved your booking request. We don't have a mobile number on this call to text you—please call back or text us from your phone with YES to confirm."
+        ai_text = post_booking_spoken_confirmation(apt.get("status") or "", "no_phone")
     fn_mem = (call_data.get("from_number") or "").strip()
     if fn_mem:
         dp = {

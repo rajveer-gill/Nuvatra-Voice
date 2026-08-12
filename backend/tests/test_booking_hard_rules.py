@@ -458,3 +458,54 @@ def test_prompt_for_an_unconfigured_store_has_none_of_it():
     assert "ADD-ON only" not in prompt
     assert "NEVER BOOK" not in prompt
     assert "BOOKING POLICIES" not in prompt
+
+
+# --- What the caller HEARS after the booking lands ---------------------------
+# After a BOOKING line the code discards the model's reply and speaks its own
+# confirmation. That text was hardcoded to the internal flow — "reply YES or CONFIRM,
+# that locks the time" — so a request-mode caller was told to lock a slot in a
+# calendar we cannot write to, and it contradicted the SMS, which asks for no such
+# thing. Found on a live call, after the prompt and the SMS had already been fixed.
+
+
+def _spoken(status: str, outcome: str = "texted") -> str:
+    import conversation_service
+
+    return conversation_service.post_booking_spoken_confirmation(status, outcome)
+
+
+@pytest.mark.parametrize("outcome", ["texted", "sms_failed", "no_phone"])
+def test_request_mode_never_asks_the_caller_to_lock_a_time(outcome):
+    spoken = _spoken("pending_review", outcome)
+    assert "YES" not in spoken
+    assert "CONFIRM" not in spoken
+    assert "locks the time" not in spoken
+    assert "confirm" in spoken.lower(), "it must still say the salon will confirm"
+
+
+@pytest.mark.parametrize("outcome", ["texted", "sms_failed", "no_phone"])
+def test_internal_mode_confirmations_are_unchanged(outcome):
+    """Every store on the default mode hears exactly what it heard before."""
+    spoken = _spoken("pending_customer", outcome)
+    assert "YES" in spoken
+
+
+def test_the_spoken_line_and_the_sms_agree():
+    """They contradicted each other in production: the voice told the caller to reply
+    YES to lock the time, while the text asked for no such thing."""
+    import booking_service
+
+    apt = {
+        "name": "Raj", "phone": "+14155550101", "date": "2026-08-13",
+        "time": "14:00", "reason": "Haircut", "status": "pending_review",
+    }
+    sms = booking_service._format_appointment_details_confirmation_sms(apt)
+    spoken = _spoken("pending_review")
+    assert "YES or CONFIRM" not in sms
+    assert "YES" not in spoken
+
+
+def test_an_unknown_status_falls_back_to_the_internal_wording():
+    """Only pending_review means request mode; anything else keeps today's behaviour."""
+    for status in ("", "confirmed", "cancelled", "pending_customer"):
+        assert "YES" in _spoken(status)
