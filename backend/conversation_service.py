@@ -765,6 +765,21 @@ def post_booking_spoken_confirmation(status: str, outcome: str) -> str:
     return _SPOKEN_AFTER_BOOKING[(mode, outcome)]
 
 
+def _booking_identity(booking: dict) -> tuple:
+    """What makes two BOOKING lines the same request rather than a change of mind."""
+    def norm(v):
+        return re.sub(r"\s+", " ", str(v or "").strip()).lower()
+
+    return (
+        norm(booking.get("date")),
+        booking_service._normalize_time_to_hhmm(booking.get("time") or "")
+        or norm(booking.get("time")),
+        norm(booking.get("reason")),
+        norm(booking.get("name")),
+        norm(booking.get("staff")),
+    )
+
+
 def _strip_booking_directive_for_voice(ai_text: str) -> str:
     """Remove BOOKING:... from model output so it is never read aloud by TTS."""
     if not ai_text or "BOOKING:" not in ai_text.upper():
@@ -1110,14 +1125,20 @@ def _create_appointment_from_booking(
         )
         return None
     duration_min = booking_service._booking_duration_minutes(booking)
+    # Superseding the caller's own earlier draft and checking slot availability are two
+    # different jobs that used to be gated together. Only the availability check belongs
+    # to internal mode — we can't consult a calendar we don't own. Clearing the caller's
+    # stale row applies either way, and this function already knows how to retire a
+    # pending_review one; leaving it gated meant a second BOOKING line in a request-mode
+    # call left two identical requests for the salon to sort out.
+    _supersede_pending_customer_drafts_for_slot(
+        date,
+        time,
+        staff_key,
+        client_id=cid_for_slot,
+        phone=(booking.get("phone") or "").strip(),
+    )
     if not external:
-        _supersede_pending_customer_drafts_for_slot(
-            date,
-            time,
-            staff_key,
-            client_id=cid_for_slot,
-            phone=(booking.get("phone") or "").strip(),
-        )
         if not booking_service.is_slot_available(date, time, duration_min, staff_key):
             booking_service._invalidate_booked_slots_cache()  # Next prompt build will see slot as taken
             blockers = booking_service._slot_blocking_details(
@@ -1733,6 +1754,19 @@ async def generate_response_async(
                 # (history append + session persist). The booking blocks below are skipped since
                 # `booking` is None and the appointment already exists.
                 ai_text = _change_text
+        # The model re-emits BOOKING freely — on a live call it produced the same line
+        # when asking for a name and again on the goodbye turn, creating two identical
+        # requests and texting the caller twice. An unchanged repeat is not news: drop
+        # it and let the model's own words through. A CHANGED one still falls through
+        # and supersedes, because that is a real amendment.
+        if booking and _booking_identity(booking) == call_data.get("last_booking_identity"):
+            system_info(
+                "voice_booking_repeat_ignored",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+            )
+            booking = None
+
         # BOOKING: create appointment from AI output if present; replace response with confirmation or slot-taken message
         if booking:
             fail_msg = None
@@ -1789,6 +1823,7 @@ async def generate_response_async(
                         )
                     if apt:
                         call_data["appointment_created"] = True
+                        call_data["last_booking_identity"] = _booking_identity(booking)
                         if not (apt.get("phone") or "").strip() and call_data.get(
                             "from_number"
                         ):

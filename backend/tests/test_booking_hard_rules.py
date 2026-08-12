@@ -594,3 +594,69 @@ def test_without_a_name_on_file_the_extractor_still_refuses(monkeypatch):
 def test_date_and_time_are_still_required(monkeypatch):
     sys_prompt = _extractor_prompt(monkeypatch, mem_name="Raj", history=_HISTORY)
     assert "If date or time is missing or ambiguous, reply with exactly: NONE" in sys_prompt
+
+
+# --- One request per request --------------------------------------------------
+# A live request-mode call created apt 90 and apt 91 seventeen seconds apart, with
+# two texts to the caller, because the model emitted BOOKING when asking for the name
+# and again on the goodbye turn. Internal mode had never shown this: it supersedes the
+# caller's earlier draft, but that call was gated behind `if not external`.
+
+
+def test_an_unchanged_repeat_is_the_same_request():
+    import conversation_service as cs
+
+    spoken = {"date": "2026-08-13", "time": "2 PM", "reason": "Shampoo & Haircut",
+              "name": "Raj", "staff": ""}
+    reparsed = {"date": "2026-08-13", "time": "14:00", "reason": "shampoo &  haircut",
+                "name": " raj ", "staff": ""}
+    assert cs._booking_identity(spoken) == cs._booking_identity(reparsed)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"time": "3 PM"},
+        {"date": "2026-08-14"},
+        {"reason": "Full Style"},
+        {"staff": "Jamie"},
+        {"name": "Raj Gill"},
+    ],
+)
+def test_a_changed_detail_is_a_different_request(change):
+    """A real amendment must still fall through and supersede — silently ignoring it
+    would strand the caller with their original time."""
+    import conversation_service as cs
+
+    base = {"date": "2026-08-13", "time": "2 PM", "reason": "Shampoo & Haircut",
+            "name": "Raj", "staff": ""}
+    assert cs._booking_identity(base) != cs._booking_identity({**base, **change})
+
+
+def test_request_mode_supersedes_the_callers_earlier_row(monkeypatch):
+    """The dedupe used to be bundled with the slot-availability check, which is the
+    one thing that genuinely cannot run when the calendar is someone else's."""
+    cs, inserted = _patch(monkeypatch, _external())
+    calls = []
+    monkeypatch.setattr(
+        cs, "_supersede_pending_customer_drafts_for_slot",
+        lambda *a, **k: calls.append(a) or 0,
+    )
+    out = cs._create_appointment_from_booking(
+        _booking(reason="Shampoo & Haircut"), client_id_override="shop"
+    )
+    assert out is not None
+    assert calls, "a request-mode booking must still retire the caller's stale row"
+
+
+def test_internal_mode_still_supersedes(monkeypatch):
+    cs, inserted = _patch(monkeypatch, _configured())
+    calls = []
+    monkeypatch.setattr(
+        cs, "_supersede_pending_customer_drafts_for_slot",
+        lambda *a, **k: calls.append(a) or 0,
+    )
+    cs._create_appointment_from_booking(
+        _booking(reason="Shampoo & Haircut"), client_id_override="shop"
+    )
+    assert calls
