@@ -268,8 +268,10 @@ def build_system_prompt(
             "- NEVER BOOK these services — they need to be discussed with the salon first: "
             + ", ".join(f'"{str(s).strip()}"' for s in consult_only if str(s).strip())
             + ". If the caller asks for one, do NOT offer a time and do NOT book. Explain that "
-            "this service needs a quick conversation with a stylist first, take their name, "
-            "number and what they're after, and tell them the salon will call them back."
+            "this service needs a quick conversation with a stylist first, take their name "
+            "(only if you don't already have it) and what they're after, and tell them the "
+            "salon will call them back. Do NOT ask for their phone number — we already have "
+            "it from the call, and asking makes us look like we weren't paying attention."
         )
     # Request mode. The store's real calendar lives somewhere we cannot read (Zenoti,
     # which refused API access), so we do not know what is free and must never imply

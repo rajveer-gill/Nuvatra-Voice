@@ -660,3 +660,25 @@ def test_internal_mode_still_supersedes(monkeypatch):
         _booking(reason="Shampoo & Haircut"), client_id_override="shop"
     )
     assert calls
+
+
+def test_the_consult_block_does_not_ask_for_a_number_we_already_have():
+    """Twilio hands us the caller's number on every call, and the prompt says so in
+    three other places. The consult-only block contradicted them and asked anyway —
+    the more specific instruction won, and a live caller was asked for a number we
+    were already logging."""
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(business_info=_configured(), include_booked_slots=True)
+    i = prompt.index("NEVER BOOK these services")
+    block = prompt[i : i + 600]
+    assert "take their name" in block
+    assert "number and what they're after" not in block
+    assert "Do NOT ask for their phone number" in block
+
+
+def test_the_consult_block_skips_a_name_already_on_file():
+    from prompts.receptionist import build_system_prompt
+
+    prompt = build_system_prompt(business_info=_configured(), include_booked_slots=True)
+    assert "only if you don't already have it" in prompt
