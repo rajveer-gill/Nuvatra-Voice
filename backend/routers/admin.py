@@ -931,6 +931,73 @@ def admin_delete_tenant(
     }
 
 
+@router.get("/api/admin/tenants/{tenant_id}/stripe-status")
+def admin_tenant_stripe_status(
+    tenant_id: str,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """What Stripe currently thinks, read live rather than from our own column.
+
+    Our subscription_status is a copy kept up to date by webhooks, and a webhook that
+    silently fails leaves it wrong in exactly the situation an admin is investigating:
+    a customer who was charged while the app still asks them to pick a plan. Showing
+    our own copy back would confirm the mistake instead of exposing it, so this asks
+    Stripe.
+
+    Never raises for a Stripe problem — the admin screen must still render.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    tenant = database.db_tenant_get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    sub_id = (tenant.get("stripe_subscription_id") or "").strip()
+    ours = (tenant.get("subscription_status") or "").strip() or None
+    if not sub_id:
+        return {
+            "has_subscription": False,
+            "ours": ours,
+            "stripe": None,
+            "in_sync": None,
+            "message": "No Stripe subscription on file for this tenant.",
+        }
+    try:
+        import stripe as _stripe
+
+        _stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if not _stripe.api_key:
+            return {
+                "has_subscription": True, "ours": ours, "stripe": None, "in_sync": None,
+                "message": "STRIPE_SECRET_KEY is not set on this backend.",
+            }
+        sub = _stripe.Subscription.retrieve(sub_id)
+    except Exception as e:
+        print(f"[Admin] stripe status read failed sub={sub_id}: {type(e).__name__}")
+        return {
+            "has_subscription": True, "ours": ours, "stripe": None, "in_sync": None,
+            "message": f"Could not read Stripe ({type(e).__name__}).",
+        }
+
+    def _ts(v):
+        try:
+            return datetime.fromtimestamp(int(v), tz=timezone.utc).isoformat() if v else None
+        except Exception:
+            return None
+
+    live = str(getattr(sub, "status", "") or "") or None
+    return {
+        "has_subscription": True,
+        "subscription_id": sub_id,
+        "ours": ours,
+        "stripe": live,
+        # The whole point of the screen: say plainly when the two disagree.
+        "in_sync": (ours == live) if (ours and live) else None,
+        "cancel_at_period_end": bool(getattr(sub, "cancel_at_period_end", False)),
+        "current_period_end": _ts(getattr(sub, "current_period_end", None)),
+        "trial_end": _ts(getattr(sub, "trial_end", None)),
+    }
+
+
 @router.patch("/api/admin/tenants/{tenant_id}/billing-exempt")
 def admin_tenant_billing_exempt(
     tenant_id: str,

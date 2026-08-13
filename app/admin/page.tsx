@@ -232,6 +232,21 @@ export default function AdminPage() {
   })
   const [exempting, setExempting] = useState<string | null>(null)
   const [exemptAction, setExemptAction] = useState<Record<string, string>>({})
+  // Live Stripe state per tenant. Our own subscription_status is a webhook-maintained
+  // copy, and it is wrong precisely when an admin is investigating a billing problem —
+  // so the screen asks Stripe rather than showing our copy back.
+  type StripeStatus = {
+    has_subscription: boolean
+    ours?: string | null
+    stripe?: string | null
+    in_sync?: boolean | null
+    cancel_at_period_end?: boolean
+    current_period_end?: string | null
+    trial_end?: string | null
+    message?: string
+  }
+  const [stripeStatus, setStripeStatus] = useState<Record<string, StripeStatus>>({})
+  const [stripeChecking, setStripeChecking] = useState<string | null>(null)
   const [exemptUntilDate, setExemptUntilDate] = useState<Record<string, string>>({})
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [twilioDraft, setTwilioDraft] = useState<Record<string, string>>({})
@@ -394,6 +409,24 @@ export default function AdminPage() {
       setError(err.response?.data?.detail || 'Failed to create tenant')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const checkStripe = async (tenantId: string) => {
+    setStripeChecking(tenantId)
+    try {
+      const { data } = await api.get<StripeStatus>(
+        `/api/admin/tenants/${tenantId}/stripe-status`,
+        adminApi
+      )
+      setStripeStatus((m) => ({ ...m, [tenantId]: data }))
+    } catch {
+      setStripeStatus((m) => ({
+        ...m,
+        [tenantId]: { has_subscription: false, message: 'Could not reach the server.' },
+      }))
+    } finally {
+      setStripeChecking(null)
     }
   }
 
@@ -1121,6 +1154,18 @@ export default function AdminPage() {
                           >
                             {exempting === t.id ? 'Applying…' : 'Apply'}
                           </button>
+                          {/* These controls grant access in Call Surge and do not touch
+                              Stripe. Extending a trial for someone with a live
+                              subscription still lets Stripe charge them on renewal —
+                              which is exactly what happened once, unnoticed. */}
+                          <button
+                            type="button"
+                            onClick={() => void checkStripe(t.id)}
+                            disabled={stripeChecking === t.id}
+                            className="rounded-lg border border-white/15 px-2 py-1 text-sm text-zinc-300 motion-safe-transition hover:bg-white/10 disabled:opacity-50"
+                          >
+                            {stripeChecking === t.id ? 'Checking…' : 'Check Stripe'}
+                          </button>
                         </div>
                         <button
                           type="button"
@@ -1147,6 +1192,45 @@ export default function AdminPage() {
                           {deleting === t.id ? 'Removing…' : 'Remove'}
                         </button>
                       </div>
+                      <p className="mt-2 text-xs text-zinc-500">
+                        Exemptions and trial extensions grant access in Call Surge only —
+                        they do not change Stripe. If this customer has a live
+                        subscription, Stripe will still charge them on renewal. Cancel it
+                        in Stripe as well if they shouldn&rsquo;t be billed.
+                      </p>
+                      {stripeStatus[t.id] && (
+                        <div
+                          className={`mt-2 rounded-lg border px-3 py-2 text-xs ${
+                            stripeStatus[t.id].in_sync === false
+                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+                              : 'border-white/10 bg-white/5 text-zinc-300'
+                          }`}
+                        >
+                          {!stripeStatus[t.id].has_subscription || stripeStatus[t.id].stripe == null ? (
+                            <span>{stripeStatus[t.id].message || 'No Stripe subscription.'}</span>
+                          ) : (
+                            <>
+                              <span>
+                                Stripe says <strong>{stripeStatus[t.id].stripe}</strong>; we have{' '}
+                                <strong>{stripeStatus[t.id].ours || 'nothing'}</strong>.
+                              </span>
+                              {stripeStatus[t.id].in_sync === false && (
+                                <span className="ml-1 font-medium">
+                                  These disagree — a webhook probably didn&rsquo;t land.
+                                </span>
+                              )}
+                              {stripeStatus[t.id].current_period_end && (
+                                <span className="ml-1">
+                                  {stripeStatus[t.id].cancel_at_period_end
+                                    ? 'Ends'
+                                    : 'Renews and charges'}{' '}
+                                  {formatTrialEndDate(stripeStatus[t.id].current_period_end as string)}.
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </motion.li>
                   )
