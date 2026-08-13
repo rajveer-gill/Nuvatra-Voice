@@ -781,7 +781,6 @@ async def handle_incoming_sms(request: Request):
                 date = (apt_full.get("date") or "").strip()
                 time_raw = (apt_full.get("time") or "").strip()
                 time_hhmm = booking_service._normalize_time_to_hhmm(time_raw) or time_raw
-                from observability import email_hint_for_log, name_initial_for_log
 
                 sms_info(
                     "sms_customer_confirm_snapshot",
@@ -864,7 +863,6 @@ async def handle_incoming_sms(request: Request):
             except Exception:
                 pass
             _notify_staff_pending_review(apt_after, tenant, to_number)
-            from observability import email_hint_for_log, name_initial_for_log
 
             sms_info(
                 "customer_confirmed_pending_to_review",

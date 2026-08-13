@@ -96,8 +96,6 @@ def _subscription_status_and_trial(sub_id: Optional[str]):
         trial_ends_at = None
         t_end = getattr(sub, "trial_end", None)
         if isinstance(t_end, (int, float)):
-            from datetime import datetime, timezone
-
             trial_ends_at = datetime.fromtimestamp(int(t_end), tz=timezone.utc)
         return status, trial_ends_at
     except Exception as e:
@@ -1036,8 +1034,6 @@ async def stripe_webhook(request: Request):
                 trial_ends_at = None
                 t_end = obj.get("trial_end")
                 if t_end:
-                    from datetime import datetime, timezone
-
                     trial_ends_at = datetime.fromtimestamp(int(t_end), tz=timezone.utc)
                 database.db_tenant_update_subscription(
                     tenant_id,
