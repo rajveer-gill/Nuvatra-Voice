@@ -412,6 +412,16 @@ export default function AdminPage() {
     }
   }
 
+  /** What actually happened at Stripe, in words. The grant is meaningless to a paying
+   *  customer if Stripe kept billing them, so a failure here must never be swallowed
+   *  into a cheerful "done". */
+  const stripeOutcome = (r?: { applied?: boolean; reason?: string; error?: string | null }) => {
+    if (!r) return ''
+    if (r.applied) return ' Stripe billing deferred to the same date.'
+    if (r.reason === 'no_subscription') return ' No Stripe subscription — nothing was billing them.'
+    return ` WARNING: Stripe was NOT updated (${r.error || 'unknown error'}) — they will still be charged. Cancel or pause it in Stripe.`
+  }
+
   const checkStripe = async (tenantId: string) => {
     setStripeChecking(tenantId)
     try {
@@ -438,14 +448,14 @@ export default function AdminPage() {
     setSuccess(null)
     try {
       if (action === 'extend_trial_1') {
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_trial_months: 1 }, adminApi)
-        setSuccess('Trial extended by 1 month.')
+        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_trial_months: 1 }, adminApi)
+        setSuccess('Trial extended by 1 month.' + stripeOutcome(r?.data?.stripe))
       } else if (action === 'free_1') {
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 1 }, adminApi)
-        setSuccess('1 month billing exemption set.')
+        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 1 }, adminApi)
+        setSuccess('1 month billing exemption set.' + stripeOutcome(r?.data?.stripe))
       } else if (action === 'free_3') {
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 3 }, adminApi)
-        setSuccess('3 months billing exemption set.')
+        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 3 }, adminApi)
+        setSuccess('3 months billing exemption set.' + stripeOutcome(r?.data?.stripe))
       } else if (action === 'exempt_until') {
         const date = exemptUntilDate[tenantId]
         if (!date) {
@@ -453,8 +463,8 @@ export default function AdminPage() {
           setExempting(null)
           return
         }
-        await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { exempt_until: date }, adminApi)
-        setSuccess(`Exempt until ${date} set.`)
+        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { exempt_until: date }, adminApi)
+        setSuccess(`Exempt until ${date} set.` + stripeOutcome(r?.data?.stripe))
         setExemptUntilDate((d) => ({ ...d, [tenantId]: '' }))
       }
       setExemptAction((a) => ({ ...a, [tenantId]: '' }))
@@ -1193,10 +1203,11 @@ export default function AdminPage() {
                         </button>
                       </div>
                       <p className="mt-2 text-xs text-zinc-500">
-                        Exemptions and trial extensions grant access in Call Surge only —
-                        they do not change Stripe. If this customer has a live
-                        subscription, Stripe will still charge them on renewal. Cancel it
-                        in Stripe as well if they shouldn&rsquo;t be billed.
+                        Exemptions and trial extensions also push the Stripe trial to the
+                        same date, so a customer with a live subscription stops being
+                        billed until then. If Stripe can&rsquo;t be updated the message
+                        above will say so — read it, because the grant alone does not
+                        stop a charge.
                       </p>
                       {stripeStatus[t.id] && (
                         <div

@@ -931,6 +931,48 @@ def admin_delete_tenant(
     }
 
 
+def _defer_stripe_billing(tenant: dict, until: datetime) -> dict:
+    """Push the subscription's trial_end in Stripe so it stops invoicing until `until`.
+
+    Extending a trial or granting free months used to change only our own database, so
+    a customer with a live subscription kept being charged on renewal while the admin
+    screen said they were exempt. Stripe's own trial is the right mechanism: while
+    trial_end is in the future it does not invoice, and it reverts to normal billing
+    afterwards without anything else to remember.
+
+    Returns {applied, reason, error} and never raises. A Stripe failure must never be
+    reported as success — "they won't be charged" is the entire claim being made.
+    """
+    sub_id = (tenant.get("stripe_subscription_id") or "").strip()
+    if not sub_id:
+        # Nothing is billing them; the database grant is the whole story.
+        return {"applied": False, "reason": "no_subscription", "error": None}
+    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not key:
+        return {
+            "applied": False, "reason": "not_configured",
+            "error": "STRIPE_SECRET_KEY is not set on this backend.",
+        }
+    try:
+        import stripe as _stripe
+
+        _stripe.api_key = key
+        _stripe.Subscription.modify(
+            sub_id,
+            trial_end=int(until.timestamp()),
+            # Moving an active subscription back into a trial must not credit or
+            # invoice for the part-period; we are deferring billing, not refunding.
+            proration_behavior="none",
+        )
+        return {"applied": True, "reason": "trial_end_set", "error": None}
+    except Exception as e:
+        print(f"[Admin] stripe trial_end update failed sub={sub_id}: {type(e).__name__}: {e}")
+        return {
+            "applied": False, "reason": "stripe_error",
+            "error": f"{type(e).__name__}: {e}"[:200],
+        }
+
+
 @router.get("/api/admin/tenants/{tenant_id}/stripe-status")
 def admin_tenant_stripe_status(
     tenant_id: str,
@@ -1050,10 +1092,12 @@ def admin_tenant_billing_exempt(
                     },
                     request=request,
                 )
+                stripe_result = _defer_stripe_billing(tenant, new_ends)
                 return {
                     "success": True,
                     "trial_ends_at": new_ends.isoformat(),
                     "subscription_status": "trialing",
+                    "stripe": stripe_result,
                 }
         except Exception as e:
             raise deps._server_error(
@@ -1080,7 +1124,12 @@ def admin_tenant_billing_exempt(
                 },
                 request=request,
             )
-            return {"success": True, "billing_exempt_until": exempt_until.isoformat()}
+            stripe_result = _defer_stripe_billing(tenant, exempt_until)
+            return {
+                "success": True,
+                "billing_exempt_until": exempt_until.isoformat(),
+                "stripe": stripe_result,
+            }
     if req.exempt_until:
         try:
             exempt_dt = datetime.fromisoformat(req.exempt_until.replace("Z", "+00:00"))
@@ -1101,7 +1150,12 @@ def admin_tenant_billing_exempt(
                     },
                     request=request,
                 )
-                return {"success": True, "billing_exempt_until": exempt_dt.isoformat()}
+                stripe_result = _defer_stripe_billing(tenant, exempt_dt)
+                return {
+                    "success": True,
+                    "billing_exempt_until": exempt_dt.isoformat(),
+                    "stripe": stripe_result,
+                }
         except ValueError as e:
             raise HTTPException(
                 status_code=400, detail=f"Invalid exempt_until date: {e}"
