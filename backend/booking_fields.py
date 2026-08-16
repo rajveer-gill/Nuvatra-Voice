@@ -71,10 +71,127 @@ def is_valid_booking_date(raw: object) -> bool:
         return False
 
 
+# Spoken time forms. Callers say "two in the afternoon" or "half past three" at least as
+# often as "2 PM", and the model passes the phrase straight through into the time field.
+# Before this, anything without a digit was rejected outright and the request was dropped.
+_WORD_HOURS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+_WORD_MINUTES = {
+    "oclock": 0, "o'clock": 0, "clock": 0,
+    "five": 5, "ten": 10, "fifteen": 15, "quarter": 15, "twenty": 20,
+    "twentyfive": 25, "thirty": 30, "half": 30, "fortyfive": 45, "forty-five": 45,
+    "fifty": 50,
+}
+# Phrases that pin the half of the day. "at night" and "tonight" map to PM.
+_MERIDIAN_PHRASES = (
+    (re.compile(r"\b(?:in the )?morning\b|\bam\b", re.I), "am"),
+    (re.compile(r"\b(?:in the )?(?:afternoon|evening)\b|\b(?:at )?night\b|\btonight\b|\bpm\b", re.I), "pm"),
+)
+
+
+def _normalize_word_time_text(text: str) -> str:
+    s = text.strip().lower()
+    s = re.sub(r"^(?:at|around|about)\s+", "", s)
+    s = re.sub(r"[.,]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _word_time_to_minutes(raw: str) -> Optional[int]:
+    """Parse a spoken time with no digits. Returns None for genuinely vague input.
+
+    Deliberately strict: the whole string must be a time. "afternoon" on its own stays
+    unparseable — it names a half of the day, not a time, and guessing one would put a
+    made-up slot in front of the salon.
+    """
+    s = _normalize_word_time_text(raw)
+    if not s:
+        return None
+
+    meridian: Optional[str] = None
+    for pattern, which in _MERIDIAN_PHRASES:
+        if pattern.search(s):
+            meridian = which
+            break
+    # Strip the meridian phrase; what remains must be the hour/minute part.
+    core = re.sub(
+        r"\b(?:in the )?(?:morning|afternoon|evening)\b|\b(?:at )?night\b|\btonight\b|\b(?:am|pm)\b",
+        "",
+        s,
+        flags=re.I,
+    )
+    core = re.sub(r"\s+", " ", core).strip()
+
+    if core in ("noon", "midday"):
+        return 12 * 60
+    if core == "midnight":
+        return 0
+
+    # "half past three", "quarter past three", "quarter to four"
+    m = re.fullmatch(r"(half|quarter|twenty|ten|five|fifteen)\s+(past|after|to|till|before)\s+(\w+)", core)
+    if m:
+        offset_word, direction, hour_word = m.group(1), m.group(2), m.group(3)
+        offset = _WORD_MINUTES.get(offset_word)
+        hour = _WORD_HOURS.get(hour_word)
+        if hour is None and hour_word in ("noon", "midday"):
+            hour = 12
+        if offset is None or hour is None:
+            return None
+        base = hour * 60
+        mins = base + offset if direction in ("past", "after") else base - offset
+        mins %= 24 * 60
+        hour_out = mins // 60
+        if meridian == "pm" and hour_out < 12:
+            mins += 12 * 60
+        elif meridian == "am" and hour_out == 12:
+            mins -= 12 * 60
+        elif meridian is None and 1 <= hour_out <= 8:
+            mins += 12 * 60
+        return mins % (24 * 60)
+
+    # "two", "two thirty", "two o'clock", "ten fifteen"
+    parts = core.split(" ")
+    if not parts or parts[0] not in _WORD_HOURS:
+        return None
+    h = _WORD_HOURS[parts[0]]
+    m_out = 0
+    if len(parts) == 2:
+        key = parts[1].replace(" ", "")
+        if key not in _WORD_MINUTES:
+            return None
+        m_out = _WORD_MINUTES[key]
+    elif len(parts) == 3:
+        # "twenty five" / "forty five" as two tokens
+        key = (parts[1] + parts[2]).replace("-", "")
+        if key not in _WORD_MINUTES:
+            return None
+        m_out = _WORD_MINUTES[key]
+    elif len(parts) > 3:
+        return None
+
+    if meridian == "pm":
+        if h != 12:
+            h += 12
+    elif meridian == "am":
+        if h == 12:
+            h = 0
+    elif meridian is None:
+        # Same salon-hours convention the numeric path uses: a bare 1-8 means afternoon.
+        if 1 <= h <= 8:
+            h += 12
+    if not (0 <= h <= 23 and 0 <= m_out <= 59):
+        return None
+    return h * 60 + m_out
+
+
 def _time_to_minutes(raw: str) -> Optional[int]:
     text = (raw or "").strip()
-    if not text or not re.search(r"\d", text):
+    if not text:
         return None
+    if not re.search(r"\d", text):
+        return _word_time_to_minutes(text)
     upper = text.upper()
     meridian: Optional[str] = None
     if re.search(r"\bP\.?\s*M\.?\b", upper) or re.search(r"\bPM\b", upper):
@@ -126,10 +243,9 @@ def looks_like_booking_time(
     low = s.lower()
     if low in ctx.staff_names or low in ctx.service_names:
         return False
-    if not re.search(r"\d", s):
-        return False
-    if re.fullmatch(r"[a-zA-Z\s'\-\.]+", s):
-        return False
+    # Digit-free strings used to be rejected here outright. They now go to the word-time
+    # parser, which only matches a whole string that IS a time — a service or stylist name
+    # ("Long Cut", "Jake") still fails, on top of the exact-name guard above.
     return normalize_booking_time(s) is not None
 
 

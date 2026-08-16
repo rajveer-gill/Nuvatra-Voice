@@ -674,6 +674,40 @@ def _prepare_parsed_booking(
     return normalize_and_validate_booking(booking, ctx)
 
 
+def booking_reject_recovery_text(
+    reject: Optional[str],
+    *,
+    raw_time: str = "",
+    raw_date: str = "",
+) -> Optional[str]:
+    """What to say instead when a BOOKING line was thrown out.
+
+    A rejected line is not always a problem: the model emits partial markers while it is
+    still collecting details, and its own question should go through untouched. It IS a
+    problem when the model filled the field in and we could not use it — the line is
+    dropped, nothing is recorded, and the reply typically tells the caller their request
+    is in. Those cases get a specific re-ask; everything else returns None (say nothing).
+    """
+    time_filled = bool((raw_time or "").strip())
+    date_filled = bool((raw_date or "").strip())
+
+    if reject == "invalid_time" and time_filled:
+        return (
+            "Sorry — I didn't catch that as a specific time. "
+            "What time would you like? Something like 2 PM."
+        )
+    if reject == "past_time" and time_filled:
+        return (
+            "That time has already passed today. "
+            "What time would you like instead?"
+        )
+    if reject == "past_date" and date_filled:
+        return "That date has already passed. What day would you like instead?"
+    if reject == "invalid_date" and date_filled:
+        return "Sorry — I didn't catch the day. What day would you like to come in?"
+    return None
+
+
 def parse_booking(ai_text: str) -> Optional[dict]:
     """If AI responded with BOOKING: name|phone|email|date|time|reason|staff_optional, return dict; else None.
 
@@ -1710,6 +1744,8 @@ async def generate_response_async(
         _model_reply_raw = ai_text or ""
         booking = parse_booking(ai_text)
         if booking:
+            _raw_booking_time = (booking.get("time") or "").strip()
+            _raw_booking_date = (booking.get("date") or "").strip()
             booking, repairs, reject = _prepare_parsed_booking(
                 booking,
                 caller_memory=call_data.get("caller_memory"),
@@ -1721,6 +1757,25 @@ async def generate_response_async(
                     reason=reject,
                     repairs=repairs or None,
                 )
+                # The line is gone. If the model had actually filled the field in, the
+                # request just died here while the reply goes on to say it was taken —
+                # a live call lost a request this way. Re-ask instead of letting that
+                # stand, and log loudly enough to find it without asking the caller.
+                _recovery = booking_reject_recovery_text(
+                    reject,
+                    raw_time=_raw_booking_time,
+                    raw_date=_raw_booking_date,
+                )
+                if _recovery:
+                    voice_warning(
+                        "voice_booking_dropped_unusable_field",
+                        call_sid=call_sid,
+                        client_id=str(call_data.get("client_id") or ""),
+                        reason=reject,
+                        raw_time=_raw_booking_time[:40] or None,
+                        raw_date=_raw_booking_date[:40] or None,
+                    )
+                    ai_text = _recovery
                 booking = None
             elif repairs:
                 system_info(

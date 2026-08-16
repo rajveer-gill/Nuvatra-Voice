@@ -522,13 +522,29 @@ def test_request_mode_insists_on_a_clock_time():
     assert 'Never write a word like "afternoon" there' in prompt
 
 
-@pytest.mark.parametrize("vague", ["afternoon", "morning", "evening", "Two in the afternoon"])
+@pytest.mark.parametrize("vague", ["afternoon", "morning", "evening"])
 def test_vague_times_really_are_unusable(vague):
-    """The premise of the rule above. If any of these ever start normalizing, the
-    prompt could relax — until then the model must convert them itself."""
+    """The premise of the rule above. A half of the day names no time, so the model
+    still has to convert it — guessing one would invent a slot the caller never chose."""
     import conversation_service
 
     assert conversation_service.normalize_booking_time(vague) is None
+
+
+@pytest.mark.parametrize(
+    "spoken,expected",
+    [("Two in the afternoon", "14:00"), ("half past three", "15:30"), ("noon", "12:00")],
+)
+def test_a_spoken_time_no_longer_drops_the_request(spoken, expected):
+    """"Two in the afternoon" used to normalize to None and take the whole request with
+    it. It parses now — see test_spoken_booking_time.py.
+
+    The prompt rule above deliberately stays: a clock time is still what we ask for,
+    because it needs no convention to interpret. The parser is the net for when the
+    model passes the caller's phrasing through anyway, which is what happened live."""
+    import conversation_service
+
+    assert conversation_service.normalize_booking_time(spoken) == expected
 
 
 @pytest.mark.parametrize("clock,expected", [("2 PM", "14:00"), ("9:30 AM", "09:30"), ("12 PM", "12:00")])
