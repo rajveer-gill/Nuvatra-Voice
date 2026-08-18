@@ -17,6 +17,7 @@ as context ("what was booked as of 9:14am"), never as live availability.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -199,7 +200,11 @@ def parse_pasted_appointments(
     default_date is the day the paste covers (the queue view usually omits the date).
     """
     warnings: list[str] = []
-    raw = (text or "").strip()
+    # Copying out of the browser brings HTML entities with it: Zenoti's queue renders
+    # "Shampoo & Haircut" as "Shampoo &amp; Haircut", and left alone that name matches
+    # nothing in the service menu. Unescaped once here so every field downstream —
+    # service, stylist, guest — is the text the person actually saw on screen.
+    raw = html.unescape(text or "").strip()
     if not raw:
         return {"appointments": [], "warnings": ["Nothing was pasted."]}
     if len(raw) > MAX_PASTE_CHARS:

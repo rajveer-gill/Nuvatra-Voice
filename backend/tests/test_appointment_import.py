@@ -350,3 +350,55 @@ def test_commit_updates_instead_of_duplicating(monkeypatch):
     assert res["updated"] == 1
     assert res["created"] == 0
     assert inserted == []
+
+
+# --- Text copied out of a browser carries HTML entities ----------------------
+# Zenoti's queue renders "Shampoo & Haircut" as "Shampoo &amp; Haircut", and copying
+# the page brings the entity along. Ten of the fifteen rows in a real day's paste were
+# that one service; left escaped, the name matches nothing in the menu.
+
+
+def test_entities_are_unescaped_before_anything_reads_the_text(monkeypatch):
+    """Checked on the raw paste, so service, stylist and guest all benefit."""
+    seen = {}
+
+    def fake_chat(**kw):
+        seen["user"] = kw["messages"][-1]["content"]
+        return '{"appointments": []}'
+
+    monkeypatch.setattr(ai.llm_provider, "chat", fake_chat)
+    ai.parse_pasted_appointments(
+        "27\nROB R\nShampoo &amp; Haircut|\nDai Dao (Req.)\n01:30 pm\nTotal : $38.00",
+        default_date="2026-08-20",
+    )
+    assert "Shampoo & Haircut" in seen["user"]
+    assert "&amp;" not in seen["user"]
+
+
+@pytest.mark.parametrize(
+    "escaped,plain",
+    [
+        ("Shampoo &amp; Haircut", "Shampoo & Haircut"),
+        ("Cut &amp;amp; Style", "Cut &amp; Style"),   # double-escaped unwinds one level
+        ("Blow&nbsp;Dry", "Blow\xa0Dry"),
+        ("O&#39;Brien", "O'Brien"),
+    ],
+)
+def test_common_entities_from_a_copied_page(escaped, plain):
+    import html
+
+    assert html.unescape(escaped) == plain
+
+
+def test_plain_text_is_untouched(monkeypatch):
+    """A paste with no entities must be passed through byte for byte."""
+    seen = {}
+
+    def fake_chat(**kw):
+        seen["user"] = kw["messages"][-1]["content"]
+        return '{"appointments": []}'
+
+    monkeypatch.setattr(ai.llm_provider, "chat", fake_chat)
+    text = "10\nJannie B\nAll-over color (+1)|\nTina (Req.)\n12:00 pm\nTotal : $138.00"
+    ai.parse_pasted_appointments(text, default_date="2026-08-20")
+    assert text in seen["user"]
