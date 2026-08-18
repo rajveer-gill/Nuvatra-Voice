@@ -255,11 +255,53 @@ def _staff_choice_required(info: Optional[dict] = None) -> bool:
     return len(names) >= 2
 
 
+# Phrases that mean the ASSISTANT was taking booking details. Deliberately about
+# collecting specifics ("what time", "which day", "your name for") rather than the
+# generic "would you like to book?" offer, which it makes on almost every call.
+_ASSISTANT_TAKING_DETAILS = (
+    "what time",
+    "which day",
+    "what day",
+    "day and time",
+    "specify a time",
+    "your name",
+    "which stylist",
+    "prefer for your",
+    "request for",
+)
+
+
 def _conversation_suggests_booking(conversation_history: Optional[list]) -> bool:
-    for m in conversation_history or []:
+    """Could this call contain a booking worth recovering at the end?
+
+    Gates the end-of-call reconciler, so a false negative silently loses a request
+    that the caller was told had been sent.
+
+    Keyword-matching the CALLER alone was not enough. A real call: "I wanna dye my
+    hair bright blue" / "Yeah" / "Thursday afternoon" / "That's fine" / "Anyone's
+    fine" / "Raj" — a complete booking in which the caller never once says book,
+    appointment or schedule, because the AI supplies all of that vocabulary and they
+    just answer it. The gate said no intent and the request was dropped.
+
+    So an assistant that was actively collecting booking details counts too. That
+    costs an extra extraction call on some conversations that turn out not to be
+    bookings; losing a real one is far worse.
+    """
+    history = conversation_history or []
+    for m in history:
         if (m.get("role") or "").strip() == "user" and _suggests_booking(
             m.get("content") or ""
         ):
+            return True
+    # Assistant-led: only once the caller has actually engaged, so a single question
+    # answered by an offer to book doesn't drag every call into the extractor.
+    if _count_booking_user_turns(history) < 2:
+        return False
+    for m in history:
+        if (m.get("role") or "").strip() != "assistant":
+            continue
+        t = (m.get("content") or "").lower()
+        if any(p in t for p in _ASSISTANT_TAKING_DETAILS):
             return True
     return False
 
