@@ -55,7 +55,7 @@ Zenoti's queue view pastes as one value per line, repeating this block per guest
 Column headers appear once at the top: Guest, Service, Arrived, Original, Expected.
 
 Rules:
-- time: 24-hour "HH:MM". Three times appear per guest — arrived, ORIGINAL, expected. Use the ORIGINAL (middle) one: that's the booked slot. Never invent a time.
+- time: copy it EXACTLY as written, keeping its am/pm — "01:00 pm", not "01:00" and not "13:00". Do NOT convert to 24-hour yourself; we do that. (Dropping the pm turns every afternoon appointment into a morning one, and "12:00 pm" hides it by being right either way.) Three times appear per guest — arrived, ORIGINAL, expected. Use the ORIGINAL (middle) one: that's the booked slot. Never invent a time.
 - date: "YYYY-MM-DD" only if the text actually states one. A queue view is a single day and usually shows NO date — return "" then. Do NOT guess today's date.
 - stylist: the staff name with any "(Req.)" / "(Request)" marker REMOVED — "Tina (Req.)" -> "Tina". If it says "First Available", "Any", or similar, use "" (empty).
 - is_request: true when the stylist was marked as requested (e.g. "(Req.)"); false for first-available.

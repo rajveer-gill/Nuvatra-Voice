@@ -402,3 +402,48 @@ def test_plain_text_is_untouched(monkeypatch):
     text = "10\nJannie B\nAll-over color (+1)|\nTina (Req.)\n12:00 pm\nTotal : $138.00"
     ai.parse_pasted_appointments(text, default_date="2026-08-20")
     assert text in seen["user"]
+
+
+# --- Afternoon must stay afternoon --------------------------------------------
+# A real paste of a salon's day came back with every appointment from 1 PM onward
+# moved to the morning: "01:00 pm" arrived as "01:00". The prompt had asked the model
+# to emit 24-hour time, and it dropped the pm instead of adding twelve. "12:00 pm"
+# masked it by being correct either way, so the queue looked half-right.
+
+
+@pytest.mark.parametrize(
+    "written,expected",
+    [
+        ("01:00 pm", "13:00"),
+        ("02:30 pm", "14:30"),
+        ("04:45 pm", "16:45"),
+        ("06:30 pm", "18:30"),
+        ("12:00 pm", "12:00"),   # noon: the one that hid the bug
+        ("12:00 am", "00:00"),   # midnight
+        ("09:00 am", "09:00"),
+        ("1:00 PM", "13:00"),    # without the leading zero
+    ],
+)
+def test_a_time_written_with_am_pm_converts_correctly(written, expected):
+    """The conversion itself was never broken — it just never received the pm."""
+    assert ai._normalize_time(written) == expected
+
+
+def test_the_prompt_asks_for_the_time_as_written():
+    """Python converts reliably and the model does not, so the model's job is to copy.
+    The voice prompt already learned this; the paste importer had not."""
+    sys_prompt = ai.SYSTEM_PROMPT if hasattr(ai, "SYSTEM_PROMPT") else ""
+    if not sys_prompt:
+        import inspect
+
+        sys_prompt = inspect.getsource(ai)
+    assert "keeping its am/pm" in sys_prompt
+    assert "Do NOT convert to 24-hour yourself" in sys_prompt
+
+
+def test_a_bare_hour_is_not_silently_assumed():
+    """Without am/pm there is no right answer, and guessing puts a customer in front
+    of the salon at a time nobody chose."""
+    assert ai._normalize_time("01:00") == "01:00"   # taken literally, not assumed PM
+    assert ai._normalize_time("") == ""
+    assert ai._normalize_time("afternoon") == ""

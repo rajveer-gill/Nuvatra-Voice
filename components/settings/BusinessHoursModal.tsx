@@ -32,10 +32,13 @@ export interface BusinessHoursModalProps {
   /** Current `hours` field from settings */
   hoursText: string
   /** Called with serialized hours string when user saves */
-  onApply: (nextHours: string) => void
+  /** Applies the new hours. Return false to keep the modal open — a button that says
+   *  it applied something has to have applied it. */
+  onApply: (nextHours: string) => void | boolean | Promise<boolean>
 }
 
 export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: BusinessHoursModalProps) {
+  const [saving, setSaving] = useState(false)
   const reduceMotion = useReducedMotion()
   const titleId = useId()
   const overlayScrollRef = useRef<HTMLDivElement>(null)
@@ -204,8 +207,18 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
 
   const handleSave = () => {
     if (!validateTimes()) return
-    onApply(weeklyScheduleToString(schedule))
-    onClose()
+    void (async () => {
+      setSaving(true)
+      try {
+        const ok = await onApply(weeklyScheduleToString(schedule))
+        // Only close when it actually stuck. `void` (the older local-only callers)
+        // counts as success; an explicit false means the write failed and the error
+        // is on the page behind this modal.
+        if (ok !== false) onClose()
+      } finally {
+        setSaving(false)
+      }
+    })()
   }
 
   const dur = reduceMotion ? 0 : 0.22
@@ -426,9 +439,10 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
                 <button
                   type="button"
                   onClick={handleSave}
-                  className="rounded-xl bg-primary-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-primary-600/25 transition hover:bg-primary-700"
+                  disabled={saving}
+                  className="rounded-xl bg-primary-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-primary-600/25 transition hover:bg-primary-700 disabled:opacity-60"
                 >
-                  Apply hours
+                  {saving ? 'Saving…' : 'Apply hours'}
                 </button>
               </div>
             </div>

@@ -1024,7 +1024,7 @@ export default function Settings() {
                     'Set which days you\u0027re open and your hours (opens the visual editor)'}
                 </p>
                 <p className="mt-1 text-xs text-gray-500">
-                  Schedule presets, copy weekdays, and live preview. Saved when you click Apply in the editor, then Save changes below.
+                  Schedule presets, copy weekdays, and live preview. Saved when you click Apply.
                 </p>
               </div>
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary-100 text-primary-700 transition group-hover:scale-105 group-hover:bg-primary-200">
@@ -1035,7 +1035,12 @@ export default function Settings() {
               isOpen={hoursModalOpen}
               onClose={() => setHoursModalOpen(false)}
               hoursText={form.hours}
-              onApply={(next) => setForm((f) => ({ ...f, hours: next }))}
+              // "Apply hours" should apply them — same reason the service, special and
+              // rule modals save on Save rather than staging behind the bar below.
+              onApply={(next) => {
+                setForm((f) => ({ ...f, hours: next }))
+                return persistFields({ hours: next }, 'Business hours')
+              }}
             />
           </div>
           <div id="store-phone-settings" className="md:col-span-2">
