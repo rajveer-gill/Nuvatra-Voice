@@ -62,3 +62,61 @@ def test_rows_without_an_id_or_name_are_ignored():
     """A half-filled roster row must not swallow a match."""
     roster = [{"id": "", "name": "Tina"}, {"id": "x", "name": ""}, {"id": "ok", "name": "Tina"}]
     assert _staff_id_by_name("Tina", roster) == "ok"
+
+
+# --- Telling the user before it's too late -----------------------------------
+# An unmatched stylist is only fixable BEFORE import: afterwards the appointments
+# are already unassigned and the day reads as if nobody is working. So the preview
+# names them, rather than the commit reporting it after the fact.
+
+
+def _preview(monkeypatch, rows, roster):
+    """Drive the preview endpoint with a stubbed parse and roster."""
+    import appointment_import
+    from routers import appointments as ap
+
+    monkeypatch.setattr(ap, "_require_external_booking", lambda t: "shop")
+    monkeypatch.setattr(ap.runtime, "USE_DB", False)
+    monkeypatch.setattr(
+        appointment_import, "parse_pasted_appointments",
+        lambda text, default_date=None: {"appointments": rows, "warnings": []},
+    )
+    monkeypatch.setattr(
+        ap.config_service, "get_business_info", lambda: {"staff": roster}
+    )
+    monkeypatch.setattr(ap, "system_info", lambda *a, **k: None)
+    req = ap.ImportPreviewRequest(text="anything", date="2026-08-19")
+    return ap.import_appointments_preview(req, tenant={"client_id": "shop"})
+
+
+def test_the_preview_names_the_stylists_it_could_not_place(monkeypatch):
+    rows = [
+        {"customer_name": "Jannie B", "stylist": "Tina", "time": "12:00 pm", "date": "2026-08-19"},
+        {"customer_name": "addie b", "stylist": "BRENDA TO", "time": "01:00 pm", "date": "2026-08-19"},
+        {"customer_name": "ROB R", "stylist": "Dai Dao", "time": "01:30 pm", "date": "2026-08-19"},
+    ]
+    out = _preview(monkeypatch, rows, [{"id": "s1", "name": "Tina Nguyen"}])
+    assert out["unmatched_stylists"] == ["BRENDA TO", "Dai Dao"]
+
+
+def test_a_fully_matched_paste_says_nothing(monkeypatch):
+    rows = [{"customer_name": "A", "stylist": "Tina Nguyen", "time": "12:00 pm", "date": "2026-08-19"}]
+    out = _preview(monkeypatch, rows, [{"id": "s1", "name": "Tina Nguyen"}])
+    assert out["unmatched_stylists"] == []
+
+
+def test_the_same_name_is_only_reported_once(monkeypatch):
+    """Ten rows with the same stylist is one problem, not ten."""
+    rows = [
+        {"customer_name": f"C{i}", "stylist": "Rin Chan", "time": "12:00 pm", "date": "2026-08-19"}
+        for i in range(5)
+    ] + [{"customer_name": "D", "stylist": "rin chan", "time": "01:00 pm", "date": "2026-08-19"}]
+    out = _preview(monkeypatch, rows, [])
+    assert out["unmatched_stylists"] == ["Rin Chan"]
+
+
+def test_rows_with_no_stylist_are_not_a_problem(monkeypatch):
+    """"First Available" parses to empty, and nobody needs adding for it."""
+    rows = [{"customer_name": "IRANA M", "stylist": "", "time": "03:00 pm", "date": "2026-08-19"}]
+    out = _preview(monkeypatch, rows, [])
+    assert out["unmatched_stylists"] == []

@@ -29,6 +29,9 @@ type PreviewResponse = {
   found: number
   new: number
   already_imported: number
+  /** Stylists on this paste who aren't on the roster. Their appointments would import
+   *  unassigned, so this is shown before committing, while it can still be fixed. */
+  unmatched_stylists?: string[]
   analyzed_at: string
 }
 
@@ -51,6 +54,8 @@ export function ImportFromZenoti({
   const [text, setText] = useState('')
   const [day, setDay] = useState(() => new Date().toISOString().slice(0, 10))
   const [preview, setPreview] = useState<PreviewResponse | null>(null)
+  const [addingStylists, setAddingStylists] = useState(false)
+  const [stylistNote, setStylistNote] = useState<string | null>(null)
   // Rows live separately from `preview` because they're editable — the AI's reading is
   // a starting point the manager corrects, not a verdict.
   const [rows, setRows] = useState<ParsedRow[]>([])
@@ -109,6 +114,39 @@ export function ImportFromZenoti({
       setError(apiDetail(e) || 'Could not analyze that text. Please try again.')
     } finally {
       setAnalyzing(false)
+    }
+  }
+
+  /** Add the pasted stylists to the roster so their appointments land in their own
+   *  column instead of Unassigned. Appends to the existing staff list rather than
+   *  replacing it — the PATCH takes the whole array, so reading first is what stops
+   *  this from wiping the team. */
+  const addMissingStylists = async (names: string[]) => {
+    if (!names.length) return
+    setAddingStylists(true)
+    setStylistNote(null)
+    try {
+      const { data } = await api.get('/api/business-info')
+      const current = Array.isArray(data?.staff) ? data.staff : []
+      const taken = new Set(
+        current.map((m: { name?: string }) => (m?.name || '').trim().toLowerCase())
+      )
+      const additions = names
+        .map((n) => n.trim())
+        .filter((n) => n && !taken.has(n.toLowerCase()))
+        .map((n) => ({ id: crypto.randomUUID(), name: n, phone: '', email: '', notes: '' }))
+      if (!additions.length) {
+        setStylistNote('They were already on your team list.')
+        return
+      }
+      await api.patch('/api/business-info', { staff: [...current, ...additions] })
+      setStylistNote(
+        `Added ${additions.length} to your team. Import now and they'll land in their own column.`
+      )
+    } catch (e) {
+      setStylistNote(apiDetail(e) || 'Could not add them — add them in Settings instead.')
+    } finally {
+      setAddingStylists(false)
     }
   }
 
@@ -255,6 +293,39 @@ export function ImportFromZenoti({
               })}
             </span>
           </div>
+
+          {preview.unmatched_stylists && preview.unmatched_stylists.length > 0 && (
+            <div className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                <div className="min-w-0">
+                  <p>
+                    <strong>
+                      {preview.unmatched_stylists.length} stylist
+                      {preview.unmatched_stylists.length === 1 ? '' : 's'}
+                    </strong>{' '}
+                    on this paste {preview.unmatched_stylists.length === 1 ? "isn't" : "aren't"} on
+                    your team list: {preview.unmatched_stylists.join(', ')}. Their appointments will
+                    import as <em>Unassigned</em>, so the day won&rsquo;t show who&rsquo;s busy.
+                  </p>
+                  {stylistNote ? (
+                    <p className="mt-1.5 font-medium">{stylistNote}</p>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={addingStylists}
+                      onClick={() => void addMissingStylists(preview.unmatched_stylists || [])}
+                      className="mt-1.5 rounded-md border border-amber-400/40 px-2.5 py-1 font-medium text-amber-100 hover:bg-amber-500/15 disabled:opacity-60"
+                    >
+                      {addingStylists
+                        ? 'Adding…'
+                        : `Add ${preview.unmatched_stylists.length === 1 ? 'them' : 'them all'} to my team`}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {preview.warnings.map((w) => (
             <div

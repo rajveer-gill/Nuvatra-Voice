@@ -75,51 +75,6 @@ def _require_external_booking(tenant: Optional[dict]) -> str:
     return cid
 
 
-@router.post("/api/appointments/import/preview")
-def import_appointments_preview(
-    req: ImportPreviewRequest,
-    tenant: Optional[dict] = Depends(deps.require_active_subscription),
-):
-    """Analyze pasted text and return what we found. Writes NOTHING.
-
-    The preview exists so a misread time is caught by a human before it reaches the
-    calendar — the paste is parsed by an LLM, and this is the checkpoint on that.
-    Rows already imported are flagged so re-pasting a day is obvious and safe.
-    """
-    import appointment_import
-
-    cid = _require_external_booking(tenant)
-    result = appointment_import.parse_pasted_appointments(req.text, default_date=req.date)
-    rows = result.get("appointments") or []
-    existing = {
-        appointment_import.import_key(
-            {"date": a.get("date"), "time": a.get("time"), "customer_name": a.get("name")}
-        )
-        for a in (database.db_appointments_get_all(client_id=cid) if runtime.USE_DB else [])
-    }
-    new_count = 0
-    for r in rows:
-        r["already_imported"] = appointment_import.import_key(r) in existing
-        if not r["already_imported"]:
-            new_count += 1
-    system_info(
-        "appointment_import_preview",
-        client_id=cid,
-        found=len(rows),
-        new=new_count,
-        chars=len(req.text or ""),
-    )
-    return {
-        "appointments": rows,
-        "warnings": result.get("warnings") or [],
-        "found": len(rows),
-        "new": new_count,
-        "already_imported": len(rows) - new_count,
-        # Stamp so the UI can show "as of ..." — a paste is a snapshot, never live.
-        "analyzed_at": datetime.now().isoformat(),
-    }
-
-
 def _staff_id_by_name(name: str, staff: list) -> Optional[str]:
     """Match a pasted stylist name to someone on the roster.
 
@@ -145,6 +100,60 @@ def _staff_id_by_name(name: str, staff: list) -> Optional[str]:
     if len(firsts) == 1:
         return firsts[0][0]
     return None
+
+
+@router.post("/api/appointments/import/preview")
+def import_appointments_preview(
+    req: ImportPreviewRequest,
+    tenant: Optional[dict] = Depends(deps.require_active_subscription),
+):
+    """Analyze pasted text and return what we found. Writes NOTHING.
+
+    The preview exists so a misread time is caught by a human before it reaches the
+    calendar — the paste is parsed by an LLM, and this is the checkpoint on that.
+    Rows already imported are flagged so re-pasting a day is obvious and safe.
+    """
+    import appointment_import
+
+    cid = _require_external_booking(tenant)
+    result = appointment_import.parse_pasted_appointments(req.text, default_date=req.date)
+    rows = result.get("appointments") or []
+    existing = {
+        appointment_import.import_key(
+            {"date": a.get("date"), "time": a.get("time"), "customer_name": a.get("name")}
+        )
+        for a in (database.db_appointments_get_all(client_id=cid) if runtime.USE_DB else [])
+    }
+    # Which stylists on this paste don't exist on the roster. Surfaced BEFORE import,
+    # because that's when it can still be fixed — afterwards those appointments are
+    # silently unassigned and the day reads as if nobody is working.
+    roster = (config_service.get_business_info() or {}).get("staff") or []
+    unmatched: dict = {}
+    new_count = 0
+    for r in rows:
+        r["already_imported"] = appointment_import.import_key(r) in existing
+        if not r["already_imported"]:
+            new_count += 1
+        who = (r.get("stylist") or "").strip()
+        if who and not _staff_id_by_name(who, roster):
+            unmatched.setdefault(who.lower(), who)
+    system_info(
+        "appointment_import_preview",
+        client_id=cid,
+        found=len(rows),
+        new=new_count,
+        chars=len(req.text or ""),
+    )
+    return {
+        "appointments": rows,
+        "warnings": result.get("warnings") or [],
+        "found": len(rows),
+        "new": new_count,
+        "already_imported": len(rows) - new_count,
+        "unmatched_stylists": sorted(unmatched.values(), key=str.lower),
+        # Stamp so the UI can show "as of ..." — a paste is a snapshot, never live.
+        "analyzed_at": datetime.now().isoformat(),
+    }
 
 
 @router.post("/api/appointments/import/commit")
