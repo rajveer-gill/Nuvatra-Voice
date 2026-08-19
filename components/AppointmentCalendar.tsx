@@ -10,6 +10,7 @@ import timeGridPlugin from '@fullcalendar/timegrid'
 import interactionPlugin from '@fullcalendar/interaction'
 import type { EventClickArg, EventContentArg } from '@fullcalendar/core'
 import { AppointmentDetailModal } from '@/components/appointments/AppointmentDetailModal'
+import { StylistDayView, type StylistDayItem } from '@/components/appointments/StylistDayView'
 import type { Appointment } from '@/components/appointments/types'
 import {
   calendarHeightFromSlotBounds,
@@ -45,6 +46,15 @@ function EventContent({ arg }: { arg: EventContentArg }) {
       <span className="truncate text-xs font-semibold">{title}</span>
     </div>
   )
+}
+
+/** Step a YYYY-MM-DD by whole days without going through a timezone. */
+function shiftDay(day: string, delta: number): string {
+  const [y, m, d] = day.split('-').map((n) => parseInt(n, 10))
+  const dt = new Date(y, (m || 1) - 1, d || 1)
+  dt.setDate(dt.getDate() + delta)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`
 }
 
 function addMinutesToIsoLocal(isoStart: string, minutes: number): string {
@@ -90,6 +100,10 @@ export default function AppointmentCalendar({
   const [events, setEvents] = useState<CalendarEvent[]>([])
   const [staffList, setStaffList] = useState<{ id: string; name: string }[]>([])
   const [staffFilter, setStaffFilter] = useState('')
+  // "By stylist" is a different question from the calendar's — not "what is on at 3pm"
+  // but "who is free at 3pm" — so it gets its own day rather than sharing the grid's range.
+  const [layout, setLayout] = useState<'calendar' | 'stylist'>('calendar')
+  const [stylistDay, setStylistDay] = useState(() => new Date().toISOString().slice(0, 10))
   const [loading, setLoading] = useState(true)
   const [selectedApt, setSelectedApt] = useState<Appointment | null>(null)
   const visibleRangeRef = useRef({ from: '', to: '' })
@@ -172,6 +186,42 @@ export default function AppointmentCalendar({
     [api, staffFilter]
   )
 
+  const minutesOf = (iso: string) => {
+    const t = iso.slice(11, 16)
+    const [h, m] = t.split(':').map((n) => parseInt(n, 10))
+    return (h || 0) * 60 + (m || 0)
+  }
+
+  const stylistItems: StylistDayItem[] = useMemo(
+    () =>
+      events
+        .filter((e) => e.start.slice(0, 10) === stylistDay)
+        .map((e) => ({
+          appointment: e.extendedProps.appointment,
+          startMinutes: minutesOf(e.start),
+          endMinutes: minutesOf(e.end),
+          color: e.backgroundColor || '#6366f1',
+        })),
+    [events, stylistDay]
+  )
+
+  const stylistBounds = useMemo(() => {
+    const toMin = (hhmmss: string) => {
+      const [h, m] = hhmmss.split(':').map((n) => parseInt(n, 10))
+      return (h || 0) * 60 + (m || 0)
+    }
+    let lo = toMin(slotBounds.slotMinTime)
+    let hi = toMin(slotBounds.slotMaxTime)
+    // Never hide an appointment because it sits outside opening hours — an imported
+    // day can legitimately run past close, and a silently clipped row is worse than
+    // a slightly taller grid.
+    for (const it of stylistItems) {
+      lo = Math.min(lo, Math.floor(it.startMinutes / 60) * 60)
+      hi = Math.max(hi, Math.ceil(it.endMinutes / 60) * 60)
+    }
+    return { lo, hi }
+  }, [slotBounds, stylistItems])
+
   const reloadVisibleRange = useCallback(() => {
     const { from, to } = visibleRangeRef.current
     if (from && to) load(from, to)
@@ -185,6 +235,13 @@ export default function AppointmentCalendar({
   useEffect(() => {
     if (refreshSignal > 0) reloadVisibleRange()
   }, [refreshSignal, reloadVisibleRange])
+
+  useEffect(() => {
+    if (layout === 'stylist') {
+      visibleRangeRef.current = { from: stylistDay, to: stylistDay }
+      load(stylistDay, stylistDay)
+    }
+  }, [layout, stylistDay, load])
 
   const handleAccept = useCallback(
     async (id: number) => {
@@ -225,7 +282,22 @@ export default function AppointmentCalendar({
           <span className="text-base font-semibold text-white">Schedule</span>
           {loading && <Loader2 className="h-4 w-4 animate-spin text-cyan-400" aria-label="Loading" />}
         </div>
-        {staffList.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex rounded-lg border border-white/10 bg-zinc-900 p-0.5">
+            {(['calendar', 'stylist'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setLayout(v)}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium motion-safe-transition ${
+                  layout === v ? 'bg-cyan-500/15 text-cyan-200' : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {v === 'calendar' ? 'Calendar' : 'By stylist'}
+              </button>
+            ))}
+          </div>
+        {staffList.length > 0 && layout === 'calendar' ? (
           <div className="flex flex-wrap items-center gap-2">
             <Filter className="h-4 w-4 text-zinc-500" aria-hidden />
             <label htmlFor="cal-staff-filter" className="text-sm text-zinc-400">
@@ -246,6 +318,7 @@ export default function AppointmentCalendar({
             </select>
           </div>
         ) : null}
+        </div>
       </div>
 
       <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80 p-4 shadow-inner shadow-black/20 sm:p-5">
@@ -253,6 +326,46 @@ export default function AppointmentCalendar({
           className="pointer-events-none absolute inset-0 bg-gradient-to-br from-cyan-500/5 via-transparent to-indigo-600/5"
           aria-hidden
         />
+        {layout === 'stylist' ? (
+          <div className="relative">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setStylistDay((d) => shiftDay(d, -1))}
+                className="rounded-lg border border-white/10 px-2.5 py-1.5 text-sm text-zinc-300 hover:bg-white/5"
+              >
+                ‹
+              </button>
+              <input
+                type="date"
+                value={stylistDay}
+                onChange={(e) => setStylistDay(e.target.value || stylistDay)}
+                className="rounded-lg border border-white/10 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-200 focus:border-cyan-500 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setStylistDay((d) => shiftDay(d, 1))}
+                className="rounded-lg border border-white/10 px-2.5 py-1.5 text-sm text-zinc-300 hover:bg-white/5"
+              >
+                ›
+              </button>
+              <button
+                type="button"
+                onClick={() => setStylistDay(new Date().toISOString().slice(0, 10))}
+                className="rounded-lg border border-white/10 px-3 py-1.5 text-sm text-zinc-300 hover:bg-white/5"
+              >
+                Today
+              </button>
+            </div>
+            <StylistDayView
+              items={stylistItems}
+              staff={staffList}
+              dayStartMinutes={stylistBounds.lo}
+              dayEndMinutes={stylistBounds.hi}
+              onSelect={(apt) => setSelectedApt(apt)}
+            />
+          </div>
+        ) : (
         <div className="relative appointment-calendar-grid">
           <FullCalendar
             plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
@@ -303,6 +416,7 @@ export default function AppointmentCalendar({
             }}
           />
         </div>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-3">

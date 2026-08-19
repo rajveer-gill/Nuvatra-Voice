@@ -8,6 +8,7 @@ booking_service/config_service/sms_service/runtime) so monkeypatches target owne
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -119,6 +120,33 @@ def import_appointments_preview(
     }
 
 
+def _staff_id_by_name(name: str, staff: list) -> Optional[str]:
+    """Match a pasted stylist name to someone on the roster.
+
+    The other system writes names as its operators typed them — "BRENDA TO",
+    "Dai Dao", "RIN CHAN" — so matching is case- and space-insensitive, and a first
+    name alone counts when it is unambiguous ("Tina" for "Tina Nguyen"). Anything
+    ambiguous or unrecognised returns None and the appointment lands unassigned,
+    which is honest: guessing would put a customer in front of the wrong stylist.
+    """
+    want = re.sub(r"\s+", " ", (name or "").strip().lower())
+    if not want:
+        return None
+    rows = [
+        (str(m.get("id") or ""), re.sub(r"\s+", " ", str(m.get("name") or "").strip().lower()))
+        for m in (staff or [])
+        if m.get("id") and str(m.get("name") or "").strip()
+    ]
+    for sid, full in rows:
+        if full == want:
+            return sid
+    # First name only, and only when exactly one person answers to it.
+    firsts = [(sid, full) for sid, full in rows if full.split(" ")[0] == want]
+    if len(firsts) == 1:
+        return firsts[0][0]
+    return None
+
+
 @router.post("/api/appointments/import/commit")
 def import_appointments_commit(
     req: ImportCommitRequest,
@@ -142,7 +170,9 @@ def import_appointments_commit(
             {"date": a.get("date"), "time": a.get("time"), "customer_name": a.get("name")}
         )
         existing[key] = a
+    roster = (config_service.get_business_info() or {}).get("staff") or []
     created, updated, skipped, invalid = 0, 0, 0, 0
+    unmatched: set = set()
     for row in req.appointments:
         data = row.model_dump()
         # Re-validate here, not just in preview: these rows are hand-editable in the UI
@@ -157,7 +187,13 @@ def import_appointments_commit(
         key = appointment_import.import_key(data)
         # Service, stylist, price and notes have no columns of their own, so they're
         # folded into `reason` — the field the dashboard already displays.
-        stylist = (data.get("stylist") or "").strip()
+        stylist_name = (data.get("stylist") or "").strip()
+        # Link to the roster so the day can be read one column per stylist. The name
+        # still goes into `reason` as well, so it survives even when nobody matches.
+        staff_id = _staff_id_by_name(stylist_name, roster)
+        if stylist_name and not staff_id:
+            unmatched.add(stylist_name[:80])
+        stylist = stylist_name
         if stylist:
             stylist = f"with {stylist}" + (" (requested)" if data.get("is_request") else "")
         price = (data.get("price") or "").strip()
@@ -174,7 +210,8 @@ def import_appointments_commit(
             prior = existing[key]
             try:
                 database.db_appointments_update(
-                    prior["id"], client_id=cid, reason=reason, status="confirmed"
+                    prior["id"], client_id=cid, reason=reason, status="confirmed",
+                    staff_id=staff_id,
                 )
                 updated += 1
             except Exception as e:
@@ -194,7 +231,7 @@ def import_appointments_commit(
                     # Already booked in the other system — not awaiting anyone here.
                     "status": "confirmed",
                     "source": "imported",
-                    "staff_id": None,
+                    "staff_id": staff_id,
                 }
             )
             created += 1
@@ -208,7 +245,15 @@ def import_appointments_commit(
         skipped=skipped,
         invalid=invalid,
     )
-    return {"created": created, "updated": updated, "skipped": skipped, "invalid": invalid}
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "invalid": invalid,
+        # Named so the UI can offer to add them — an unmatched stylist means that day
+        # reads as "Unassigned" instead of showing who is actually busy.
+        "unmatched_stylists": sorted(unmatched),
+    }
 
 
 class AppointmentUpdate(BaseModel):
