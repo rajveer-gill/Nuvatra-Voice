@@ -63,7 +63,13 @@ def _is_trial_active(tenant: Optional[dict]) -> bool:
     """Check if the tenant has an active trial."""
     if not tenant:
         return False
-    status = (tenant.get("subscription_status") or "").lower()
+    # A missing status means "trialing", matching subscription_access.evaluate_billing,
+    # which is the shared gate deciding whether the app works at all. They disagreed:
+    # a fresh org is created with no status, so evaluate_billing granted an open-ended
+    # trial and let the store in, while this read the same row as "not trialing" and
+    # gated it to starter. A store you can use but whose Pro features are locked is one
+    # row giving two answers, and the access layer's reading is the documented one.
+    status = (tenant.get("subscription_status") or "trialing").lower()
     if status != "trialing":
         return False
     trial_ends_at = tenant.get("trial_ends_at")
