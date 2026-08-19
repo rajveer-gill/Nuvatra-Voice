@@ -20,6 +20,7 @@ import {
   Users,
   PhoneForwarded,
   MessageSquare,
+  ChevronDown,
 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
 import {
@@ -67,17 +68,58 @@ const DEBUG_SETTINGS = process.env.NEXT_PUBLIC_DEBUG_SETTINGS === '1'
  */
 const SHOW_SMS_AUTOMATIONS = false
 
+/** Remembers which cards someone folded away, so Settings opens the way they left it. */
+function useSectionOpen(storageKey: string | undefined, fallback: boolean) {
+  const [open, setOpen] = useState(fallback)
+  useEffect(() => {
+    if (!storageKey) return
+    try {
+      const saved = window.localStorage.getItem(`cs.settings.${storageKey}`)
+      if (saved === '0' || saved === '1') setOpen(saved === '1')
+    } catch {
+      /* private mode — the default is fine */
+    }
+  }, [storageKey])
+  const toggle = () => {
+    setOpen((v) => {
+      const next = !v
+      if (storageKey) {
+        try {
+          window.localStorage.setItem(`cs.settings.${storageKey}`, next ? '1' : '0')
+        } catch {
+          /* ignore */
+        }
+      }
+      return next
+    })
+  }
+  return { open, toggle }
+}
+
 function SettingsSection({
   children,
   className = '',
   delay = 0,
+  title,
+  icon,
+  titleId,
+  /** Omit to render a plain, always-open card (the setup checklist). */
+  storageKey,
+  defaultOpen = true,
   ...rest
 }: {
   children: ReactNode
   className?: string
   delay?: number
-} & React.ComponentPropsWithoutRef<'section'>) {
+  title?: ReactNode
+  icon?: ReactNode
+  titleId?: string
+  storageKey?: string
+  defaultOpen?: boolean
+} & Omit<React.ComponentPropsWithoutRef<'section'>, 'title'>) {
   const reduceMotion = useReducedMotion()
+  const { open, toggle } = useSectionOpen(storageKey, defaultOpen)
+  const collapsible = Boolean(title)
   return (
     <motion.section
       {...rest}
@@ -103,7 +145,35 @@ function SettingsSection({
         animate={reduceMotion ? undefined : { x: [0, 8, 0], y: [0, -6, 0] }}
         transition={{ duration: 7, repeat: Infinity, ease: 'easeInOut' }}
       />
-      <div className="relative z-10">{children}</div>
+      <div className="relative z-10">
+        {collapsible ? (
+          <>
+            <button
+              type="button"
+              onClick={toggle}
+              aria-expanded={open}
+              className="-m-2 mb-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-xl p-2 text-left transition hover:bg-gray-50"
+            >
+              {icon}
+              <h2
+                id={titleId}
+                className="flex flex-1 items-center gap-2 text-xl font-bold text-gray-900"
+              >
+                {title}
+              </h2>
+              <ChevronDown
+                className={`h-5 w-5 shrink-0 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`}
+                aria-hidden
+              />
+            </button>
+            {/* Unmounted rather than hidden: a collapsed card must not keep a focusable
+                field in the tab order, and the page is long enough already. */}
+            {open ? children : null}
+          </>
+        ) : (
+          children
+        )}
+      </div>
     </motion.section>
   )
 }
@@ -641,11 +711,12 @@ export default function Settings() {
       </SettingsSection>
 
       {/* AI Receptionist Identity */}
-      <SettingsSection delay={1}>
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2">
-          <User className="w-6 h-6 text-primary-600" />
-          AI Receptionist
-        </h2>
+      <SettingsSection
+        delay={1}
+        storageKey="receptionist"
+        icon={<User className="w-6 h-6 text-primary-600" />}
+        title="AI Receptionist"
+      >
         {(tenantClientId || aiPhone) && (
           <p className="text-sm text-gray-600 mb-6 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
             {tenantClientId && (
@@ -825,11 +896,13 @@ export default function Settings() {
       </SettingsSection>
 
       {/* Voice Settings */}
-      <SettingsSection delay={2}>
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
-          <Volume2 className="w-6 h-6 text-primary-600" />
-          Voice settings
-        </h2>
+      <SettingsSection
+        delay={2}
+        storageKey="voice"
+        defaultOpen={false}
+        icon={<Volume2 className="w-6 h-6 text-primary-600" />}
+        title="Voice settings"
+      >
         <p className="text-gray-600 text-sm mb-4">
           Choose the voice and speaking speed for your AI receptionist (phone and SMS).
         </p>
@@ -933,11 +1006,13 @@ export default function Settings() {
       ) : null}
 
       {/* Billing */}
-      <SettingsSection delay={3}>
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
-          <CreditCard className="w-6 h-6 text-primary-600" />
-          Billing
-        </h2>
+      <SettingsSection
+        delay={3}
+        storageKey="billing"
+        defaultOpen={false}
+        icon={<CreditCard className="w-6 h-6 text-primary-600" />}
+        title="Billing"
+      >
         <p className="text-gray-600 text-sm mb-4">
           Change plan, update payment method, or manage your subscription.
         </p>
@@ -967,11 +1042,12 @@ export default function Settings() {
       </SettingsSection>
 
       {/* Business info: restaurant, salon, HVAC, real estate, etc. */}
-      <SettingsSection delay={4}>
-        <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-6">
-          <Store className="w-6 h-6 text-primary-600" />
-          Business info &amp; AI customizations
-        </h2>
+      <SettingsSection
+        delay={4}
+        storageKey="business"
+        icon={<Store className="w-6 h-6 text-primary-600" />}
+        title={<>Business info &amp; AI customizations</>}
+      >
         <p className="text-gray-600 text-sm mb-6">
           Your AI receptionist uses this when answering calls and texts. Fill in hours, services, and booking rules
           so it can give accurate info and take bookings for any business type (restaurant, nail salon, HVAC, real
@@ -1300,15 +1376,20 @@ export default function Settings() {
 
       </SettingsSection>
 
-      <SettingsSection delay={5} id="team-roster-settings" aria-labelledby="team-roster-settings-heading">
-        <h2
-          id="team-roster-settings-heading"
-          className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"
-        >
-          <Users className="w-6 h-6 text-teal-600" />
-          Team roster
-          <span className="text-rose-500 text-base" aria-label="required">*</span>
-        </h2>
+      <SettingsSection
+        delay={5}
+        id="team-roster-settings"
+        aria-labelledby="team-roster-settings-heading"
+        storageKey="team"
+        titleId="team-roster-settings-heading"
+        icon={<Users className="w-6 h-6 text-teal-600" />}
+        title={
+          <>
+            Team roster
+            <span className="text-rose-500 text-base" aria-label="required">*</span>
+          </>
+        }
+      >
         <p className="text-gray-600 text-sm mb-4 max-w-3xl">
           Staff your callers can book with (stylists, artists, providers, chairs). Add as many as you need. This list is only for
           scheduling and AI context, not live call transfers.
@@ -1350,14 +1431,15 @@ export default function Settings() {
         />
       </SettingsSection>
 
-      <SettingsSection delay={6} aria-labelledby="call-transfers-settings-heading">
-        <h2
-          id="call-transfers-settings-heading"
-          className="text-xl font-bold text-gray-900 flex items-center gap-2 mb-2"
-        >
-          <PhoneForwarded className="w-6 h-6 text-violet-600" />
-          Call transfers
-        </h2>
+      <SettingsSection
+        delay={6}
+        aria-labelledby="call-transfers-settings-heading"
+        storageKey="transfers"
+        defaultOpen={false}
+        titleId="call-transfers-settings-heading"
+        icon={<PhoneForwarded className="w-6 h-6 text-violet-600" />}
+        title="Call transfers"
+      >
         <p className="text-gray-600 text-sm mb-6 max-w-3xl">
           When a caller asks to speak with someone by name, the AI can transfer only to numbers you list here. Your plan limits
           how many destinations you can add, not how many people are on your booking roster above.
