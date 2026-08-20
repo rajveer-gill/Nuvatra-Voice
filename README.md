@@ -1,4 +1,4 @@
-# Nuvatra Voice - AI Voice Receptionist
+# Call Surge - AI Voice Receptionist
 
 An intelligent AI-powered voice receptionist for businesses: handle calls, schedule appointments, take messages, and route inquiries.
 
