@@ -35,6 +35,8 @@ interface Org {
   stores: OrgStore[]
   members: OrgMember[]
   pending_invites: OrgInvite[]
+  /** Per-plan Stripe price IDs for a partner rate. Empty = standard pricing. */
+  price_overrides?: Record<string, string> | null
 }
 
 interface AdminTenant {
@@ -205,6 +207,17 @@ function OrgCard({
   const [attachId, setAttachId] = useState('')
   const [busy, setBusy] = useState(false)
   const [memberEmail, setMemberEmail] = useState('')
+  // Partner pricing. Kept as a discounted PRICE rather than a coupon because an org
+  // is one subscription with quantity = store count: a fixed coupon would come off
+  // the invoice once, not off each store, and a percentage would change value with
+  // the plan.
+  const [prices, setPrices] = useState<Record<string, string>>(() => ({
+    starter: org.price_overrides?.starter || '',
+    growth: org.price_overrides?.growth || '',
+    pro: org.price_overrides?.pro || '',
+  }))
+  const [savingPrices, setSavingPrices] = useState(false)
+  const [priceNote, setPriceNote] = useState<string | null>(null)
   const [memberRole, setMemberRole] = useState<'manager' | 'viewer'>('manager')
 
   // Stores not yet in any group — the candidates to attach here.
@@ -241,6 +254,25 @@ function OrgCard({
       await api.delete(`/api/admin/orgs/${org.id}/stores/${tenantId}`, adminApi)
       onSuccess('Store removed from group.')
     })
+
+  const savePrices = async () => {
+    setSavingPrices(true)
+    setPriceNote(null)
+    try {
+      await api.patch(`/api/admin/orgs/${org.id}/price-overrides`, prices, adminApi)
+      const set = Object.values(prices).filter((v) => v.trim()).length
+      setPriceNote(
+        set
+          ? `Saved. Applies to their next checkout — an existing subscription keeps the price it was created with.`
+          : 'Cleared — back to standard pricing.'
+      )
+      onChanged()
+    } catch (e) {
+      setPriceNote(detailOf(e) || 'Could not save the prices.')
+    } finally {
+      setSavingPrices(false)
+    }
+  }
 
   const addMember = () =>
     run(async () => {
@@ -447,6 +479,43 @@ function OrgCard({
               If they already have an account they&rsquo;re added right away; otherwise we email an
               invite and they join the first time they sign in with this address.
             </p>
+          </div>
+
+          <div className="space-y-2 rounded-xl border border-white/10 bg-zinc-950/40 p-3">
+            <p className="text-xs font-medium text-zinc-300">Partner pricing</p>
+            <p className="text-[11px] text-zinc-600">
+              A discounted Stripe price per plan, charged per store. Use this rather than
+              a coupon: a group is one subscription with quantity = store count, so a
+              fixed coupon comes off the invoice once instead of off each store, and a
+              percentage changes value when they change plan. Leave blank for standard
+              pricing.
+            </p>
+            <div className="grid gap-2 sm:grid-cols-3">
+              {(['starter', 'growth', 'pro'] as const).map((plan) => (
+                <label key={plan} className="block">
+                  <span className="mb-1 block text-[11px] uppercase tracking-wide text-zinc-500">
+                    {plan}
+                  </span>
+                  <input
+                    value={prices[plan] || ''}
+                    onChange={(e) => setPrices((p) => ({ ...p, [plan]: e.target.value }))}
+                    placeholder="price_…"
+                    className="w-full rounded-lg border border-white/15 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-700 focus:border-cyan-500/50 focus:outline-none"
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void savePrices()}
+                disabled={savingPrices}
+                className="rounded-lg bg-white/10 px-3 py-1.5 text-xs text-zinc-200 hover:bg-white/15 disabled:opacity-50"
+              >
+                {savingPrices ? 'Saving…' : 'Save pricing'}
+              </button>
+              {priceNote && <span className="text-[11px] text-zinc-400">{priceNote}</span>}
+            </div>
           </div>
         </div>
       </div>

@@ -425,6 +425,7 @@ def init_db() -> bool:
         # Org-level billing: one subscription covering N stores. Mirrors the tenant
         # billing columns so subscription_access can judge an org with the same rules.
         for col, typ in [
+            ("price_overrides", "JSONB"),
             ("plan", "TEXT NOT NULL DEFAULT 'pro'"),
             ("subscription_status", "TEXT"),
             ("stripe_customer_id", "TEXT"),
@@ -1257,6 +1258,9 @@ def db_org_create(name: str) -> Optional[dict]:
 _ORG_BILLING_COLS = (
     "id", "name", "plan", "subscription_status", "stripe_customer_id",
     "stripe_subscription_id", "trial_ends_at", "billing_exempt_until",
+    # {"starter": "price_...", ...}. NULL/absent = the standard env price, so an
+    # untouched org bills exactly as before. See 0013_org_price_overrides.
+    "price_overrides",
 )
 
 
@@ -1270,7 +1274,31 @@ def _row_to_org(row) -> dict:
         "stripe_subscription_id": row[5],
         "trial_ends_at": row[6].isoformat() if row[6] else None,
         "billing_exempt_until": row[7].isoformat() if row[7] else None,
+        "price_overrides": row[8] if len(row) > 8 and isinstance(row[8], dict) else {},
     }
+
+
+def db_org_set_price_overrides(org_id: str, overrides: Optional[dict]) -> bool:
+    """Set a group's per-plan price IDs. Pass None or {} to fall back to the standard
+    env prices — that fallback is what keeps every other customer unaffected."""
+    conn = _get_conn()
+    if not conn or not org_id:
+        return False
+    try:
+        import json as _json
+
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE orgs SET price_overrides = %s::jsonb WHERE id = %s::uuid",
+            (_json.dumps(overrides) if overrides else None, org_id),
+        )
+        changed = cur.rowcount
+        conn.commit()
+        cur.close()
+        return changed > 0
+    except Exception as e:
+        print(f"[DB] Failed to set org price overrides: {e}")
+        return False
 
 
 def db_org_get_by_id(org_id: str) -> Optional[dict]:
@@ -1783,12 +1811,16 @@ def db_org_list_all() -> List[dict]:
         return []
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, name, created_at FROM orgs ORDER BY name")
+        # price_overrides comes along so the admin console can SHOW a partner rate,
+        # not just set one — a form that renders empty for a group that has pricing
+        # invites someone to overwrite it with blanks.
+        cur.execute("SELECT id, name, created_at, price_overrides FROM orgs ORDER BY name")
         orgs = [
             {
                 "id": str(r[0]),
                 "name": r[1],
                 "created_at": r[2].isoformat() if r[2] else None,
+                "price_overrides": r[3] if isinstance(r[3], dict) else {},
                 "stores": [],
                 "members": [],
                 "pending_invites": [],

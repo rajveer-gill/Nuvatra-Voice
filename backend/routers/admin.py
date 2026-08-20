@@ -39,6 +39,13 @@ class BillingExemptUpdate(BaseModel):
     extend_trial_months: Optional[int] = None
 
 
+class OrgPriceOverridesUpdate(BaseModel):
+    """Per-plan Stripe price IDs for a partner rate. Omit or send "" to clear one."""
+    starter: Optional[str] = None
+    growth: Optional[str] = None
+    pro: Optional[str] = None
+
+
 class AccountPausedUpdate(BaseModel):
     paused: bool
 
@@ -439,6 +446,60 @@ def admin_create_org(req: AdminOrgCreate, request: Request, admin: str = Depends
         resource_id=org["id"], details={"name": org["name"]}, request=request,
     )
     return org
+
+
+@router.patch("/api/admin/orgs/{org_id}/price-overrides")
+def admin_org_price_overrides(
+    org_id: str,
+    req: OrgPriceOverridesUpdate,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Put a group on partner pricing.
+
+    "$50 off each store" is a price, not a coupon: a coupon's amount_off comes off the
+    invoice, and a group is one subscription with quantity = store count, so a fixed
+    discount lands once whether that is 2 stores or 43. A discounted price is per-store
+    by construction and holds its value across plans.
+
+    Only affects the NEXT checkout — an existing subscription keeps the price it was
+    created with, which Stripe treats as immutable on the item. Changing an active
+    subscription's price is a deliberate act in Stripe, not a side effect of this.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    org = database.db_org_get_by_id(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Group not found")
+    overrides: Dict[str, str] = {}
+    bad: List[str] = []
+    for plan in ("starter", "growth", "pro"):
+        raw = (getattr(req, plan, None) or "").strip()
+        if not raw:
+            continue
+        # Reject anything that is not a price id here rather than at checkout, where
+        # the failure would be an opaque Stripe error in front of a paying customer.
+        if not raw.startswith("price_"):
+            bad.append(plan)
+            continue
+        overrides[plan] = raw[:120]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Not a Stripe price ID (must start with 'price_'): {', '.join(bad)}",
+        )
+    if not database.db_org_set_price_overrides(org_id, overrides or None):
+        raise HTTPException(status_code=500, detail="Failed to save price overrides")
+    deps.audit_log(
+        "admin",
+        "org_price_overrides",
+        actor_id=admin_user_id,
+        resource_type="org",
+        resource_id=org_id,
+        details={"overrides": overrides or None},
+        request=request,
+    )
+    return {"success": True, "price_overrides": overrides}
 
 
 @router.delete("/api/admin/orgs/{org_id}")

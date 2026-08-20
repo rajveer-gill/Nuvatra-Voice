@@ -77,6 +77,34 @@ def _stripe_price_id(plan: str) -> Optional[str]:
     return (os.getenv(key) or os.getenv("STRIPE_PRICE_ID") or "").strip() or None
 
 
+def _org_price_id(org: dict, plan: str) -> Optional[str]:
+    """The price this group is billed at, honouring a partner rate.
+
+    "$50 off each store" cannot be a coupon: amount_off comes off the invoice, and an
+    org is one subscription with quantity = store count, so a fixed discount lands
+    once whether that is 2 stores or 43. A percentage is per-store but changes value
+    with the plan. A discounted PRICE is per-store by construction and stays $50
+    across plans, because quantity multiplies the unit price.
+
+    Falls back to the standard env price whenever an override is absent or malformed,
+    so a bad value bills at list price rather than failing a checkout — and every
+    customer without an override is untouched.
+    """
+    overrides = (org or {}).get("price_overrides") or {}
+    if isinstance(overrides, dict):
+        candidate = str(overrides.get((plan or "").strip().lower()) or "").strip()
+        # Only accept something that looks like a Stripe price. A typo here would
+        # otherwise reach Stripe as an opaque failure at the worst moment.
+        if candidate.startswith("price_"):
+            return candidate
+        if candidate:
+            logger.warning(
+                "org_price_override_ignored org=%s plan=%s reason=not_a_price_id",
+                (org or {}).get("id"), plan,
+            )
+    return _stripe_price_id(plan)
+
+
 def _subscription_status_and_trial(sub_id: Optional[str]):
     """Read a Stripe subscription's real status + trial end so the tenant mirrors it.
 
@@ -407,7 +435,7 @@ def create_org_checkout_session(
 def _build_org_checkout(org: dict, plan: str) -> dict:
     """Create the group's Stripe Checkout session. Shared by the org endpoint and by
     ordinary signup, since every account is an org — one billing path, not two."""
-    price_id = _stripe_price_id(plan)
+    price_id = _org_price_id(org, plan)
     if not price_id:
         raise HTTPException(status_code=503, detail=f"Price not configured for plan: {plan}")
     customer_id = (org.get("stripe_customer_id") or "").strip()
