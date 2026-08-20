@@ -235,20 +235,14 @@ export default function DashboardPage() {
         // dead end — hence the bounce to the console. But an admin who picked a store
         // in the admin panel has asked for that store specifically, and bouncing them
         // makes "Open dashboard" do nothing at all.
-        // TEMPORARY diagnostics — remove with the admin-page pair.
-        console.info('[open-store] dashboard mounted', {
-          is_admin: sessionRes.data.is_admin,
-          selectedStore: getSelectedStoreId(),
-        })
+        // An admin has no store of their own, so /dashboard would be a dead end —
+        // hence the bounce to the console. The layout enforces this server-side too;
+        // this is the client-side half for a selection made after load.
         if (sessionRes.data.is_admin && !getSelectedStoreId()) {
-          console.info('[open-store] bouncing to /admin (admin with no store selected)')
           router.replace('/admin')
           return
         }
-        if (sessionRes.data.is_admin) {
-          console.info('[open-store] staying — admin viewing a selected store')
-          setViewingAsAdmin(true)
-        }
+        if (sessionRes.data.is_admin) setViewingAsAdmin(true)
         loadSubscription()
       })
       .catch(() => {
