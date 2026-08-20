@@ -328,6 +328,15 @@ STORE_HEADER = "X-Store-Id"
 _READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+def _admin_user_ids() -> list:
+    """Admin allowlist from the environment. Empty means admin is not configured."""
+    return [x.strip() for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",") if x.strip()]
+
+
+def is_admin_user(user_id: str) -> bool:
+    return bool(user_id) and user_id in _admin_user_ids()
+
+
 def _enforce_org_write_role(request: Request, role: str, user_id: str, client_id: str) -> None:
     """Block a read-only org viewer from anything that isn't a read.
 
@@ -370,6 +379,31 @@ def _resolve_org_store(request: Request, user_id: str):
     if not store_ref or not runtime.USE_DB or not user_id:
         return None
     scoped = database.db_org_store_for_user(user_id, store_ref)
+    if not scoped and is_admin_user(user_id):
+        # Support access: an admin can open any store's dashboard to set it up or see
+        # what a customer is seeing. Deliberately NOT a membership row — nothing to
+        # create, nothing to forget to remove, and it disappears the moment the user
+        # leaves ADMIN_CLERK_USER_IDS. Admins can already delete a tenant outright
+        # from the admin panel, so this grants no new trust; it grants convenience.
+        #
+        # Audited on EVERY request, not just the first, because "who looked at this
+        # customer's data and when" is the question that matters afterwards.
+        tenant = database.db_tenant_get_by_client_id(store_ref) or (
+            database.db_tenant_get_by_id(store_ref) if len(store_ref) > 20 else None
+        )
+        if tenant:
+            audit_log(
+                "admin",
+                "admin_store_access",
+                actor_id=user_id,
+                resource_type="tenant",
+                resource_id=str(tenant.get("id") or ""),
+                client_id=tenant.get("client_id"),
+                details={"method": request.method, "path": str(getattr(request, "url", ""))[:200]},
+                request=request,
+            )
+            database.set_request_client_id(tenant["client_id"])
+            return tenant
     if not scoped:
         # Miss. Distinguish the two reasons, because they deserve opposite answers:
         # an overseer reaching for a store outside their org is a real 403, but a
@@ -531,11 +565,7 @@ def require_admin(request: Request):
         )
         raise HTTPException(status_code=401, detail="Authorization required")
     user_id, _ = verify_clerk_token(token)
-    admin_ids = [
-        x.strip()
-        for x in (os.getenv("ADMIN_CLERK_USER_IDS") or "").split(",")
-        if x.strip()
-    ]
+    admin_ids = _admin_user_ids()
     if not admin_ids:
         audit_log(
             "admin",

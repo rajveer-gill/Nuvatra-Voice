@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import Link from 'next/link'
 import { motion, useReducedMotion } from 'framer-motion'
-import { useApiClient, sameOriginApiConfig } from '@/lib/api'
+import { useRouter } from 'next/navigation'
+import { useApiClient, sameOriginApiConfig, setSelectedStoreId } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
@@ -34,6 +35,9 @@ interface Tenant {
   pending_invite_email?: string | null
   allocated_email?: string | null
   access_status?: TenantAccessStatus
+  org_id?: string | null
+  /** Group this store belongs to, so a franchise's locations sit together. */
+  org_name?: string | null
 }
 
 function accessStatusLabel(status: TenantAccessStatus | undefined): string {
@@ -213,6 +217,7 @@ export default function AdminPage() {
   const { isLoaded, isSignedIn } = useAuth()
   const api = useApiClient()
   const adminApi = useMemo(() => sameOriginApiConfig(), [])
+  const router = useRouter()
   const reduceMotion = useReducedMotion()
   const [adminAllowed, setAdminAllowed] = useState<boolean | null>(null)
   const [tenants, setTenants] = useState<Tenant[]>([])
@@ -713,6 +718,27 @@ export default function AdminPage() {
     )
   }
 
+  /** Stores grouped by their group, groups first, independents last. A franchise's
+   *  34 locations scattered through one flat list is unreadable; together they are a
+   *  customer. */
+  const groupTenants = (list: Tenant[]) => {
+    const groups = new Map<string, { key: string; name: string; rows: Tenant[] }>()
+    const loose: Tenant[] = []
+    for (const t of list) {
+      const key = (t.org_id || '').trim()
+      if (!key) {
+        loose.push(t)
+        continue
+      }
+      const g = groups.get(key)
+      if (g) g.rows.push(t)
+      else groups.set(key, { key, name: t.org_name || 'Group', rows: [t] })
+    }
+    const out = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name))
+    if (loose.length) out.push({ key: '__independent__', name: 'Independent stores', rows: loose })
+    return out
+  }
+
   const tenantQ = tenantQuery.trim().toLowerCase()
   const filteredTenants = tenantQ
     ? tenants.filter((t) =>
@@ -992,7 +1018,18 @@ export default function AdminPage() {
                 initial={reduceMotion ? false : 'hidden'}
                 animate="visible"
               >
-                {filteredTenants.map((t) => {
+                {groupTenants(filteredTenants).map((group) => (
+                <li key={group.key} className="py-2 first:pt-0">
+                  {/* One heading per group. A franchise reads as a customer rather than
+                      as N unrelated rows that happen to share a name prefix. */}
+                  <div className="sticky top-0 z-10 -mx-1 mb-1 flex items-baseline gap-2 bg-zinc-900/95 px-1 py-2 backdrop-blur">
+                    <h3 className="text-sm font-semibold text-zinc-200">{group.name}</h3>
+                    <span className="text-xs text-zinc-500">
+                      {group.rows.length} {group.rows.length === 1 ? 'store' : 'stores'}
+                    </span>
+                  </div>
+                  <ul className="divide-y divide-white/10">
+                {group.rows.map((t) => {
                   const twilioDraftVal = twilioDraft[t.id] ?? ''
                   const canSaveTwilioNumber = isUsTenantTwilioDraft(twilioDraftVal)
                     ? nationalDigitsForUsTwilioInput(twilioDraftVal).length > 0
@@ -1168,6 +1205,20 @@ export default function AdminPage() {
                               Stripe. Extending a trial for someone with a live
                               subscription still lets Stripe charge them on renewal —
                               which is exactly what happened once, unnoticed. */}
+                          {/* Support access: open this customer's dashboard as a manager.
+                              Resolved server-side from the admin allowlist and audited on
+                              every request — no membership row is created, so there is
+                              nothing to remember to remove afterwards. */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedStoreId(t.client_id)
+                              router.push('/dashboard')
+                            }}
+                            className="rounded-lg border border-cyan-400/30 px-2 py-1 text-sm text-cyan-200 motion-safe-transition hover:bg-cyan-500/10"
+                          >
+                            Open dashboard
+                          </button>
                           <button
                             type="button"
                             onClick={() => void checkStripe(t.id)}
@@ -1246,6 +1297,9 @@ export default function AdminPage() {
                   </motion.li>
                   )
                 })}
+                  </ul>
+                </li>
+                ))}
               </motion.ul>
             )}
           </section>

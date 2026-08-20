@@ -371,8 +371,18 @@ def admin_list_tenants(_: str = Depends(deps.require_admin)):
         raise HTTPException(
             status_code=500, detail="Failed to load tenants from database"
         ) from e
+    # Group name per store, so the admin list can show a franchise's locations
+    # together instead of scattered through one flat list. One query for the lot
+    # rather than one per store.
+    org_names: dict = {}
+    try:
+        for o in database.db_org_list_all():
+            org_names[str(o.get("id"))] = o.get("name") or ""
+    except Exception as e:
+        print(f"[Admin] org name lookup failed: {e}")
     enriched: List[dict] = []
     for t in tenants:
+        t = {**t, "org_name": org_names.get(str(t.get("org_id") or "")) or None}
         try:
             enriched.append(_admin_tenant_with_access_email(t))
         except Exception as e:
