@@ -25,6 +25,8 @@ export { API_URL }
  * A normal store owner never sets it, and the backend ignores it if they somehow do.
  */
 const STORE_KEY = 'nuvatra.selectedStoreId'
+/** Server-readable mirror of STORE_KEY. See setSelectedStoreId. */
+export const STORE_COOKIE = 'cs_selected_store'
 
 export function getSelectedStoreId(): string | null {
   if (typeof window === 'undefined') return null
@@ -42,6 +44,18 @@ export function setSelectedStoreId(storeId: string | null): void {
     else window.localStorage.removeItem(STORE_KEY)
   } catch {
     // Non-fatal: without persistence they just re-pick the store.
+  }
+  // Mirrored into a cookie because the dashboard's LAYOUT is a server component and
+  // cannot read localStorage. It redirects platform admins to /admin, which is right
+  // when they have no store of their own and wrong the moment they pick one — and a
+  // server redirect runs before any client guard can say otherwise.
+  try {
+    document.cookie = storeId
+      ? `${STORE_COOKIE}=${encodeURIComponent(storeId)}; path=/; max-age=2592000; samesite=lax`
+      : `${STORE_COOKIE}=; path=/; max-age=0; samesite=lax`
+  } catch {
+    // Cookies disabled — the layout falls back to bouncing admins, which is the
+    // old behaviour rather than a new failure.
   }
 }
 
