@@ -83,6 +83,9 @@ export default function DashboardPage() {
   // Multi-store oversight: set only for a franchise/regional account. A normal store
   // owner gets is_org_member=false and sees none of this.
   const [org, setOrg] = useState<{ is_org_member: boolean; can_edit_any?: boolean } | null>(null)
+  // Set when an admin is looking at a customer's store through the admin console.
+  // Without it they'd have no visible way back — the bar below is org-member only.
+  const [viewingAsAdmin, setViewingAsAdmin] = useState(false)
   const [viewingStore, setViewingStore] = useState<string | null>(null)
 
   const tabs = useMemo(() => {
@@ -228,10 +231,15 @@ export default function DashboardPage() {
     api.get<{ is_admin: boolean }>('/api/admin/session', sameOriginApiConfig())
       .then((sessionRes) => {
         if (cancelled) return
-        if (sessionRes.data.is_admin) {
+        // An admin has no store of their own, so /dashboard would be a "no tenant"
+        // dead end — hence the bounce to the console. But an admin who picked a store
+        // in the admin panel has asked for that store specifically, and bouncing them
+        // makes "Open dashboard" do nothing at all.
+        if (sessionRes.data.is_admin && !getSelectedStoreId()) {
           router.replace('/admin')
           return
         }
+        if (sessionRes.data.is_admin) setViewingAsAdmin(true)
         loadSubscription()
       })
       .catch(() => {
@@ -463,24 +471,35 @@ export default function DashboardPage() {
             </div>
           </header>
 
-          {org?.is_org_member && viewingStore && (
+          {(org?.is_org_member || viewingAsAdmin) && viewingStore && (
             <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-zinc-900/60 px-4 py-3">
               <div className="flex items-center gap-2 text-sm text-zinc-300">
                 <Eye className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
                 <span>
                   Viewing <span className="font-semibold text-white">{viewingStore}</span>
-                  {!org.can_edit_any && (
-                    <span className="text-zinc-500"> · view only</span>
+                  {viewingAsAdmin ? (
+                    <span className="text-amber-300/90"> · as admin</span>
+                  ) : (
+                    !org?.can_edit_any && <span className="text-zinc-500"> · view only</span>
                   )}
                 </span>
               </div>
               <button
                 type="button"
-                onClick={backToAllStores}
+                onClick={() => {
+                  if (viewingAsAdmin) {
+                    // Drop the selection on the way out, or the next visit to
+                    // /dashboard silently lands back in this customer's store.
+                    setSelectedStoreId(null)
+                    router.push('/admin')
+                    return
+                  }
+                  backToAllStores()
+                }}
                 className="inline-flex items-center gap-1 rounded-full border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 motion-safe-transition hover:border-white/30 hover:text-white"
               >
                 <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
-                All stores
+                {viewingAsAdmin ? 'Back to admin' : 'All stores'}
               </button>
             </div>
           )}
