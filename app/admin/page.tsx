@@ -637,8 +637,26 @@ export default function AdminPage() {
     twilioDraft, setTwilioDraft, twilioSaving, handleTogglePause, pausing,
     listItem,
     openDashboard: (clientId: string) => {
+      // TEMPORARY diagnostics for "Open dashboard does nothing" — remove once fixed.
+      console.info('[open-store] clicked', { clientId })
       setSelectedStoreId(clientId)
-      router.push('/dashboard')
+      let readBack: string | null = null
+      try {
+        readBack = window.localStorage.getItem('nuvatra.selectedStoreId')
+      } catch (e) {
+        console.info('[open-store] localStorage read failed', e)
+      }
+      console.info('[open-store] stored', { readBack, matches: readBack === clientId })
+      try {
+        router.push('/dashboard')
+        console.info('[open-store] router.push called')
+      } catch (e) {
+        console.info('[open-store] router.push threw', e)
+      }
+      // If the SPA route never changes, this says so a second later.
+      window.setTimeout(() => {
+        console.info('[open-store] 1s later, location is', window.location.pathname)
+      }, 1000)
     },
   }
 
