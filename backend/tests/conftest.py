@@ -10,6 +10,23 @@ os.environ.setdefault("CLIENT_ID", "default")
 os.environ.setdefault("VOICE_STATE_BACKEND", "memory")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _strip_dev_tunnel_env():
+    """Keep a developer's .env dev-tunnel URL out of the suite.
+
+    main.py does load_dotenv(override=True) at import, so backend/.env wins over
+    anything set before it — including a fixture's monkeypatch.setenv. And
+    NGROK_URL outranks PUBLIC_BASE_URL in deps._public_base_url(), so a test that
+    sets PUBLIC_BASE_URL still gets the tunnel and asserts against a hostname
+    that changes every time the tunnel restarts. Import main first so the dotenv
+    load has happened, then drop both: nothing under tests/ wants them, and the
+    suite should behave the same on a laptop as it does in CI.
+    """
+    import main  # noqa: F401  — triggers the load_dotenv(override=True) above
+    for key in ("NGROK_URL", "PUBLIC_BASE_URL"):
+        os.environ.pop(key, None)
+
+
 @pytest.fixture
 def client():
     """FastAPI TestClient."""

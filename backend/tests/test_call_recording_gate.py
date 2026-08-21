@@ -16,7 +16,7 @@ def _future_iso():
     [
         ({"plan": "pro", "subscription_status": "active"}, True, True),
         ({"plan": "pro", "subscription_status": "active"}, False, False),
-        ({"plan": "growth", "subscription_status": "active"}, True, False),
+        ({"plan": "growth", "subscription_status": "active"}, True, True),
         ({"plan": "starter", "subscription_status": "active"}, True, False),
         (
             {"plan": "free", "subscription_status": "trialing", "trial_ends_at": _future_iso()},

@@ -113,7 +113,7 @@ def _tenant_for_call_recording(tenant: Optional[dict] = None) -> Optional[dict]:
 
 
 def _call_recording_enabled_for_tenant(tenant: Optional[dict] = None) -> bool:
-    """Env flag AND Pro-tier plan (trial uses effective Pro limits via get_plan_limits)."""
+    """Env flag AND a plan with has_call_recording (Growth+; trial gets effective Pro limits)."""
     if not _call_recording_env_enabled():
         return False
     t = _tenant_for_call_recording(tenant)

@@ -284,6 +284,11 @@ class RedisCallSessionStore(CallSessionStore):
 
     def __init__(self, redis_url: str) -> None:
         self._redis = create_redis_client(redis_url)
+        # redis-py connects lazily, so constructing a client against a dead server
+        # succeeds. Ping here or the fail-closed check in get_call_session_store()
+        # never fires and we boot "healthy" onto a Redis that isn't there — the
+        # first caller of the day finds out instead of the deploy.
+        self._redis.ping()
         self._local_locks: dict[str, asyncio.Lock] = {}
         self.sessions = _SessionsProxy(self)
         self.response_status = _ResponseStatusProxy(self)
