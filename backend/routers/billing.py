@@ -457,8 +457,18 @@ def move_org_subscription_to_price(org_id: str) -> dict:
     invoice; it does not retroactively credit the part of the period already paid.
     Anything else would hand out refunds nobody authorised as a side effect of an
     admin typing a number.
+
+    Quantity is sent explicitly, and must be. Changing an item's price without
+    naming a quantity does not leave the old one in place — Stripe applies the
+    default of 1. The first version of this omitted it on the reasoning that
+    quantity belongs to the store-count sync, and silently rebilled a 2-store group
+    as 1 store. Store count is the source of truth, so send that: it also repairs a
+    subscription that has already drifted.
     """
-    out = {"repriced": False, "reason": None, "from_price": None, "to_price": None}
+    out = {
+        "repriced": False, "reason": None, "from_price": None, "to_price": None,
+        "quantity": None,
+    }
     if not (STRIPE_AVAILABLE and stripe) or not runtime.USE_DB:
         out["reason"] = "billing_unavailable"
         return out
@@ -488,21 +498,33 @@ def move_org_subscription_to_price(org_id: str) -> dict:
             out["reason"] = "no_subscription_item"
             logger.warning("org_reprice_skipped org=%s sub=%s reason=no_item", org_id, sub_id)
             return out
-        if current == target:
+        # Never omit this — see the docstring. Prefer the real store count so a
+        # subscription that has already drifted comes back in line.
+        was_qty = line.get("quantity")
+        try:
+            qty = max(1, int(database.db_org_store_count(org_id) or 0))
+        except Exception:
+            qty = None
+        if not qty:
+            qty = int(was_qty) if isinstance(was_qty, int) and was_qty > 0 else 1
+        out["quantity"] = qty
+        if current == target and was_qty == qty:
             out["reason"] = "already_on_price"
             logger.info(
-                "org_reprice_noop org=%s sub=%s plan=%s price=%s", org_id, sub_id, plan, target
+                "org_reprice_noop org=%s sub=%s plan=%s price=%s qty=%s",
+                org_id, sub_id, plan, target, qty,
             )
             return out
         stripe.Subscription.modify(
             sub_id,
-            items=[{"id": item_id, "price": target}],
+            items=[{"id": item_id, "price": target, "quantity": qty}],
             proration_behavior="none",
         )
         out["repriced"] = True
         logger.info(
-            "org_repriced org=%s sub=%s plan=%s from=%s to=%s qty=%s proration=none",
-            org_id, sub_id, plan, current, target, line.get("quantity"),
+            "org_repriced org=%s sub=%s plan=%s from=%s to=%s qty=%s->%s stores=%s "
+            "proration=none",
+            org_id, sub_id, plan, current, target, was_qty, qty, qty,
         )
         return out
     except Exception as e:

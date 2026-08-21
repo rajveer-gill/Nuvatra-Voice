@@ -33,6 +33,7 @@ def org_on_list_price(monkeypatch):
     }
     monkeypatch.setattr(billing.runtime, "USE_DB", True, raising=False)
     monkeypatch.setattr(billing.database, "db_org_get_by_id", lambda _i: org)
+    monkeypatch.setattr(billing.database, "db_org_store_count", lambda _i: 1)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
     return org
 
@@ -45,6 +46,7 @@ def test_subscription_line_exposes_its_price(monkeypatch):
 
 def test_existing_subscription_is_moved_onto_the_partner_price(org_on_list_price, monkeypatch):
     monkeypatch.setattr(stripe.Subscription, "retrieve", lambda *a, **k: _sub(qty=2))
+    monkeypatch.setattr(billing.database, "db_org_store_count", lambda _i: 2)
     seen = {}
 
     def _modify(sub_id, **kw):
@@ -57,25 +59,59 @@ def test_existing_subscription_is_moved_onto_the_partner_price(org_on_list_price
     assert out["repriced"] is True
     assert out["from_price"] == "price_list"
     assert out["to_price"] == "price_partner"
-    assert seen["items"] == [{"id": "si_1", "price": "price_partner"}]
+    assert seen["items"] == [{"id": "si_1", "price": "price_partner", "quantity": 2}]
     # No retroactive credit for the part of the period already paid.
     assert seen["proration_behavior"] == "none"
 
 
-def test_repricing_leaves_quantity_alone(org_on_list_price, monkeypatch):
-    """Quantity is the store count and is owned by the store-sync path. Repricing
-    must not reset it to 1 and quietly halve the bill."""
+def test_repricing_always_sends_quantity(org_on_list_price, monkeypatch):
+    """Regression, and a correction of this test's own earlier premise.
+
+    The first version asserted quantity was NOT sent, on the reasoning that it
+    belongs to the store-count sync and an omitted field is left alone. Stripe does
+    not work that way: changing an item's price without naming a quantity applies
+    the default of 1. That test passed while staging rebilled a 2-store group as 1
+    store. Omission is the bug, so the assertion is that we always state it.
+    """
     monkeypatch.setattr(stripe.Subscription, "retrieve", lambda *a, **k: _sub(qty=7))
+    monkeypatch.setattr(billing.database, "db_org_store_count", lambda _i: 7)
     seen = {}
     monkeypatch.setattr(stripe.Subscription, "modify",
                         lambda sub_id, **kw: seen.update(kw) or _obj(id=sub_id))
-    billing.move_org_subscription_to_price("org_1")
-    assert "quantity" not in seen["items"][0]
+    out = billing.move_org_subscription_to_price("org_1")
+    assert seen["items"] == [{"id": "si_1", "price": "price_partner", "quantity": 7}]
+    assert out["quantity"] == 7
+
+
+def test_repricing_restores_a_quantity_that_already_drifted(org_on_list_price, monkeypatch):
+    """Store count is the source of truth. A subscription stuck at 1 while the group
+    has 2 stores is under-billed, and repricing is a chance to put it right."""
+    monkeypatch.setattr(stripe.Subscription, "retrieve", lambda *a, **k: _sub(qty=1))
+    monkeypatch.setattr(billing.database, "db_org_store_count", lambda _i: 2)
+    seen = {}
+    monkeypatch.setattr(stripe.Subscription, "modify",
+                        lambda sub_id, **kw: seen.update(kw) or _obj(id=sub_id))
+    out = billing.move_org_subscription_to_price("org_1")
+    assert seen["items"][0]["quantity"] == 2
+    assert out["quantity"] == 2
+
+
+def test_same_price_but_wrong_quantity_is_still_corrected(org_on_list_price, monkeypatch):
+    """Already on the right price is not the same as already correct."""
+    monkeypatch.setattr(stripe.Subscription, "retrieve",
+                        lambda *a, **k: _sub(price_id="price_partner", qty=1))
+    monkeypatch.setattr(billing.database, "db_org_store_count", lambda _i: 3)
+    seen = {}
+    monkeypatch.setattr(stripe.Subscription, "modify",
+                        lambda sub_id, **kw: seen.update(kw) or _obj(id=sub_id))
+    out = billing.move_org_subscription_to_price("org_1")
+    assert out["repriced"] is True
+    assert seen["items"][0]["quantity"] == 3
 
 
 def test_no_stripe_call_when_already_on_the_price(org_on_list_price, monkeypatch):
     monkeypatch.setattr(stripe.Subscription, "retrieve",
-                        lambda *a, **k: _sub(price_id="price_partner"))
+                        lambda *a, **k: _sub(price_id="price_partner", qty=1))
 
     def _boom(*a, **k):
         raise AssertionError("must not modify a subscription that is already correct")
@@ -93,7 +129,7 @@ def test_group_without_a_subscription_is_a_clean_noop(monkeypatch):
                                     "stripe_subscription_id": ""})
     out = billing.move_org_subscription_to_price("org_2")
     assert out == {"repriced": False, "reason": "no_subscription",
-                   "from_price": None, "to_price": None}
+                   "from_price": None, "to_price": None, "quantity": None}
 
 
 def test_clearing_the_override_moves_them_back_to_list(monkeypatch):
@@ -103,6 +139,7 @@ def test_clearing_the_override_moves_them_back_to_list(monkeypatch):
     monkeypatch.setattr(billing.runtime, "USE_DB", True, raising=False)
     monkeypatch.setattr(billing.database, "db_org_get_by_id", lambda _i: org)
     monkeypatch.setattr(billing, "_stripe_price_id", lambda plan: "price_list")
+    monkeypatch.setattr(billing.database, "db_org_store_count", lambda _i: 1)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
     monkeypatch.setattr(stripe.Subscription, "retrieve",
                         lambda *a, **k: _sub(price_id="price_partner"))
@@ -111,7 +148,7 @@ def test_clearing_the_override_moves_them_back_to_list(monkeypatch):
                         lambda sub_id, **kw: seen.update(kw) or _obj(id=sub_id))
     out = billing.move_org_subscription_to_price("org_3")
     assert out["repriced"] is True
-    assert seen["items"] == [{"id": "si_1", "price": "price_list"}]
+    assert seen["items"] == [{"id": "si_1", "price": "price_list", "quantity": 1}]
 
 
 def test_stripe_failure_is_reported_not_raised(org_on_list_price, monkeypatch):
