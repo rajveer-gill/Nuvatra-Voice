@@ -46,6 +46,11 @@ class OrgPriceOverridesUpdate(BaseModel):
     pro: Optional[str] = None
 
 
+class OrgPartnerDiscountUpdate(BaseModel):
+    """Dollars off each store, per month. 0 clears the rate."""
+    amount_off_per_store: float = Field(..., ge=0, le=100000)
+
+
 class AccountPausedUpdate(BaseModel):
     paused: bool
 
@@ -446,6 +451,64 @@ def admin_create_org(req: AdminOrgCreate, request: Request, admin: str = Depends
         resource_id=org["id"], details={"name": org["name"]}, request=request,
     )
     return org
+
+
+@router.patch("/api/admin/orgs/{org_id}/partner-discount")
+def admin_org_partner_discount(
+    org_id: str,
+    req: OrgPartnerDiscountUpdate,
+    request: Request,
+    admin_user_id: str = Depends(deps.require_admin),
+):
+    """Give a group a flat amount off every store, on every plan.
+
+    The discount has to be a price rather than a coupon — a group is one subscription
+    with quantity = store count, so a coupon's amount_off would come off the invoice
+    once instead of off each store. This does the translation: read each standard
+    price, subtract, reuse or create the matching Stripe price, and store the ids.
+
+    Only affects the NEXT checkout; Stripe treats an existing subscription item's
+    price as immutable.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    org = database.db_org_get_by_id(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Group not found")
+    from routers import billing as billing_router
+
+    cents = int(round(float(req.amount_off_per_store) * 100))
+    if cents <= 0:
+        database.db_org_set_price_overrides(org_id, None)
+        deps.audit_log(
+            "admin", "org_partner_discount", actor_id=admin_user_id,
+            resource_type="org", resource_id=org_id,
+            details={"amount_off_per_store": 0, "cleared": True}, request=request,
+        )
+        return {"success": True, "cleared": True, "price_overrides": {}}
+
+    built = billing_router.build_partner_prices(cents)
+    errors = built.pop("_errors", [])
+    if not built:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not create the discounted prices: " + "; ".join(errors or ["unknown error"]),
+        )
+    if not database.db_org_set_price_overrides(org_id, built):
+        raise HTTPException(status_code=500, detail="Prices created but could not be saved")
+    deps.audit_log(
+        "admin", "org_partner_discount", actor_id=admin_user_id,
+        resource_type="org", resource_id=org_id,
+        details={"amount_off_per_store": req.amount_off_per_store, "price_overrides": built},
+        request=request,
+    )
+    return {
+        "success": True,
+        "amount_off_per_store": req.amount_off_per_store,
+        "price_overrides": built,
+        # Named plans that could not be priced, rather than a silent partial success.
+        "errors": errors,
+    }
 
 
 @router.patch("/api/admin/orgs/{org_id}/price-overrides")

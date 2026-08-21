@@ -217,6 +217,8 @@ function OrgCard({
     pro: org.price_overrides?.pro || '',
   }))
   const [savingPrices, setSavingPrices] = useState(false)
+  const [discount, setDiscount] = useState('')
+  const [applyingDiscount, setApplyingDiscount] = useState(false)
   const [priceNote, setPriceNote] = useState<string | null>(null)
   const [memberRole, setMemberRole] = useState<'manager' | 'viewer'>('manager')
 
@@ -254,6 +256,41 @@ function OrgCard({
       await api.delete(`/api/admin/orgs/${org.id}/stores/${tenantId}`, adminApi)
       onSuccess('Store removed from group.')
     })
+
+  /** The everyday path: type a dollar amount, let the server work out the prices.
+   *  Pasting three Stripe price IDs by hand is three chances to paste a product id
+   *  where a price belongs. */
+  const applyDiscount = async (clear = false) => {
+    setApplyingDiscount(true)
+    setPriceNote(null)
+    try {
+      const amount = clear ? 0 : parseFloat(discount)
+      if (!clear && (!Number.isFinite(amount) || amount <= 0)) {
+        setPriceNote('Enter a dollar amount, e.g. 50')
+        return
+      }
+      const { data } = await api.patch<{
+        price_overrides?: Record<string, string>
+        errors?: string[]
+        cleared?: boolean
+      }>(`/api/admin/orgs/${org.id}/partner-discount`, { amount_off_per_store: amount }, adminApi)
+      const next = data.price_overrides || {}
+      setPrices({ starter: next.starter || '', growth: next.growth || '', pro: next.pro || '' })
+      setPriceNote(
+        data.cleared
+          ? 'Cleared — back to standard pricing.'
+          : `$${amount} off each store on ${Object.keys(next).length} plan(s).` +
+            (data.errors?.length ? ` Not applied to: ${data.errors.join('; ')}` : '') +
+            ' Applies to their next checkout.'
+      )
+      if (clear) setDiscount('')
+      onChanged()
+    } catch (e) {
+      setPriceNote(detailOf(e) || 'Could not apply the discount.')
+    } finally {
+      setApplyingDiscount(false)
+    }
+  }
 
   const savePrices = async () => {
     setSavingPrices(true)
@@ -484,13 +521,48 @@ function OrgCard({
           <div className="space-y-2 rounded-xl border border-white/10 bg-zinc-950/40 p-3">
             <p className="text-xs font-medium text-zinc-300">Partner pricing</p>
             <p className="text-[11px] text-zinc-600">
-              A discounted Stripe price per plan, charged per store. Use this rather than
-              a coupon: a group is one subscription with quantity = store count, so a
-              fixed coupon comes off the invoice once instead of off each store, and a
-              percentage changes value when they change plan. Leave blank for standard
-              pricing.
+              A flat amount off every store, on every plan. This has to be a price
+              rather than a coupon: a group is one subscription with quantity = store
+              count, so a coupon would come off the invoice once instead of off each
+              store, and a percentage would change value when they change plan.
+              Applies to their next checkout.
             </p>
-            <div className="grid gap-2 sm:grid-cols-3">
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="block">
+                <span className="mb-1 block text-[11px] uppercase tracking-wide text-zinc-500">
+                  $ off each store / month
+                </span>
+                <input
+                  value={discount}
+                  onChange={(e) => setDiscount(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="50"
+                  className="w-28 rounded-lg border border-white/15 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-700 focus:border-cyan-500/50 focus:outline-none"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => void applyDiscount()}
+                disabled={applyingDiscount}
+                className="rounded-lg bg-cyan-500/15 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-50"
+              >
+                {applyingDiscount ? 'Applying…' : 'Apply to all plans'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void applyDiscount(true)}
+                disabled={applyingDiscount}
+                className="rounded-lg px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-white/5 disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+
+            <details className="group/prices">
+              <summary className="cursor-pointer list-none text-[11px] text-zinc-500 hover:text-zinc-300 [&::-webkit-details-marker]:hidden">
+                Price IDs it resolved to (advanced)
+              </summary>
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
               {(['starter', 'growth', 'pro'] as const).map((plan) => (
                 <label key={plan} className="block">
                   <span className="mb-1 block text-[11px] uppercase tracking-wide text-zinc-500">
@@ -505,6 +577,7 @@ function OrgCard({
                 </label>
               ))}
             </div>
+            </details>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"

@@ -105,6 +105,67 @@ def _org_price_id(org: dict, plan: str) -> Optional[str]:
     return _stripe_price_id(plan)
 
 
+def build_partner_prices(amount_off_cents: int) -> dict:
+    """Find or create prices that are `amount_off_cents` below each standard plan.
+
+    The admin should be able to say "$50 off per store" and be done. Turning that into
+    Stripe price IDs by hand means reading three prices, doing three subtractions and
+    pasting three ids — three chances to paste a product where a price goes.
+
+    Reuses an existing price with the same product, amount, currency and interval
+    rather than creating a second identical one, because a duplicate price is
+    invisible in the dashboard until you are looking at two of them.
+
+    Returns {plan: price_id, ...} plus a "_errors" key naming any plan it could not
+    price, so the caller can report a partial result instead of implying success.
+    """
+    out: dict = {}
+    errors: list = []
+    if not (STRIPE_AVAILABLE and stripe):
+        return {"_errors": ["Stripe library not available"]}
+    stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not stripe.api_key:
+        return {"_errors": ["STRIPE_SECRET_KEY is not set"]}
+    for plan in ("starter", "growth", "pro"):
+        base_id = _stripe_price_id(plan)
+        if not base_id:
+            continue  # plan not configured at all; nothing to discount
+        try:
+            base = stripe.Price.retrieve(base_id)
+            unit = int(base.get("unit_amount") or 0) - amount_off_cents
+            if unit <= 0:
+                errors.append(f"{plan}: discount is not smaller than the price")
+                continue
+            currency = base.get("currency")
+            interval = ((base.get("recurring") or {}).get("interval")) or "month"
+            product = base.get("product")
+            found = None
+            for p in stripe.Price.list(product=product, active=True, limit=100).get("data", []):
+                if (
+                    int(p.get("unit_amount") or -1) == unit
+                    and p.get("currency") == currency
+                    and ((p.get("recurring") or {}).get("interval")) == interval
+                ):
+                    found = p.get("id")
+                    break
+            if not found:
+                created = stripe.Price.create(
+                    product=product,
+                    unit_amount=unit,
+                    currency=currency,
+                    recurring={"interval": interval},
+                    nickname=f"Partner rate — {amount_off_cents / 100:.0f} off {plan}",
+                )
+                found = created.get("id")
+            out[plan] = found
+        except Exception as e:
+            logger.warning("partner_price_failed plan=%s err=%s", plan, type(e).__name__)
+            errors.append(f"{plan}: {type(e).__name__}")
+    if errors:
+        out["_errors"] = errors
+    return out
+
+
 def _subscription_status_and_trial(sub_id: Optional[str]):
     """Read a Stripe subscription's real status + trial end so the tenant mirrors it.
 
