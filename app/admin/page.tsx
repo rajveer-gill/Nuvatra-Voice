@@ -9,7 +9,7 @@ import { useApiClient, sameOriginApiConfig, setSelectedStoreId } from '@/lib/api
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
-import { OrgsPanel } from '@/components/admin/OrgsPanel'
+import { OrgCard, type Org } from '@/components/admin/OrgsPanel'
 import { ReferralsPanel } from '@/components/admin/ReferralsPanel'
 import { SystemHealthPanel } from '@/components/admin/SystemHealthPanel'
 import { AuditLog } from '@/components/admin/AuditLog'
@@ -152,6 +152,13 @@ export default function AdminPage() {
   const [emailLookupLoading, setEmailLookupLoading] = useState(false)
   const [opsCheck, setOpsCheck] = useState<OpsSelfCheck | null>(null)
   const [opsCheckLoading, setOpsCheckLoading] = useState(false)
+  // Groups own the billing and the stores, so the tenant list is organised around
+  // them: pick a group, then work inside it. Previously group settings lived in one
+  // panel and its stores in another, which meant two places for one customer.
+  const [orgs, setOrgs] = useState<Org[]>([])
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null)
+  const [newOrgName, setNewOrgName] = useState('')
+  const [creatingOrg, setCreatingOrg] = useState(false)
 
   const listContainer = {
     hidden: {},
@@ -167,6 +174,32 @@ export default function AdminPage() {
       y: 0,
       transition: { duration: reduceMotion ? 0 : 0.35, ease: [0.22, 1, 0.36, 1] },
     },
+  }
+
+  const fetchOrgs = useCallback(async () => {
+    try {
+      const res = await api.get<{ orgs: Org[] }>('/api/admin/orgs', adminApi)
+      setOrgs(res.data.orgs || [])
+    } catch {
+      setOrgs([])
+    }
+  }, [api, adminApi])
+
+  const createOrg = async () => {
+    const name = newOrgName.trim()
+    if (!name) return
+    setCreatingOrg(true)
+    try {
+      await api.post('/api/admin/orgs', { name }, adminApi)
+      setNewOrgName('')
+      await fetchOrgs()
+      setSuccess(`Group "${name}" created.`)
+    } catch (e) {
+      const d = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(d || 'Could not create the group.')
+    } finally {
+      setCreatingOrg(false)
+    }
   }
 
   const fetchTenants = useCallback(async () => {
@@ -250,8 +283,9 @@ export default function AdminPage() {
   useEffect(() => {
     if (adminAllowed !== true) return
     fetchTenants()
+    void fetchOrgs()
     void fetchOpsCheck()
-  }, [adminAllowed, fetchTenants, fetchOpsCheck])
+  }, [adminAllowed, fetchTenants, fetchOrgs, fetchOpsCheck])
 
   useEffect(() => {
     setTwilioDraft((prev) => {
@@ -742,7 +776,6 @@ export default function AdminPage() {
 
           <ProvisioningPanel />
 
-          <OrgsPanel />
 
           <ReferralsPanel />
 
@@ -921,23 +954,90 @@ export default function AdminPage() {
                 initial={reduceMotion ? false : 'hidden'}
                 animate="visible"
               >
-                {groupTenants(filteredTenants).map((group) => (
+                {groupTenants(filteredTenants).map((group) => {
+                  const isOpen = selectedOrgId === group.key
+                  // Collapsed to one clickable line per customer. A franchise is one
+                  // thing to work on, not N rows that happen to share a name.
+                  if (selectedOrgId && !isOpen) return null
+                  return (
                 <li key={group.key} className="py-2 first:pt-0">
-                  {/* One heading per group. A franchise reads as a customer rather than
-                      as N unrelated rows that happen to share a name prefix. */}
-                  <div className="sticky top-0 z-10 -mx-1 mb-1 flex items-baseline gap-2 bg-zinc-900/95 px-1 py-2 backdrop-blur">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOrgId(isOpen ? null : group.key)}
+                    className="-mx-1 mb-1 flex w-[calc(100%+0.5rem)] items-center gap-2 rounded-lg px-1 py-2 text-left motion-safe-transition hover:bg-white/5"
+                  >
+                    <ChevronDown
+                      className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${isOpen ? 'rotate-180' : '-rotate-90'}`}
+                      aria-hidden
+                    />
                     <h3 className="text-sm font-semibold text-zinc-200">{group.name}</h3>
                     <span className="text-xs text-zinc-500">
                       {group.rows.length} {group.rows.length === 1 ? 'store' : 'stores'}
                     </span>
-                  </div>
-                  <ul className="divide-y divide-white/10">
-                {group.rows.map((t) => (
-                  <TenantRow key={t.id} t={t} ctx={rowCtx} />
-                ))}
-                  </ul>
+                  </button>
+                  {isOpen && (
+                    <>
+                      {/* Group settings live here, next to the group's stores, rather
+                          than in a separate panel elsewhere on the page. */}
+                      {(() => {
+                        const org = orgs.find((o) => o.id === group.key)
+                        return org ? (
+                          <div className="mb-3">
+                            <OrgCard
+                              org={org}
+                              tenants={tenants.map((t) => ({ id: t.id, client_id: t.client_id, name: t.name }))}
+                              attachedClientIds={new Set(tenants.filter((t) => t.org_id).map((t) => t.client_id))}
+                              api={api}
+                              adminApi={adminApi}
+                              onChanged={async () => {
+                                await fetchOrgs()
+                                await fetchTenants()
+                              }}
+                              onError={setError}
+                              onSuccess={setSuccess}
+                            />
+                          </div>
+                        ) : null
+                      })()}
+                      <ul className="divide-y divide-white/10">
+                        {group.rows.map((t) => (
+                          <TenantRow key={t.id} t={t} ctx={rowCtx} />
+                        ))}
+                      </ul>
+                    </>
+                  )}
                 </li>
-                ))}
+                  )
+                })}
+                {selectedOrgId && (
+                  <li className="pt-3">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedOrgId(null)}
+                      className="text-xs text-zinc-400 hover:text-zinc-200"
+                    >
+                      ← All groups
+                    </button>
+                  </li>
+                )}
+                {!selectedOrgId && (
+                  <li className="flex flex-wrap items-center gap-2 pt-4">
+                    <input
+                      value={newOrgName}
+                      onChange={(e) => setNewOrgName(e.target.value)}
+                      placeholder="New group name"
+                      className="min-w-[12rem] flex-1 rounded-lg border border-white/15 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-cyan-500/50 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void createOrg()}
+                      disabled={creatingOrg || !newOrgName.trim()}
+                      className="rounded-lg bg-white/10 px-3 py-2 text-sm text-zinc-200 hover:bg-white/15 disabled:opacity-50"
+                    >
+                      {creatingOrg ? 'Creating…' : 'New group'}
+                    </button>
+                  </li>
+                )}
               </motion.ul>
             )}
           </section>

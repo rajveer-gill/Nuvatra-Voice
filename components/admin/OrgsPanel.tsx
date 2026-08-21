@@ -28,7 +28,7 @@ interface OrgInvite {
   role: string
 }
 
-interface Org {
+export interface Org {
   id: string
   name: string
   created_at?: string | null
@@ -185,7 +185,7 @@ export function OrgsPanel() {
   )
 }
 
-function OrgCard({
+export function OrgCard({
   org,
   tenants,
   attachedClientIds,
