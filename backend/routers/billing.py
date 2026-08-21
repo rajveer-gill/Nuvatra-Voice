@@ -181,6 +181,11 @@ def build_partner_prices(amount_off_cents: int) -> dict:
                     nickname=f"Partner rate — {amount_off_cents / 100:.0f} off {plan}",
                 ))
                 found = created.get("id")
+                logger.info(
+                    "partner_price_created plan=%s price=%s unit=%s", plan, found, unit
+                )
+            else:
+                logger.info("partner_price_reused plan=%s price=%s unit=%s", plan, found, unit)
             out[plan] = found
         except Exception as e:
             logger.warning(
@@ -405,19 +410,118 @@ def create_portal_session(tenant: Optional[dict] = Depends(deps.require_tenant))
 # ---------- Org billing: one subscription, quantity = number of stores ----------
 
 
-def _org_subscription_item(sub_id: str):
-    """The subscription's first line item — the thing whose quantity is the store
-    count. Returns (item_id, quantity) or (None, None)."""
+def _org_subscription_line(sub_id: str) -> dict:
+    """The subscription's first line item: {item_id, quantity, price_id}.
+
+    Empty dict if it cannot be read. The price id matters because a group put on a
+    partner rate after it subscribed is still pointing at the price it signed up on.
+    """
     try:
         sub = stripe.Subscription.retrieve(sub_id)
         items = _plain(getattr(sub, "items", None) or {}).get("data") or []
         if items:
-            return items[0].get("id"), items[0].get("quantity")
+            it = items[0]
+            return {
+                "item_id": it.get("id"),
+                "quantity": it.get("quantity"),
+                "price_id": (it.get("price") or {}).get("id"),
+            }
     except Exception as e:
         logger.warning(
             "org_sub_item_lookup_failed sub=%s err=%s: %s", sub_id, type(e).__name__, e
         )
-    return None, None
+    return {}
+
+
+def _org_subscription_item(sub_id: str):
+    """The subscription's first line item — the thing whose quantity is the store
+    count. Returns (item_id, quantity) or (None, None)."""
+    line = _org_subscription_line(sub_id)
+    return line.get("item_id"), line.get("quantity")
+
+
+def move_org_subscription_to_price(org_id: str) -> dict:
+    """Point an existing subscription at the group's current (possibly partner) price.
+
+    Without this, a partner rate only ever reaches groups that had not subscribed
+    yet: the admin types "$50 off each store", the prices are created, the override
+    is saved — and the group keeps paying list price forever, because nothing moves
+    the subscription onto the new price. Adding stores makes it worse rather than
+    better, since each one bumps quantity on the undiscounted price.
+
+    The reason this was not done before is a misreading worth naming: a Stripe Price
+    is immutable, but which price a subscription ITEM points at is not. Repricing is
+    an ordinary Subscription.modify.
+
+    proration_behavior="none" is deliberate. The discount takes effect from the next
+    invoice; it does not retroactively credit the part of the period already paid.
+    Anything else would hand out refunds nobody authorised as a side effect of an
+    admin typing a number.
+    """
+    out = {"repriced": False, "reason": None, "from_price": None, "to_price": None}
+    if not (STRIPE_AVAILABLE and stripe) or not runtime.USE_DB:
+        out["reason"] = "billing_unavailable"
+        return out
+    org = database.db_org_get_by_id(org_id)
+    if not org:
+        out["reason"] = "org_not_found"
+        return out
+    sub_id = (org.get("stripe_subscription_id") or "").strip()
+    if not sub_id:
+        # Not paying yet. Checkout will read the override, so there is nothing to fix.
+        out["reason"] = "no_subscription"
+        return out
+    plan = (org.get("plan") or "").strip().lower() or "starter"
+    target = _org_price_id(org, plan)
+    if not target:
+        out["reason"] = "no_price_for_plan"
+        logger.warning("org_reprice_skipped org=%s plan=%s reason=no_price", org_id, plan)
+        return out
+    try:
+        stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        line = _org_subscription_line(sub_id)
+        item_id = line.get("item_id")
+        current = line.get("price_id")
+        out["from_price"] = current
+        out["to_price"] = target
+        if not item_id:
+            out["reason"] = "no_subscription_item"
+            logger.warning("org_reprice_skipped org=%s sub=%s reason=no_item", org_id, sub_id)
+            return out
+        if current == target:
+            out["reason"] = "already_on_price"
+            logger.info(
+                "org_reprice_noop org=%s sub=%s plan=%s price=%s", org_id, sub_id, plan, target
+            )
+            return out
+        stripe.Subscription.modify(
+            sub_id,
+            items=[{"id": item_id, "price": target}],
+            proration_behavior="none",
+        )
+        out["repriced"] = True
+        logger.info(
+            "org_repriced org=%s sub=%s plan=%s from=%s to=%s qty=%s proration=none",
+            org_id, sub_id, plan, current, target, line.get("quantity"),
+        )
+        return out
+    except Exception as e:
+        out["reason"] = f"{type(e).__name__}: {e}"
+        logger.error(
+            "org_reprice_failed org=%s sub=%s plan=%s target=%s err=%s: %s",
+            org_id, sub_id, plan, target, type(e).__name__, e,
+        )
+        try:
+            import alerts
+
+            alerts.notify_failure(
+                "billing", "org_reprice_failed", org_id,
+                f"Org {org_id} kept its old price after a partner rate was applied",
+                payload={"error": str(e), "target_price": target},
+            )
+        except Exception:
+            pass
+        return out
 
 
 def sync_org_subscription_quantity(org_id: str) -> dict:

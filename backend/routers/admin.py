@@ -467,8 +467,10 @@ def admin_org_partner_discount(
     once instead of off each store. This does the translation: read each standard
     price, subtract, reuse or create the matching Stripe price, and store the ids.
 
-    Only affects the NEXT checkout; Stripe treats an existing subscription item's
-    price as immutable.
+    A group that already subscribed is repriced too. A Stripe Price is immutable,
+    but which price a subscription ITEM points at is not — without that step the
+    discount silently never reaches anyone who signed up before it was configured,
+    and every store they add afterwards bumps quantity on the undiscounted price.
     """
     if not runtime.USE_DB:
         raise HTTPException(status_code=503, detail="Database required")
@@ -480,12 +482,18 @@ def admin_org_partner_discount(
     cents = int(round(float(req.amount_off_per_store) * 100))
     if cents <= 0:
         database.db_org_set_price_overrides(org_id, None)
+        # Symmetry matters: if applying a rate moves the subscription, clearing it has
+        # to move them back, or "cleared" would leave them on the partner price.
+        moved = billing_router.move_org_subscription_to_price(org_id)
         deps.audit_log(
             "admin", "org_partner_discount", actor_id=admin_user_id,
             resource_type="org", resource_id=org_id,
-            details={"amount_off_per_store": 0, "cleared": True}, request=request,
+            details={"amount_off_per_store": 0, "cleared": True, "subscription": moved},
+            request=request,
         )
-        return {"success": True, "cleared": True, "price_overrides": {}}
+        return {
+            "success": True, "cleared": True, "price_overrides": {}, "subscription": moved,
+        }
 
     built = billing_router.build_partner_prices(cents)
     errors = built.pop("_errors", [])
@@ -496,10 +504,18 @@ def admin_org_partner_discount(
         )
     if not database.db_org_set_price_overrides(org_id, built):
         raise HTTPException(status_code=500, detail="Prices created but could not be saved")
+    # Reprice an existing subscription. Best-effort and reported, never fatal: the
+    # override is already saved, so a Stripe hiccup here must not read as "the
+    # discount did not save" when it did.
+    moved = billing_router.move_org_subscription_to_price(org_id)
     deps.audit_log(
         "admin", "org_partner_discount", actor_id=admin_user_id,
         resource_type="org", resource_id=org_id,
-        details={"amount_off_per_store": req.amount_off_per_store, "price_overrides": built},
+        details={
+            "amount_off_per_store": req.amount_off_per_store,
+            "price_overrides": built,
+            "subscription": moved,
+        },
         request=request,
     )
     return {
@@ -508,6 +524,9 @@ def admin_org_partner_discount(
         "price_overrides": built,
         # Named plans that could not be priced, rather than a silent partial success.
         "errors": errors,
+        # What happened to a subscription they already had, so the UI can say so
+        # instead of implying every group is now paying the new rate.
+        "subscription": moved,
     }
 
 

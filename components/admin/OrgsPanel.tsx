@@ -217,6 +217,10 @@ export function OrgCard({
     pro: org.price_overrides?.pro || '',
   }))
   const [savingPrices, setSavingPrices] = useState(false)
+  const activePlans = Object.entries(prices)
+    .filter(([, v]) => (v || '').startsWith('price_'))
+    .map(([k]) => k)
+  const hasPartnerRate = activePlans.length > 0
   const [discount, setDiscount] = useState('')
   const [applyingDiscount, setApplyingDiscount] = useState(false)
   const [priceNote, setPriceNote] = useState<string | null>(null)
@@ -273,15 +277,27 @@ export function OrgCard({
         price_overrides?: Record<string, string>
         errors?: string[]
         cleared?: boolean
+        subscription?: { repriced?: boolean; reason?: string | null }
       }>(`/api/admin/orgs/${org.id}/partner-discount`, { amount_off_per_store: amount }, adminApi)
       const next = data.price_overrides || {}
       setPrices({ starter: next.starter || '', growth: next.growth || '', pro: next.pro || '' })
+      // Say what happened to a subscription they already had. "Applied" used to be
+      // reported for groups that went on paying list price, because nothing moved
+      // the existing subscription onto the new price.
+      const sub = data.subscription || {}
+      const subNote = sub.repriced
+        ? ' Their current subscription now bills at this rate from the next invoice.'
+        : sub.reason === 'no_subscription'
+          ? ' They have not checked out yet, so it applies when they do.'
+          : sub.reason === 'already_on_price'
+            ? ' Their subscription was already on this rate.'
+            : ` Their existing subscription was NOT repriced (${sub.reason || 'unknown'}).`
       setPriceNote(
         data.cleared
-          ? 'Cleared — back to standard pricing.'
+          ? 'Cleared — back to standard pricing.' + subNote
           : `$${amount} off each store on ${Object.keys(next).length} plan(s).` +
             (data.errors?.length ? ` Not applied to: ${data.errors.join('; ')}` : '') +
-            ' Applies to their next checkout.'
+            subNote
       )
       if (clear) setDiscount('')
       onChanged()
@@ -525,7 +541,18 @@ export function OrgCard({
               rather than a coupon: a group is one subscription with quantity = store
               count, so a coupon would come off the invoice once instead of off each
               store, and a percentage would change value when they change plan.
-              Applies to their next checkout.
+              A group that has already checked out is moved onto the new price too,
+              effective from their next invoice.
+            </p>
+            <p className="mb-2 text-[11px] text-zinc-400">
+              {hasPartnerRate ? (
+                <span className="text-cyan-300">
+                  Partner rate active on: {activePlans.join(', ')}. The box below is for
+                  changing it — it starts empty, it is not a readout.
+                </span>
+              ) : (
+                <span>No partner rate — this group pays list price.</span>
+              )}
             </p>
             <div className="flex flex-wrap items-end gap-2">
               <label className="block">
@@ -536,7 +563,7 @@ export function OrgCard({
                   value={discount}
                   onChange={(e) => setDiscount(e.target.value)}
                   inputMode="decimal"
-                  placeholder="50"
+                  placeholder="e.g. 50"
                   className="w-28 rounded-lg border border-white/15 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-700 focus:border-cyan-500/50 focus:outline-none"
                 />
               </label>
