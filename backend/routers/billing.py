@@ -105,6 +105,29 @@ def _org_price_id(org: dict, plan: str) -> Optional[str]:
     return _stripe_price_id(plan)
 
 
+def _plain(obj):
+    """A Stripe API response as plain nested dicts.
+
+    The SDK's objects used to subclass dict, so `.get()` worked on anything an API
+    call returned. Current versions (we build on 15) do not, and `.get()` raises
+    AttributeError. requirements.txt asked for `stripe>=8.0.0` with no ceiling, so a
+    routine rebuild moved us across that line and every `.get()` on a Stripe response
+    started failing — quietly, because both call sites caught Exception and logged
+    only the type name.
+
+    Normalising at the boundary keeps the call sites readable and works on either
+    side of the change, so this does not become a flag day if the pin moves again.
+    """
+    if isinstance(obj, dict):
+        return {k: _plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_plain(v) for v in obj]
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        return _plain(to_dict())
+    return obj
+
+
 def build_partner_prices(amount_off_cents: int) -> dict:
     """Find or create prices that are `amount_off_cents` below each standard plan.
 
@@ -131,7 +154,7 @@ def build_partner_prices(amount_off_cents: int) -> dict:
         if not base_id:
             continue  # plan not configured at all; nothing to discount
         try:
-            base = stripe.Price.retrieve(base_id)
+            base = _plain(stripe.Price.retrieve(base_id))
             unit = int(base.get("unit_amount") or 0) - amount_off_cents
             if unit <= 0:
                 errors.append(f"{plan}: discount is not smaller than the price")
@@ -140,7 +163,8 @@ def build_partner_prices(amount_off_cents: int) -> dict:
             interval = ((base.get("recurring") or {}).get("interval")) or "month"
             product = base.get("product")
             found = None
-            for p in stripe.Price.list(product=product, active=True, limit=100).get("data", []):
+            listed = _plain(stripe.Price.list(product=product, active=True, limit=100))
+            for p in listed.get("data", []):
                 if (
                     int(p.get("unit_amount") or -1) == unit
                     and p.get("currency") == currency
@@ -149,17 +173,19 @@ def build_partner_prices(amount_off_cents: int) -> dict:
                     found = p.get("id")
                     break
             if not found:
-                created = stripe.Price.create(
+                created = _plain(stripe.Price.create(
                     product=product,
                     unit_amount=unit,
                     currency=currency,
                     recurring={"interval": interval},
                     nickname=f"Partner rate — {amount_off_cents / 100:.0f} off {plan}",
-                )
+                ))
                 found = created.get("id")
             out[plan] = found
         except Exception as e:
-            logger.warning("partner_price_failed plan=%s err=%s", plan, type(e).__name__)
+            logger.warning(
+                "partner_price_failed plan=%s err=%s: %s", plan, type(e).__name__, e
+            )
             errors.append(f"{plan}: {type(e).__name__}")
     if errors:
         out["_errors"] = errors
@@ -384,11 +410,13 @@ def _org_subscription_item(sub_id: str):
     count. Returns (item_id, quantity) or (None, None)."""
     try:
         sub = stripe.Subscription.retrieve(sub_id)
-        items = (getattr(sub, "items", None) or {}).get("data") or []
+        items = _plain(getattr(sub, "items", None) or {}).get("data") or []
         if items:
             return items[0].get("id"), items[0].get("quantity")
     except Exception as e:
-        logger.warning("org_sub_item_lookup_failed sub=%s err=%s", sub_id, type(e).__name__)
+        logger.warning(
+            "org_sub_item_lookup_failed sub=%s err=%s: %s", sub_id, type(e).__name__, e
+        )
     return None, None
 
 
