@@ -9,13 +9,13 @@ import { useApiClient, sameOriginApiConfig, setSelectedStoreId } from '@/lib/api
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
-import { OrgCard, type Org } from '@/components/admin/OrgsPanel'
+import { type Org } from '@/components/admin/OrgsPanel'
 import { ReferralsPanel } from '@/components/admin/ReferralsPanel'
 import { SystemHealthPanel } from '@/components/admin/SystemHealthPanel'
 import { AuditLog } from '@/components/admin/AuditLog'
 import { FleetHealthSummary } from '@/components/admin/FleetHealthSummary'
 import { CollapsibleSection } from '@/components/ui/CollapsibleSection'
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import { TenantRow, accessStatusLabel, accessStatusClass } from '@/components/admin/TenantRow'
 import {
   US_E164_PREFIX,
@@ -156,7 +156,6 @@ export default function AdminPage() {
   // them: pick a group, then work inside it. Previously group settings lived in one
   // panel and its stores in another, which meant two places for one customer.
   const [orgs, setOrgs] = useState<Org[]>([])
-  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null)
   const [newOrgName, setNewOrgName] = useState('')
   const [creatingOrg, setCreatingOrg] = useState(false)
 
@@ -955,89 +954,59 @@ export default function AdminPage() {
                 animate="visible"
               >
                 {groupTenants(filteredTenants).map((group) => {
-                  const isOpen = selectedOrgId === group.key
-                  // Collapsed to one clickable line per customer. A franchise is one
-                  // thing to work on, not N rows that happen to share a name.
-                  if (selectedOrgId && !isOpen) return null
-                  return (
-                <li key={group.key} className="py-2 first:pt-0">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedOrgId(isOpen ? null : group.key)}
-                    className="-mx-1 mb-1 flex w-[calc(100%+0.5rem)] items-center gap-2 rounded-lg px-1 py-2 text-left motion-safe-transition hover:bg-white/5"
-                  >
-                    <ChevronDown
-                      className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${isOpen ? 'rotate-180' : '-rotate-90'}`}
-                      aria-hidden
-                    />
-                    <h3 className="text-sm font-semibold text-zinc-200">{group.name}</h3>
-                    <span className="text-xs text-zinc-500">
-                      {group.rows.length} {group.rows.length === 1 ? 'store' : 'stores'}
-                    </span>
-                  </button>
-                  {isOpen && (
+                  const independent = group.key === '__independent__'
+                  const body = (
                     <>
-                      {/* Group settings live here, next to the group's stores, rather
-                          than in a separate panel elsewhere on the page. */}
-                      {(() => {
-                        const org = orgs.find((o) => o.id === group.key)
-                        return org ? (
-                          <div className="mb-3">
-                            <OrgCard
-                              org={org}
-                              tenants={tenants.map((t) => ({ id: t.id, client_id: t.client_id, name: t.name }))}
-                              attachedClientIds={new Set(tenants.filter((t) => t.org_id).map((t) => t.client_id))}
-                              api={api}
-                              adminApi={adminApi}
-                              onChanged={async () => {
-                                await fetchOrgs()
-                                await fetchTenants()
-                              }}
-                              onError={setError}
-                              onSuccess={setSuccess}
-                            />
-                          </div>
-                        ) : null
-                      })()}
-                      <ul className="divide-y divide-white/10">
-                        {group.rows.map((t) => (
-                          <TenantRow key={t.id} t={t} ctx={rowCtx} />
-                        ))}
-                      </ul>
+                      <span className="text-sm font-semibold text-zinc-200">{group.name}</span>
+                      <span className="text-xs text-zinc-500">
+                        {group.rows.length} {group.rows.length === 1 ? 'store' : 'stores'}
+                      </span>
                     </>
-                  )}
-                </li>
+                  )
+                  return (
+                    <li key={group.key} className="py-1">
+                      {independent ? (
+                        // Stores with no group have nowhere to drill into; list them
+                        // here rather than inventing a page for the absence of a group.
+                        <details className="group/loose">
+                          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-1 py-2 hover:bg-white/5 [&::-webkit-details-marker]:hidden">
+                            <ChevronDown className="h-4 w-4 shrink-0 text-zinc-500 transition-transform group-open/loose:rotate-180 -rotate-90" aria-hidden />
+                            {body}
+                          </summary>
+                          <ul className="divide-y divide-white/10 pl-1">
+                            {group.rows.map((t) => (
+                              <TenantRow key={t.id} t={t} ctx={rowCtx} />
+                            ))}
+                          </ul>
+                        </details>
+                      ) : (
+                        <Link
+                          href={`/admin/orgs/${group.key}`}
+                          className="flex items-center gap-2 rounded-lg px-1 py-2 motion-safe-transition hover:bg-white/5"
+                        >
+                          {body}
+                          <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-zinc-600" aria-hidden />
+                        </Link>
+                      )}
+                    </li>
                   )
                 })}
-                {selectedOrgId && (
-                  <li className="pt-3">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedOrgId(null)}
-                      className="text-xs text-zinc-400 hover:text-zinc-200"
-                    >
-                      ← All groups
-                    </button>
-                  </li>
-                )}
-                {!selectedOrgId && (
-                  <li className="flex flex-wrap items-center gap-2 pt-4">
-                    <input
-                      value={newOrgName}
-                      onChange={(e) => setNewOrgName(e.target.value)}
-                      placeholder="New group name"
-                      className="min-w-[12rem] flex-1 rounded-lg border border-white/15 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-cyan-500/50 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void createOrg()}
-                      disabled={creatingOrg || !newOrgName.trim()}
-                      className="rounded-lg bg-white/10 px-3 py-2 text-sm text-zinc-200 hover:bg-white/15 disabled:opacity-50"
-                    >
-                      {creatingOrg ? 'Creating…' : 'New group'}
-                    </button>
-                  </li>
-                )}
+                <li className="flex flex-wrap items-center gap-2 pt-4">
+                  <input
+                    value={newOrgName}
+                    onChange={(e) => setNewOrgName(e.target.value)}
+                    placeholder="New group name"
+                    className="min-w-[12rem] flex-1 rounded-lg border border-white/15 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-cyan-500/50 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void createOrg()}
+                    disabled={creatingOrg || !newOrgName.trim()}
+                    className="rounded-lg bg-white/10 px-3 py-2 text-sm text-zinc-200 hover:bg-white/15 disabled:opacity-50"
+                  >
+                    {creatingOrg ? 'Creating…' : 'New group'}
+                  </button>
+                </li>
               </motion.ul>
             )}
           </section>
