@@ -107,7 +107,10 @@ export function useTenantAdmin({
         response?: { status?: number; data?: { detail?: string } }
         message?: string
       }
-      setTenants([])
+      // Deliberately NOT clearing the list. This runs on every refresh after a
+      // save, so wiping it turned a transient hiccup into "0 stores" on a group
+      // that has two — which reads as data loss at the exact moment someone just
+      // changed that group's billing. Keep the last good data and show the error.
       if (err.response?.status === 403) {
         setError('Admin access required. Add your Clerk user ID to ADMIN_CLERK_USER_IDS on the backend.')
       } else if (err.response?.status === 401) {

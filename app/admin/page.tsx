@@ -180,7 +180,10 @@ export default function AdminPage() {
       const res = await api.get<{ orgs: Org[] }>('/api/admin/orgs', adminApi)
       setOrgs(res.data.orgs || [])
     } catch {
-      setOrgs([])
+      // A failed REFRESH must not erase data already on screen — that reads as
+      // deletion right after someone saved. Fall back to empty only if we never
+      // had anything, so a failed first load still resolves out of "Loading…".
+      setOrgs((prev) => (prev.length ? prev : []))
     }
   }, [api, adminApi])
 
@@ -228,7 +231,7 @@ export default function AdminPage() {
         response?: { status?: number; data?: { detail?: string } }
         message?: string
       }
-      setTenants([])
+      // Same reasoning as useTenantAdmin.fetchTenants: keep the last good list.
       if (err.response?.status === 403) {
         setError('Admin access required. Add your Clerk user ID to ADMIN_CLERK_USER_IDS on the backend.')
       } else if (err.response?.status === 401) {

@@ -53,7 +53,10 @@ export default function AdminOrgPage() {
       const res = await api.get<{ orgs: Org[] }>('/api/admin/orgs', adminApi)
       setOrgs(res.data.orgs || [])
     } catch {
-      setOrgs([])
+      // A failed REFRESH must not erase data already on screen — that reads as
+      // deletion right after someone saved. Fall back to empty only if we never
+      // had anything, so a failed first load still resolves out of "Loading…".
+      setOrgs((prev) => prev ?? [])
     }
   }, [api, adminApi])
 
@@ -82,7 +85,11 @@ export default function AdminOrgPage() {
               {org?.name || (orgs === null ? 'Loading…' : 'Group not found')}
             </h1>
             <p className="mt-1 text-sm text-zinc-500">
-              {stores.length} {stores.length === 1 ? 'store' : 'stores'}
+              {/* "0 stores" is a claim. Only make it once the list has actually
+                  loaded — before that it is indistinguishable from not knowing. */}
+              {loading && !tenants.length
+                ? 'Loading stores…'
+                : `${stores.length} ${stores.length === 1 ? 'store' : 'stores'}`}
             </p>
           </div>
 

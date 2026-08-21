@@ -75,7 +75,10 @@ export function OrgsPanel() {
       setTenants(tenantsRes.data.tenants || [])
     } catch (e) {
       setError(detailOf(e) || 'Could not load groups.')
-      setOrgs([])
+      // A failed REFRESH must not erase data already on screen — that reads as
+      // deletion right after someone saved. Fall back to empty only if we never
+      // had anything, so a failed first load still resolves out of "Loading…".
+      setOrgs((prev) => prev ?? [])
     } finally {
       setLoading(false)
     }
