@@ -115,6 +115,10 @@ export function useTenantAdmin({
         setError('Admin access required. Add your Clerk user ID to ADMIN_CLERK_USER_IDS on the backend.')
       } else if (err.response?.status === 401) {
         setError('Please sign in.')
+      } else if (err.response?.status === 503) {
+        setError(
+          'Could not refresh from the database — showing the last loaded data. Nothing was changed.'
+        )
       } else {
         const detail = err.response?.data?.detail
         setError(

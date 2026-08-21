@@ -9,6 +9,7 @@ import uuid
 import contextvars
 import logging
 import threading
+import time as _time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, List, Tuple
 from pathlib import Path
@@ -34,6 +35,15 @@ def clear_request_client_id() -> None:
     except LookupError:
         pass
 
+class DatabaseUnavailable(RuntimeError):
+    """The query could not run — as distinct from running and finding nothing.
+
+    Returning [] for both is what let a pool blip render as "Group not found /
+    0 stores" on a group with two stores, at HTTP 200. Read paths that a human
+    reads a COUNT off should raise this instead.
+    """
+
+
 # Connection pool (ThreadedConnectionPool) — one borrowed conn per thread per request
 _pool = None
 _use_db = False
@@ -55,6 +65,30 @@ def _ensure_pool():
     return _pool
 
 
+# psycopg2's pool raises the moment it is empty rather than waiting, so a burst of
+# concurrent requests fails instantly instead of queueing for the connection that is
+# about to come back. A short bounded wait absorbs the burst; past it we still fail
+# rather than pile up unbounded.
+_POOL_WAIT_SECONDS = float((os.getenv("DB_POOL_WAIT_SECONDS") or "3").strip() or 3)
+
+
+def _getconn_waiting(pool):
+    """pool.getconn(), retried briefly while the pool is exhausted."""
+    deadline = _time.monotonic() + _POOL_WAIT_SECONDS
+    waited = False
+    while True:
+        try:
+            conn = pool.getconn()
+            if waited:
+                _log.info("db_pool_getconn_recovered after_wait=true")
+            return conn
+        except Exception:
+            if _time.monotonic() >= deadline:
+                raise
+            waited = True
+            _time.sleep(0.05)
+
+
 def _get_conn():
     global _use_db
     if not _use_db:
@@ -73,9 +107,13 @@ def _get_conn():
     last_err = None
     for _ in range(2):
         try:
-            conn = pool.getconn()
+            conn = _getconn_waiting(pool)
         except Exception as e:
-            _log.warning("db_pool_getconn_failed: %s", e)
+            _log.warning(
+                "db_pool_getconn_failed after %.1fs: %s | pool_max=%s in_use=%s",
+                _POOL_WAIT_SECONDS, e, getattr(pool, "maxconn", "?"),
+                len(getattr(pool, "_used", {}) or {}),
+            )
             return None
         try:
             cur = conn.cursor()
@@ -1805,10 +1843,13 @@ def db_org_store_for_user(clerk_user_id: str, store_ref: str) -> Optional[dict]:
 
 
 def db_org_list_all() -> List[dict]:
-    """Every org with its stores and overseers — the admin console view."""
+    """Every org with its stores and overseers — the admin console view.
+
+    Raises DatabaseUnavailable rather than returning [] — see that class.
+    """
     conn = _get_conn()
     if not conn:
-        return []
+        raise DatabaseUnavailable("no database connection available for db_org_list_all")
     try:
         cur = conn.cursor()
         # price_overrides comes along so the admin console can SHOW a partner rate,
@@ -1849,8 +1890,8 @@ def db_org_list_all() -> List[dict]:
         cur.close()
         return orgs
     except Exception as e:
-        print(f"[DB] Failed to list orgs: {e}")
-        return []
+        _log.error("db_org_list_all_failed err=%s: %s", type(e).__name__, e)
+        raise DatabaseUnavailable(f"could not list orgs: {type(e).__name__}") from e
 
 
 def db_org_store_metrics(client_ids: List[str], days: int = 7) -> dict:
@@ -2344,10 +2385,13 @@ def db_export_tenant_snapshot(export_root: str, *, include_audit: bool = True) -
         return None
 
 def db_tenant_list_all() -> List[dict]:
-    """List all tenants (admin only)."""
+    """List all tenants (admin only).
+
+    Raises DatabaseUnavailable rather than returning [] — see that class.
+    """
     conn = _get_conn()
     if not conn:
-        return []
+        raise DatabaseUnavailable("no database connection available for db_tenant_list_all")
     cur = conn.cursor()
     cur.execute(f"SELECT {_tenant_select_cols()} FROM tenants ORDER BY created_at DESC", ())
     rows = cur.fetchall()

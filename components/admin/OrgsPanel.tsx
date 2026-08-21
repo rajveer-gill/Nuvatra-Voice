@@ -303,7 +303,10 @@ export function OrgCard({
             subNote
       )
       if (clear) setDiscount('')
-      onChanged()
+      // Awaited, not fired and forgotten. An un-awaited refresh here overlapped the
+      // one the caller already runs, so two hit the API at once and doubled the
+      // chance of catching the pool mid-burst.
+      await onChanged()
     } catch (e) {
       setPriceNote(detailOf(e) || 'Could not apply the discount.')
     } finally {
@@ -319,10 +322,10 @@ export function OrgCard({
       const set = Object.values(prices).filter((v) => v.trim()).length
       setPriceNote(
         set
-          ? `Saved. Applies to their next checkout — an existing subscription keeps the price it was created with.`
+          ? `Saved. Use "Apply to all plans" above to also move an existing subscription onto these prices.`
           : 'Cleared — back to standard pricing.'
       )
-      onChanged()
+      await onChanged()
     } catch (e) {
       setPriceNote(detailOf(e) || 'Could not save the prices.')
     } finally {

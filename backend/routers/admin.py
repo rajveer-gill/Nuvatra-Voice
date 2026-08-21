@@ -8,6 +8,7 @@ module-qualified so monkeypatches target the owning module.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,8 @@ import config_service
 import database
 import deps
 import runtime
+
+logger = logging.getLogger("nuvatra")
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -379,7 +382,7 @@ def admin_list_tenants(_: str = Depends(deps.require_admin)):
     try:
         tenants = database.db_tenant_list_all()
     except Exception as e:
-        print(f"[Admin] database.db_tenant_list_all failed: {e}")
+        logger.error("admin_list_tenants_failed err=%s: %s", type(e).__name__, e)
         raise HTTPException(
             status_code=500, detail="Failed to load tenants from database"
         ) from e
@@ -391,7 +394,8 @@ def admin_list_tenants(_: str = Depends(deps.require_admin)):
         for o in database.db_org_list_all():
             org_names[str(o.get("id"))] = o.get("name") or ""
     except Exception as e:
-        print(f"[Admin] org name lookup failed: {e}")
+        # Cosmetic only — a store without its group name still lists correctly.
+        logger.warning("admin_org_name_lookup_failed err=%s: %s", type(e).__name__, e)
     enriched: List[dict] = []
     for t in tenants:
         t = {**t, "org_name": org_names.get(str(t.get("org_id") or "")) or None}
@@ -432,10 +436,24 @@ class AdminOrgAttach(BaseModel):
 
 @router.get("/api/admin/orgs")
 def admin_list_orgs(_: str = Depends(deps.require_admin)):
-    """Every org with its stores and overseers."""
+    """Every org with its stores and overseers.
+
+    A failure here must not answer 200 with an empty list. The console renders that
+    as "Group not found / 0 stores", which is what a pool blip looked like to
+    someone who had just changed that group's billing.
+    """
     if not runtime.USE_DB:
         return {"orgs": [], "db_enabled": False}
-    return {"orgs": database.db_org_list_all(), "db_enabled": True}
+    try:
+        orgs = database.db_org_list_all()
+    except database.DatabaseUnavailable as e:
+        logger.error("admin_list_orgs_unavailable err=%s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read groups from the database. Nothing was changed — retry in a moment.",
+        ) from e
+    logger.info("admin_list_orgs count=%s", len(orgs))
+    return {"orgs": orgs, "db_enabled": True}
 
 
 @router.post("/api/admin/orgs")

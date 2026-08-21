@@ -52,11 +52,17 @@ export default function AdminOrgPage() {
     try {
       const res = await api.get<{ orgs: Org[] }>('/api/admin/orgs', adminApi)
       setOrgs(res.data.orgs || [])
-    } catch {
+    } catch (e) {
       // A failed REFRESH must not erase data already on screen — that reads as
       // deletion right after someone saved. Fall back to empty only if we never
       // had anything, so a failed first load still resolves out of "Loading…".
       setOrgs((prev) => prev ?? [])
+      const status = (e as { response?: { status?: number } })?.response?.status
+      setError(
+        status === 503
+          ? 'Could not refresh groups from the database — showing the last loaded data. Nothing was changed.'
+          : 'Could not refresh this group. Showing the last loaded data.'
+      )
     }
   }, [api, adminApi])
 
