@@ -61,7 +61,9 @@ export default function AdminOrgPage() {
       setError(
         status === 503
           ? 'Could not refresh groups from the database — showing the last loaded data. Nothing was changed.'
-          : 'Could not refresh this group. Showing the last loaded data.'
+          : status === 504
+            ? 'The API did not respond in time — it may be waking up. Showing the last loaded data; retry in a moment.'
+            : 'Could not refresh this group. Showing the last loaded data.'
       )
     }
   }, [api, adminApi])

@@ -119,6 +119,10 @@ export function useTenantAdmin({
         setError(
           'Could not refresh from the database — showing the last loaded data. Nothing was changed.'
         )
+      } else if (err.response?.status === 504) {
+        setError(
+          'The API did not respond in time — it may be waking up. Showing the last loaded data; retry in a moment.'
+        )
       } else {
         const detail = err.response?.data?.detail
         setError(
